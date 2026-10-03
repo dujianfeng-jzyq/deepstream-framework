@@ -1,0 +1,126 @@
+// example-app 的配置与拓扑测试，不需要 DeepStream SDK。
+
+#include <fstream>
+#include <regex>
+#include <sstream>
+
+#include "config.h"
+#include "dsf/app/app.h"
+#include "dsf_test.h"
+#include "plan.h"
+
+using dsf::config::Document;
+
+namespace {
+
+// 模板中的 ${VAR} 用占位值替换，模拟渲染后的配置。
+std::string Template() {
+  std::ifstream stream(EXAMPLE_APP_TEMPLATE);
+  std::stringstream buffer;
+  buffer << stream.rdbuf();
+  std::string text = buffer.str();
+  text = std::regex_replace(text, std::regex(R"(\$\{RTSP_URL\})"), "rtsp://cam@host/stream");
+  text = std::regex_replace(text, std::regex(R"(\$\{[A-Z_]+\})"), "x");
+  return text;
+}
+
+example_app::Config Load(const std::string& text) {
+  const Document document = Document::LoadText(text, "example-app.yaml");
+  dsf::config::Reader root = document.Root();
+  (void)root.Section("logging");  // 由框架读取；这里只验证应用自己的字段
+  auto config = example_app::Load(root);
+  return config;
+}
+
+std::string Replace(std::string text, const std::string& from, const std::string& to) {
+  const auto position = text.find(from);
+  if (position == std::string::npos) throw std::runtime_error("template has no " + from);
+  return text.replace(position, from.size(), to);
+}
+
+std::string Describe(const example_app::Config& config, example_app::Plan* plan = nullptr) {
+  dsf::gst::Graph graph;
+  auto result = example_app::BuildGraph(config, graph);
+  if (plan != nullptr) *plan = result;
+  return graph.Describe();
+}
+
+const char* kSecondSource =
+    "  - id: cam2\n    type: file\n    uri: /videos/a.mp4\n\n# mux";
+
+}  // namespace
+
+TEST(template_matches_the_reader) {
+  const std::string text = Template();
+  const Document document = Document::LoadText(text, "example-app.yaml");
+  dsf::config::Reader root = document.Root();
+  (void)dsf::app::LogOptions::Read(root.Section("logging"));  // 日志段由框架读取
+  (void)example_app::Load(root);
+  root.Finish();  // 模板没有读取代码不认识的键
+  const auto declared = root.DeclaredPaths();
+  for (const auto& leaf : document.LeafPaths()) {
+    if (std::find(declared.begin(), declared.end(), leaf) == declared.end()) {
+      throw dsf_test::Failure("template field not read by the app: " + leaf);
+    }
+  }
+}
+
+TEST(single_source_shares_one_encoder) {
+  example_app::Plan plan;
+  const std::string text = Describe(Load(Template()), &plan);
+  CHECK(text.find("src0_nvmm -> mux.sink_0") != std::string::npos);
+  CHECK(text.find("mux -> pgie") != std::string::npos);
+  CHECK(text.find("pgie -> tracker") != std::string::npos);
+  CHECK(text.find("tracker -> meta") != std::string::npos);
+  CHECK(text.find("enc -> enc_tee") != std::string::npos);
+  CHECK(text.find("rtsp_out = rtspclientsink location=rtsp://mediamtx:8554/x-out") != std::string::npos);
+  CHECK(text.find("uri=***") != std::string::npos);
+  CHECK_EQ(plan.recorders.size(), 1u);
+  CHECK_EQ(plan.recorders[0].element, std::string("rec_osd_0"));
+}
+
+TEST(multiple_sources_tile_rtsp_and_record_per_source) {
+  const std::string text = Replace(Template(), "\n# mux", kSecondSource);
+  const auto config = Load(text);
+  CHECK_EQ(config.sources.size(), 2u);
+  example_app::Plan plan;
+  const std::string graph = Describe(config, &plan);
+  CHECK(graph.find("mux = nvstreammux batch-size=2") != std::string::npos);
+  CHECK(graph.find("src1_nvmm -> mux.sink_1") != std::string::npos);
+  CHECK(graph.find("tiler = nvmultistreamtiler") != std::string::npos);
+  CHECK(graph.find("demux.src_1 -> out1_queue") != std::string::npos);
+  CHECK_EQ(plan.recorders.size(), 2u);
+  CHECK_EQ(plan.recorders[1].element, std::string("rec_osd_1"));
+}
+
+TEST(raw_recording_branches_before_inference) {
+  const std::string text = Replace(Template(), "  raw: false", "  raw: true");
+  example_app::Plan plan;
+  const std::string graph = Describe(Load(text), &plan);
+  CHECK(graph.find("src0_nvmm -> src0_tee") != std::string::npos);
+  CHECK_EQ(plan.recorders.size(), 2u);
+  CHECK_EQ(plan.recorders[0].branch, std::string("raw"));
+}
+
+TEST(message_only_deployment_has_no_encoder) {
+  std::string text = Replace(Template(), "  osd: true\n\nrtsp_out:\n  enabled: true",
+                             "  osd: false\n\nrtsp_out:\n  enabled: false");
+  const std::string graph = Describe(Load(text));
+  CHECK(graph.find("meta -> sink") != std::string::npos);
+  CHECK(graph.find("nvv4l2h264enc") == std::string::npos);
+}
+
+TEST(cross_field_rules) {
+  const std::string base = Template();
+  CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",
+                            "inference: []")),
+               "tracker.enabled: requires at least one inference");
+  std::string no_output = Replace(base, "  osd: true\n\nrtsp_out:\n  enabled: true",
+                                  "  osd: false\n\nrtsp_out:\n  enabled: false");
+  no_output = Replace(no_output, "redis:\n  enabled: true", "redis:\n  enabled: false");
+  CHECK_THROWS(Load(no_output), "enable at least one output");
+  CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");
+  CHECK_THROWS(Load(Replace(base, "  codec: h264", "  codec: vp9")), "encoder.codec");
+}
+
+DSF_TEST_MAIN()

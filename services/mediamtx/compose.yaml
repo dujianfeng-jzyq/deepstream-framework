@@ -1,0 +1,9 @@
+# RTSP 汇聚：模拟相机推流进来，应用的 RTSP 输出推到这里供查看。现场可直连相机而不用它。
+services:
+  mediamtx:
+    image: ${MEDIAMTX_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "8554:8554"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro

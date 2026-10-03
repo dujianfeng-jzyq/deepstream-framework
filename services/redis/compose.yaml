@@ -1,0 +1,8 @@
+# 消息总线。Stream 是传输而不是存储：关闭 RDB/AOF 持久化。只在 Compose 网络内访问。
+services:
+  redis:
+    image: ${REDIS_IMAGE}
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - /etc/localtime:/etc/localtime:ro

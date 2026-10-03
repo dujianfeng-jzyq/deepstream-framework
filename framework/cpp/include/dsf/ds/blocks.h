@@ -1,0 +1,181 @@
+// DeepStream 块库：可复用的子图构造器。
+//
+// 每个块由一个 Spec（配置读取 + 校验）和一个 Add 函数组成：Add 把块接在 input 之后，
+// 返回块的输出元件，下一个块接在它后面。
+// 块给出经过验证的默认值，配置中的 properties: 可以覆盖或补充任意插件属性。
+// 块只引用工厂名与属性名，不包含 SDK 头文件，组图可在没有 SDK 的开发机上测试。
+//
+// 各 Spec::Read 约定的配置结构见 docs/framework.md。
+
+#ifndef DSF_DS_BLOCKS_H
+#define DSF_DS_BLOCKS_H
+
+#include <string>
+#include <vector>
+
+#include "dsf/config/config.h"
+#include "dsf/gst/graph.h"
+
+namespace dsf::ds {
+
+using config::Properties;
+using config::Reader;
+using gst::Element;
+using gst::Graph;
+
+// ---- 视频源 ----
+
+struct SourceSpec {
+  std::string id;      // 源标识：消息、录像目录与日志中使用，必须是合法路径段
+  std::string type;    // uri | rtsp | file | v4l2 | test
+  std::string uri;     // uri/rtsp/file：nvurisrcbin 的 uri；file 也可写绝对路径
+  bool live = true;    // 由 type 推导：file 与 uri(file://) 为 false
+  // rtsp
+  std::string password;  // 单独配置，注入到 uri 的用户名之后，不出现在日志与诊断中
+  int latency_ms = 200;
+  bool tcp = true;
+  int reconnect_interval_s = 5;
+  // file
+  bool loop = true;
+  // v4l2 / test
+  std::string device = "/dev/video0";
+  std::string raw_format;  // v4l2：相机输出格式，空表示由协商决定
+  int width = 0;
+  int height = 0;
+  int framerate = 0;
+  // 规范化输出尺寸；0 表示保持源尺寸
+  int output_width = 0;
+  int output_height = 0;
+  Properties properties;  // 透传给源元件（nvurisrcbin / v4l2src / videotestsrc）
+
+  static SourceSpec Read(Reader reader);
+};
+
+// 读取 sources 列表，检查 id 唯一。
+std::vector<SourceSpec> ReadSources(Reader& reader, const std::string& key = "sources");
+
+// 返回 rtsp://user:password@host/... 形式的地址；password 为空时原样返回。
+// 地址没有用户名或口令含 '@'、'/' 时抛 std::invalid_argument。
+std::string InjectPassword(const std::string& uri, const std::string& password);
+
+// 添加一路源并规范为 NVMM NV12（可选缩放）。prefix 用于元件命名（例如 "src0"）。
+Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& prefix);
+
+// ---- 批处理 ----
+
+struct MuxSpec {
+  int width = 1920;   // 输出尺寸：元数据坐标空间
+  int height = 1080;
+  int batched_push_timeout_us = 40000;
+  int gpu_id = 0;
+  Properties properties;
+
+  static MuxSpec Read(Reader reader);
+};
+
+// nvstreammux，batch-size 等于 batch。live 时设置 live-source，避免某路断流时整条管线等待。
+Element AddMux(Graph& graph, const MuxSpec& spec, int batch, bool live,
+               const std::string& name = "mux");
+
+// 第 index 路接入 mux 的 sink_<index>；index 即元数据中的 pad_index / source_id 编号。
+void LinkToMux(Graph& graph, const gst::Endpoint& from, const Element& mux, int index);
+
+// ---- 推理与分析 ----
+
+struct InferSpec {
+  std::string name;                // 元件名，也是日志与消息中的推理单元标识
+  std::string plugin = "nvinfer";  // nvinfer | nvinferserver
+  std::string config_path;
+  Properties properties;
+
+  static InferSpec Read(Reader reader);
+};
+
+std::vector<InferSpec> ReadInferences(Reader& reader, const std::string& key = "inference");
+Element AddInfer(Graph& graph, const gst::Endpoint& input, const InferSpec& spec);
+
+struct TrackerSpec {
+  bool enabled = false;
+  std::string ll_lib_file;
+  std::string ll_config_file;
+  int width = 640;
+  int height = 384;
+  Properties properties;
+
+  static TrackerSpec Read(Reader reader);
+};
+
+Element AddTracker(Graph& graph, const gst::Endpoint& input, const TrackerSpec& spec,
+                   const std::string& name = "tracker");
+
+// nvdsanalytics、nvdspreprocess 等只需配置文件的插件。
+struct ConfigFileSpec {
+  bool enabled = false;
+  std::string config_file;
+  Properties properties;
+
+  static ConfigFileSpec Read(Reader reader);
+};
+
+Element AddAnalytics(Graph& graph, const gst::Endpoint& input, const ConfigFileSpec& spec,
+                     const std::string& name = "analytics");
+Element AddPreprocess(Graph& graph, const gst::Endpoint& input, const ConfigFileSpec& spec,
+                      const std::string& name = "preprocess");
+
+// 元数据采集点：identity，探针挂在它的 src pad 上。
+Element AddMetaTap(Graph& graph, const gst::Endpoint& input, const std::string& name);
+
+// ---- 画面输出 ----
+
+struct OsdSpec {
+  bool enabled = true;
+  Properties properties;
+  static OsdSpec Read(Reader reader);
+};
+
+// nvvideoconvert ! nvdsosd ! nvvideoconvert，返回最后一个转换器。
+Element AddOsd(Graph& graph, const gst::Endpoint& input, const OsdSpec& spec,
+               const std::string& name = "osd");
+
+struct TilerSpec {
+  int rows = 0;     // 0 表示按源数自动计算
+  int columns = 0;
+  int width = 1920;
+  int height = 1080;
+  Properties properties;
+  static TilerSpec Read(Reader reader);
+};
+
+Element AddTiler(Graph& graph, const gst::Endpoint& input, const TilerSpec& spec, int sources,
+                 const std::string& name = "tiler");
+
+// nvstreamdemux；第 i 路输出用 demux.Pad("src_<i>")。
+Element AddDemux(Graph& graph, const gst::Endpoint& input, const std::string& name = "demux");
+
+struct EncoderSpec {
+  std::string codec = "h264";  // h264 | h265
+  int bitrate = 4000000;
+  int iframe_interval = 30;
+  Properties properties;  // 编码器属性在 Jetson 与 dGPU 上不同，平台差异写在这里
+  static EncoderSpec Read(Reader reader);
+};
+
+// nvvideoconvert ! nvv4l2h26xenc，返回编码器。
+Element AddEncoder(Graph& graph, const gst::Endpoint& input, const EncoderSpec& spec,
+                   const std::string& name);
+
+// h264parse / h265parse；config_interval=-1 时在每个 IDR 前补参数集（RTSP 需要）。
+Element AddParser(Graph& graph, const gst::Endpoint& input, const std::string& codec,
+                  const std::string& name, bool repeat_parameter_sets);
+
+// parser ! rtspclientsink（rtspclientsink 自行选择 payloader）。默认以 TCP 推流：
+// 容器网络中 UDP 推流会丢包；properties 透传给 rtspclientsink。
+Element AddRtspOut(Graph& graph, const gst::Endpoint& encoded, const std::string& codec,
+                   const std::string& url, const std::string& name,
+                   const Properties& properties = {});
+
+Element AddFakeSink(Graph& graph, const gst::Endpoint& input, const std::string& name);
+
+}  // namespace dsf::ds
+
+#endif  // DSF_DS_BLOCKS_H

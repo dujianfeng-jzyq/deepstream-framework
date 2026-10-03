@@ -1,0 +1,22 @@
+# 构建与发布产物
+/build/
+/dist/
+
+# 渲染产物与现场答案（site-fields.env 是清单，要提交）
+/.env
+/site.env
+/generated/
+/release.env
+
+# engine 与指纹由目标环境生成
+models/**/*.engine
+models/**/*.fingerprint
+models/**/*.lock
+
+# 过程记录
+.planning/
+
+__pycache__/
+*.py[cod]
+.DS_Store
+.vscode/

@@ -1,0 +1,228 @@
+# 框架使用指南
+
+本文说明如何在框架上开发 DeepStream 应用与 Python 服务。构建、配置渲染与安装见 [deployment.md](deployment.md)，设计依据见 [design.md](design.md)。
+
+## 1. 架构
+
+```text
+services/<应用>（策略：拓扑、业务逻辑、消息内容）
+        │ 只依赖下面的公共接口
+dsf::app      入口（CLI、日志、运行流程）与标准组件（就绪心跳、统计）
+dsf::record   分段录像          dsf::publish  发布接口 + Redis Stream 实现
+dsf::ds       块库、元数据模型、消息编码      dsf::ds_meta（需要 SDK）元数据采集
+dsf::gst      内省、图模型、Pipeline、Component
+dsf::config   配置读取
+```
+
+| CMake 目标 | 依赖 SDK | 说明 |
+|---|---|---|
+| `dsf::framework` | 否 | 聚合 `dsf_app dsf_ds dsf_record dsf_publish dsf_gst dsf_config` |
+| `dsf::ds_meta` | 是 | `MetaTap`、`DeepStreamVersion()` |
+| `dsf::deepstream` | 是 | SDK 头文件与元数据库（插件使用） |
+
+单元登记函数：`dsf_add_app`（默认需要 SDK，`NO_DEEPSTREAM` 用于纯 GStreamer 应用）、`dsf_add_plugin`、`dsf_add_python_service`、`dsf_add_test`、`dsf_add_python_test`。应用的配置与拓扑应放在不依赖 SDK 的库中，开发机上即可测试（参见 example-app 的 `example_app_core`）。
+
+## 2. 应用入口
+
+```cpp
+struct MyApp {
+  using Config = my::Config;
+  static dsf::app::Info Describe();                        // 名称、说明、附加版本信息
+  static Config Load(dsf::config::Reader& root);           // 读取并校验配置
+  static void Build(const Config&, dsf::app::Assembly&);   // 组图、登记组件与发布器
+};
+int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
+```
+
+`Load` 与 `Build` 都不得有副作用：`--check-config` 与 `--dump-pipeline` 也会执行它们。框架负责：
+
+| 选项 | 行为 |
+|---|---|
+| `--config PATH` | 默认 `$CONTAINER_CONFIG_PATH/<name>.yaml` |
+| `--check-config` | 读取、校验、组图；不连接设备与服务，不写文件 |
+| `--check-config --plugins` | 另外按实际插件校验元件、属性与取值（需要能加载插件的环境） |
+| `--dump-pipeline` | 输出图（敏感值打码）与插件需求 |
+| `--selftest` | 30 帧软件管线，不需要 GPU、相机与配置 |
+| `--version` | 载荷版本（`/workspace/VERSION`）、框架版本、GStreamer 与 `Info::versions` |
+
+退出码：0 成功，1 失败，2 用法错误。运行模式下的顺序：配置日志 → 插件能力检查 → 启动发布器 → 运行管线 → 停止发布器（排空）→ 汇总组件健康状态。组件 `Healthy()` 为 false（例如录像没有完整收尾）时以 1 退出。
+
+配置中的 `logging` 段由框架读取：`level`（trace/debug/info/warn/error/critical/off）、`console`、`file`、`directory`、`stats_interval_s`（组件统计日志周期，0 关闭）。
+
+## 3. 配置读取
+
+读取代码本身就是 schema：每次读取登记一个路径，`Finish()` 拒绝没有被读取的键。
+
+```cpp
+auto sources = dsf::ds::ReadSources(root);                        // 列表
+dsf::config::Reader redis = root.Section("redis");                // 映射
+int port = redis.Get("port", 6379, dsf::config::Range(1, 65535)); // 类型由默认值决定
+std::string password = redis.Secret("password");                  // 摘要中打码
+auto props = root.Props("encoder.properties");                    // 自由映射，透传给插件
+root.Fail("tracker.enabled", "requires inference");               // 跨字段规则
+```
+
+规则：拒绝重复键、带点号的键、错误类型（引号中的 `"123"` 不是整数）、非有限浮点；null 视为缺失。约束：`OneOf`、`NonEmpty`、`PathComponent`、`AtLeast`、`Range`；列表用 `List(key, min_items)`。错误消息为 `<文件>: <完整路径>: <原因>`。
+
+测试中可用 `Document::LeafPaths()` 与 `Reader::DeclaredPaths()` 验证模板与读取代码一致（见 example-app 的测试）。
+
+## 4. 组图
+
+### 4.1 图模型
+
+```cpp
+dsf::gst::Graph& g = assembly.graph();
+auto src = g.Add("videotestsrc", "src").Set("is-live", true);
+auto caps = g.Caps("video/x-raw,width=640,height=480");
+g.Chain({src, caps, g.Add("fakesink", "sink")});
+g.Link(out, mux.Pad("sink_0"));           // 指定 pad：静态、request（sink_0）或模板（sink_%u）
+auto tee = g.Tee(out);  g.Branch(tee);    // tee 分支自动带 queue
+element.SetSecret("uri", url);            // 诊断输出中打码
+element.Apply(spec.properties);           // 配置透传，覆盖块设置的同名属性
+```
+
+sometimes pad（nvurisrcbin、decodebin）在 pad 出现时自动连接。属性值以文本保存，实例化时按插件的 `GParamSpec` 转换（数值、布尔、字符串、枚举名或值、flags、caps）并校验范围；错误消息带配置路径。同一份图同时产生 `Requirements()`（启动前的插件能力检查）与 `Describe()`（`--dump-pipeline`）。需要完全手写时可用 `Pipeline(name, builder)` 或 `Pipeline::Launch(description)`。
+
+### 4.2 块库（`dsf/ds/blocks.h`）
+
+| 块 | 配置读取 | 说明 |
+|---|---|---|
+| `AddSource` | `SourceSpec::Read` / `ReadSources` | `rtsp` `file` `uri` `v4l2` `test`，输出 NVMM NV12，可缩放 |
+| `AddMux` / `LinkToMux` | `MuxSpec::Read` | nvstreammux；第 i 路接 `sink_i`，i 即元数据中的 `pad_index` |
+| `AddInfer` | `InferSpec::Read` / `ReadInferences` | nvinfer 或 nvinferserver，可串接多级 |
+| `AddTracker` | `TrackerSpec::Read` | nvtracker |
+| `AddAnalytics` / `AddPreprocess` | `ConfigFileSpec::Read` | nvdsanalytics / nvdspreprocess |
+| `AddMetaTap` | — | 元数据采集点（identity） |
+| `AddOsd` | `OsdSpec::Read` | nvdsosd（前后各一次格式转换） |
+| `AddTiler` / `AddDemux` | `TilerSpec::Read` | 多路拼接 / 按源拆分（`demux.Pad("src_i")`） |
+| `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；编码器属性在 Jetson 与 dGPU 不同，用 `properties` |
+| `AddRtspOut` / `AddFakeSink` | — | rtspclientsink / fakesink |
+| `record::AddSegmentSink` | — | parser + splitmuxsink(mp4mux) |
+
+每个块的配置都可以加 `properties:`，设置对应插件的任意属性；不需要时省略即可（缺省等于空）。源配置示例：
+
+```yaml
+sources:
+  - id: gate-1                 # 合法路径段；消息 source_id 与录像目录名
+    type: rtsp                 # rtsp | file | uri | v4l2 | test
+    uri: rtsp://admin@10.0.0.5/stream1
+    rtsp: {password: "...", latency_ms: 200, tcp: true, reconnect_interval_s: 5}
+    file: {loop: true}         # type: file
+    capture: {device: /dev/video0, format: UYVY, width: 1920, height: 1080, framerate: 30}  # v4l2/test
+    output: {width: 1920, height: 1080}   # 规范化尺寸，0 保持原尺寸
+    properties: {drop-on-latency: true}   # 可选，透传给 nvurisrcbin / v4l2src / videotestsrc
+```
+
+`rtsp`/`file`/`uri` 源默认设置 nvurisrcbin 的 `num-extra-surfaces: 8`：解码器的输出 surface 池很小，源侧转换走零拷贝直通时，下游硬件编码器持有的就是解码器的 surface，池耗尽后管线静默卡住。加 queue 解决不了（queue 只会多持有 surface）。下游持有帧更多的拓扑（多路编码、深队列）可在 `properties` 中调大。
+
+新版 nvstreammux（`USE_NEW_NVSTREAMMUX=yes`）没有 width/height 属性，`MuxSpec` 的尺寸会在能力检查时报错；使用新版时请用 `properties` 设置 `config-file-path` 并自行处理尺寸。
+
+## 5. 组件与生命周期
+
+```cpp
+class Component {
+  virtual std::string_view Name() const = 0;
+  virtual void Require(Requirements&) const;            // 图之外的能力需求（例如信号）
+  virtual void OnCreated(Pipeline&, GstElement* bin);  // 取元件、挂探针、连信号
+  virtual void OnPlaying(Pipeline&);                   // 真正进入 PLAYING 后一次
+  virtual void OnMessage(GstMessage*);                 // 每条总线消息
+  virtual void OnStopping();                           // 首次停止请求、发送 EOS 之前
+  virtual void OnReleased();                           // 已置 NULL、流线程已停：拆探针
+  virtual bool Healthy() const;                        // false 时应用以失败退出
+  virtual void Report(Stats&) const;                   // 周期统计
+};
+```
+
+- 全部回调在控制线程；OnCreated 按登记顺序，OnReleased 逆序且总会调用。某个组件抛异常不影响其他组件清理，并使结果失败。
+- 主循环默认运行在 GLib 默认 context 上：插件的内部定时器（例如 nvurisrcbin 的断流重连）依赖它。在多个线程中并行运行多条管线时，次要管线设置 `Options::private_context`。
+- `Pipeline::Post` 把任务排队到控制线程；`Every` 返回 `Timer`（析构即取消）；`RequestStop` 可在任意线程调用。
+- 停止：首次请求通知 OnStopping 后发送 EOS 排空（默认 5 秒）。排空完成的判据是管线 EOS，或者 EOS 已到达每个 sink 的输入且所有组件 `Drained()`——网络 sink（如 rtspclientsink）收到 EOS 后不一定结束，不会因此拖住停止，而录像器会等最后一个分段封装完成。超时或 `kImmediate` 强制结束；排空中再收到 SIGINT/SIGTERM 立即结束。启动必须在 30 秒内真正进入 PLAYING。时限可在 `assembly.options()` 调整，排空时限须小于容器的停止宽限期。
+- 结果原因：`eos`、`stopped`（成功）；`forced`、`build-error`、`start-error`、`run-error`、`startup-timeout`（失败）。
+
+标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`。就绪文件 `$DSF_READY_FILE` 只在处理计数增长时更新：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时 PLAYING 期间每秒更新。
+
+## 6. 元数据（需要 SDK）
+
+```cpp
+auto& tap = assembly.Add<dsf::ds::MetaTap>(options, sources);   // options.element = AddMetaTap 的名字
+tap.OnBatch([&](const dsf::ds::BatchRecord& batch) { ... });    // 媒体线程，必须快
+tap.OnBatchAsync([&](const dsf::ds::BatchRecord& batch) { ... }, 64);  // 工作线程，队列满时丢弃并计数
+tap.AddObjectExtractor([](const NvDsObjectMeta& meta, dsf::ds::ObjectRecord& out) {
+  out.extra["my_field"] = ...;                                  // 自定义 user meta
+});
+```
+
+`BatchRecord → FrameRecord → ObjectRecord` 是纯数据：`source_id`（由 `SourceRegistry` 按 `pad_index` 映射）、`frame_num`、`pts_ns`、`ntp_ms`、`wall_ms`、帧尺寸（mux 输出尺寸，即框坐标空间）、目标的类别、标签、置信度、框、`track_id`（仅被跟踪时有值）、二级分类结果 `classes`、`extra`。`options.analytics = true` 时采集 nvdsanalytics 的帧级计数与目标状态。
+
+## 7. 消息
+
+`dsf/ds/message.h` 提供 schema v1 编码，应用也可以完全使用自己的格式。共同字段：`schema_version`、`event_type`、`source_id`、`timestamp_ms`。
+
+| event_type | 字段 |
+|---|---|
+| `detection` | `frame_num` `pts_ns` `ntp_ms`(有值时) `frame_width` `frame_height` `objects[]`：`class_id` `label` `confidence`(三位小数) `bbox{x,y,width,height}`（裁剪到帧内后取整，零面积丢弃）`track_id`(被跟踪时) `classes[]`(有值时) `extra`(有值时)；帧级 `extra` |
+| `recording_started` | `branch` `segment_id` `start_ms` |
+| `recording_finished` | 另加 `end_ms` `duration_ms`（主机墙钟差）`detected` `path`（已封装完成、可直接读取的文件） |
+
+发布：
+
+```cpp
+auto& redis = assembly.AddPublisher(dsf::publish::MakeRedisStreamPublisher(options));
+dsf::publish::Channel& channel = redis.Open({"project:detections", 256, 10000});
+channel.TryPublish(dsf::ds::Serialize(dsf::ds::DetectionMessage(frame)));   // 不阻塞
+```
+
+一个连接、一个后台线程、每个通道独立的有界队列，批量 pipelining 发送 `XADD <stream> MAXLEN ~ <n> * payload <json>`。语义是至多一次：队列满、断线超过缓冲能力、停止时排空超时都会丢弃并计数；不落盘、不补发。Redis 不可用时每秒重连，消息先在队列中缓冲。需要可靠投递时实现 `Publisher` 接口或在图内使用 nvmsgbroker。
+
+## 8. 分段录像
+
+```cpp
+auto sink = dsf::record::AddSegmentSink(graph, encoded, "h264", 60, "rec_0");
+auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(
+    dsf::record::RecorderOptions{root, source_id, "osd", "rec_0"}, events);
+recorder.MarkDetected();   // 任意线程：当前分段出现过目标
+```
+
+文件为 `<root>/<source_id>/<branch>/<source_id>-<branch>-<起始毫秒>-<序号>.mp4`，写入期间是 `.mp4.tmp`，收到 `splitmuxsink-fragment-closed` 并改名成功后才触发 `finished`。启动时删除本目录遗留的 `.tmp`。保留期与容量清理不在框架内，应由单独的服务实现。
+
+停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。
+
+## 9. Python 服务
+
+```python
+from dsf.config import Reader, at_least
+from dsf.service import Service
+
+def load(root: Reader):                      # 读取并校验；不得有副作用
+    return root.section("redis").get("port", 6379, at_least(1))
+
+def main(port, service: Service):
+    while service.running:
+        ...                                  # 业务处理
+        service.sleep(1)                     # 可被停止信号打断；同时更新就绪文件
+
+sys.exit(Service("my-service", "说明").run(load, main))
+```
+
+`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、SIGINT/SIGTERM 与就绪文件。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）。第三方依赖写进单元的 `requirements.txt`。
+
+## 10. 新增应用
+
+1. `scripts/new-app.sh <name> --kind cpp|python` 生成 `services/<name>/`。
+2. 在 `src/app.cpp`（或 `main.py`）中读取配置、组图、写业务逻辑；配置模板放 `templates/config/<name>.yaml`，现场参数加到 `site-fields.env`。
+3. 平台差异（`runtime: nvidia`、设备、`group_add`）写在 `profiles/*.yaml` 的 `services.<name>`。
+4. 需要自定义推理解析库时在 `plugins/` 下用 `dsf_add_plugin`；模型放 `models/<id>/`，`model-engine-builder` 会自动构建其 engine。
+5. `cmake --build build && ctest`，再 `scripts/apply-profile.sh && docker compose config` 检查部署定义。
+
+## 11. 测试分层
+
+| 层 | 内容 | 环境 |
+|---|---|---|
+| 框架单元/集成 | 配置、图、内省、Pipeline、块结构、消息、软件录像、Redis 投递、入口 | 开发机（GStreamer 软件插件、redis-server 可选） |
+| 应用核心 | 模板与读取代码一致、拓扑结构、跨字段规则 | 开发机 |
+| SDK 层 | 应用与插件编译链接、CLI 冒烟测试 | builder 镜像 |
+| 部署 | 渲染、打包、安装（假 Docker）、engine 工具（假 trtexec）、仓库约定 | 开发机（docker CLI 可选） |
+| 镜像 | builder 中的 CTest，原始 base 中的非 root 无网络自检 | 编译服务器 |
+| 目标机 | 真实视频、推理与跟踪、Redis 消息、MP4 收尾、RTSP 输出、engine 复用、Linux 权限 | 目标设备 |
+
+缺少 redis-server、软件编码插件或 docker CLI 时相关用例显示 SKIP 并成功退出，查看详细输出确认实际覆盖范围。

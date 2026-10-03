@@ -1,0 +1,12 @@
+services:
+  __NAME__:
+    extends: {file: framework/compose/defaults.yaml, service: dsf-service}
+    entrypoint: [bin/__NAME__]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    volumes:
+      - ./models:${CONTAINER_MODELS_PATH}:ro
+    depends_on:
+      model-engine-builder:
+        condition: service_completed_successfully

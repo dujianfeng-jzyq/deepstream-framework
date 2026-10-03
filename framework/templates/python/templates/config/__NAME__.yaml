@@ -1,0 +1,5 @@
+# __NAME__ 配置模板。
+logging:
+  level: info
+
+interval_s: 10.0

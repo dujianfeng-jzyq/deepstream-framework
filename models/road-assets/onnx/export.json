@@ -1,0 +1,77 @@
+{
+  "model_id": "road-assets",
+  "classes": [
+    "标志牌(绿底矩形)",
+    "标志牌(菱形)",
+    "标志牌(蓝底矩形)",
+    "标志牌(圆牌)",
+    "标志牌(白底矩形)",
+    "标志牌(褐底矩形)",
+    "标志牌(黄底矩形)",
+    "龙门架A",
+    "龙门架B",
+    "龙门架C",
+    "龙门架D",
+    "摄像头(龙门架A)",
+    "摄像头(挂架)",
+    "摄像头(柱)",
+    "摄像头(横梁机组)",
+    "摄像头(龙门架D)",
+    "摄像头(球机)",
+    "摄像头(横梁单机)",
+    "防撞桶",
+    "防撞垫",
+    "防眩板缺失",
+    "防眩板断裂",
+    "防眩板歪斜",
+    "混凝土护栏破损",
+    "波形梁护栏破损",
+    "波形梁护栏坠落",
+    "金属梁护栏破损"
+  ],
+  "weights": "weights/best.pt",
+  "weights_sha256": "f1f3640f3fcac80eed4f27ae383a30198a8e15a64e9dc1a71cff498cd9ebb459",
+  "onnx": "onnx/best.onnx",
+  "onnx_sha256": "b7420a7e3da08033a85bb42a328673732bcca5490332bbee89a5e96491f48ad0",
+  "labels": "onnx/labels.txt",
+  "exported_at": "2026-09-11T06:14:52.123639+00:00",
+  "export_args": {
+    "format": "onnx",
+    "imgsz": 640,
+    "batch": 1,
+    "opset": 17,
+    "dynamic": false,
+    "simplify": true,
+    "device": "cpu",
+    "nms": false,
+    "half": false,
+    "output_layout": "xyxy-confidence-class_id"
+  },
+  "onnx_signature": {
+    "inputs": [
+      {
+        "name": "input",
+        "shape": [
+          1,
+          3,
+          640,
+          640
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "output",
+        "shape": [
+          1,
+          8400,
+          6
+        ]
+      }
+    ]
+  },
+  "jetson_trtexec": "trtexec --onnx=best.onnx --saveEngine=best-fp16.engine --fp16",
+  "note": "输出为 DeepStream parser 所需的 [batch, candidates, 6]；engine 必须在目标 Jetson 生成。",
+  "source_run": "runs/train/road-assets/20260911-114332",
+  "published_model_id": "road-assets"
+}

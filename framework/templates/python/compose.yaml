@@ -1,0 +1,4 @@
+services:
+  __NAME__:
+    extends: {file: framework/compose/defaults.yaml, service: dsf-service}
+    entrypoint: [python3, services/__NAME__/main.py]

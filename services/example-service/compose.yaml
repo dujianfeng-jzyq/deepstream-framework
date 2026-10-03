@@ -1,0 +1,8 @@
+services:
+  example-service:
+    extends: {file: framework/compose/defaults.yaml, service: dsf-service}
+    entrypoint: [python3, services/example-service/main.py]
+    depends_on:  # 与公共定义中的依赖合并
+      redis:
+        condition: service_started
+        required: false

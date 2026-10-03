@@ -1,0 +1,8 @@
+# profile：x86_64 独立显卡，DeepStream 7.1
+x-build:
+  DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:7.1-samples-multiarch
+services:
+  example-app:
+    runtime: nvidia
+  model-engine-builder:
+    runtime: nvidia

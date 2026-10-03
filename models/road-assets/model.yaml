@@ -1,0 +1,79 @@
+id: road-assets
+display_name: 道路资产检测
+task: detect
+backend: ultralytics-yolo
+
+classes:
+  - 标志牌(绿底矩形)
+  - 标志牌(菱形)
+  - 标志牌(蓝底矩形)
+  - 标志牌(圆牌)
+  - 标志牌(白底矩形)
+  - 标志牌(褐底矩形)
+  - 标志牌(黄底矩形)
+  - 龙门架A
+  - 龙门架B
+  - 龙门架C
+  - 龙门架D
+  - 摄像头(龙门架A)
+  - 摄像头(挂架)
+  - 摄像头(柱)
+  - 摄像头(横梁机组)
+  - 摄像头(龙门架D)
+  - 摄像头(球机)
+  - 摄像头(横梁单机)
+  - 防撞桶
+  - 防撞垫
+  - 防眩板缺失
+  - 防眩板断裂
+  - 防眩板歪斜
+  - 混凝土护栏破损
+  - 波形梁护栏破损
+  - 波形梁护栏坠落
+  - 金属梁护栏破损
+ignored_classes:
+  - 待定
+
+dataset:
+  source_model_id: road-assets
+  val_ratio: 0.15
+  test_ratio: 0.15
+  seed: 42
+  split_strategy: balanced_group
+  capture_group_fallback: filename_prefix
+  copy_mode: hardlink
+
+train:
+  model: yolo11s.pt
+  epochs: 200
+  batch: 16
+  imgsz: 640
+  patience: 50
+  workers: 8
+  optimizer: auto
+  cache: false
+  augmentation:
+    hsv_h: 0.0138
+    hsv_s: 0.664
+    hsv_v: 0.464
+    degrees: 0.2
+    translate: 0.2
+    scale: 0.8
+    shear: 0.0
+    perspective: 0.0
+    flipud: 0.0
+    fliplr: 0.5
+    mosaic: 1.0
+    mixup: 0.1
+    close_mosaic: 10
+
+evaluation:
+  slices:
+    all: null
+
+export:
+  imgsz: 640
+  batch: 1
+  opset: 17
+  dynamic: false
+  simplify: true

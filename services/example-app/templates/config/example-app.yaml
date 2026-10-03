@@ -1,0 +1,83 @@
+# example-app 配置模板。${VAR} 来自 project.env、profile 与现场参数（site-fields.env）。
+# 字段与默认值由 src/config.cpp 与框架块定义。sources[i]、mux、inference[i]、tracker、analytics、osd、
+# encoder、recording、rtsp_out 都可以加 properties: {属性: 值}，设置对应插件的任意属性；不需要时省略。
+
+logging:
+  level: info
+  console: true
+  file: false
+  directory: ${CONTAINER_DATA_PATH}/logs
+  stats_interval_s: 60
+
+# 视频源列表；序号即 mux 的输入编号。增加一项即成为多路应用。
+sources:
+  - id: ${CAMERA_ID}
+    type: rtsp
+    # 地址中不要写口令，口令填在 rtsp.password，程序在运行时注入。
+    uri: ${RTSP_URL}
+    rtsp:
+      password: ${RTSP_PASSWORD}
+      latency_ms: 200
+      tcp: true
+      reconnect_interval_s: 5
+    output:
+      width: 1920
+      height: 1080
+
+# mux 输出尺寸就是消息中 bbox 的坐标空间。
+mux:
+  width: 1920
+  height: 1080
+  batched_push_timeout_us: 40000
+  gpu_id: 0
+
+# 推理链，按顺序串接（一级检测 + 可选的二级分类）。engine 由 model-engine-builder 预构建。
+inference:
+  - name: pgie
+    plugin: nvinfer
+    config_path: ${CONTAINER_MODELS_PATH}/road-assets/deployment/config.txt
+
+tracker:
+  enabled: true
+  ll_lib_file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+  ll_config_file: /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
+  width: 640
+  height: 384
+
+analytics:
+  enabled: false
+  config_file: ""
+
+osd:
+  enabled: true
+
+# 录像与 RTSP 输出共用的编码参数；Jetson 与 dGPU 的编码器属性差异写在 properties。
+encoder:
+  codec: h264
+  bitrate: 8000000
+  iframe_interval: 30
+  # properties: {preset-id: 1}
+
+recording:
+  root: ${CONTAINER_DATA_PATH}/recordings
+  segment_seconds: 60
+  raw: false
+  osd: true
+
+rtsp_out:
+  enabled: true
+  url: rtsp://mediamtx:8554/${CAMERA_ID}-out
+  tiler:
+    width: 1920
+    height: 1080
+
+redis:
+  enabled: true
+  host: ${REDIS_HOST}
+  port: 6379
+  password: ${REDIS_PASSWORD}
+  detection_stream: ${PROJECT_NAME}:detections
+  recording_stream: ${PROJECT_NAME}:recordings
+  only_on_detection: true
+  queue_capacity: 256
+  max_length: 10000

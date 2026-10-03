@@ -1,0 +1,15 @@
+# __NAME__ 配置模板；${VAR} 来自 project.env、profile 与 site-fields.env。
+logging:
+  level: info
+
+sources:
+  - id: test0
+    type: test   # 换成 rtsp/file/v4l2 接入真实视频
+    # properties: {pattern: ball}   # 可选：透传给源插件的属性
+
+mux:
+  width: 1280
+  height: 720
+
+# 推理链：每项 {name, plugin, config_path, properties}，按顺序串接。
+inference: []

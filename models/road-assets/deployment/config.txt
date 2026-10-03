@@ -1,0 +1,31 @@
+# road-assets nvinfer 配置；ONNX/标签相对本文件解析，应用只读模型目录。
+# engine 由 prepare_model_engines.py 预构建：nvinfer 自建派生名可能不同于读取路径。
+# model-engine-file 是唯一输出路径；绝对 /data 路径跨发布保留，相对路径落在模型树内。
+[property]
+gpu-id=0
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+onnx-file=../onnx/best.onnx
+model-engine-file=/data/engines/road-assets/best.onnx_b1_gpu0_fp16.engine
+labelfile-path=../onnx/labels.txt
+batch-size=1
+# 2 = FP16，它同时决定上面引擎名里的 fp16 段。
+network-mode=2
+num-detected-classes=27
+interval=0
+gie-unique-id=1
+process-mode=1
+network-type=0
+cluster-mode=2
+maintain-aspect-ratio=1
+symmetric-padding=1
+crop-objects-to-roi-boundary=1
+# parser 随载荷安装；工作目录固定为 /workspace。
+parse-bbox-func-name=NvDsInferParseYolo
+custom-lib-path=/workspace/lib/libnvdsinfer_custom_yolo.so
+
+[class-attrs-all]
+nms-iou-threshold=0.45
+pre-cluster-threshold=0.25
+post-cluster-threshold=0.50
+topk=300

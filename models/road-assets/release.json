@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "status": "deployed",
+  "model_id": "road-assets",
+  "training_model_id": "road-assets",
+  "task": "detect",
+  "backend": "ultralytics-yolo",
+  "release_id": "20260911-114332",
+  "published_at": "2026-09-11T06:14:50.409000+00:00",
+  "source_run": "runs/train/road-assets/20260911-114332",
+  "source_model_id": "road-assets",
+  "model_config": {
+    "path": "model.yaml",
+    "sha256": "94556979f8c9dda6e6dfb437f18b249cb985e9349a1255d5769881a68e5aa991"
+  },
+  "training_release": {
+    "model_id": "road-assets",
+    "release_id": "20260911-114332"
+  },
+  "dataset_fingerprint": "ebf1ff3d700a992a4e1cd16fda4aed75eb2f0ea1106f540dbdabe7bc0d987c6b",
+  "dataset_content_sha256": "35a2072336165fbccca8d37552ab00736cf856215ec2ccabd6d619a9769423d4",
+  "data_package": null,
+  "classes": [
+    "标志牌(绿底矩形)",
+    "标志牌(菱形)",
+    "标志牌(蓝底矩形)",
+    "标志牌(圆牌)",
+    "标志牌(白底矩形)",
+    "标志牌(褐底矩形)",
+    "标志牌(黄底矩形)",
+    "龙门架A",
+    "龙门架B",
+    "龙门架C",
+    "龙门架D",
+    "摄像头(龙门架A)",
+    "摄像头(挂架)",
+    "摄像头(柱)",
+    "摄像头(横梁机组)",
+    "摄像头(龙门架D)",
+    "摄像头(球机)",
+    "摄像头(横梁单机)",
+    "防撞桶",
+    "防撞垫",
+    "防眩板缺失",
+    "防眩板断裂",
+    "防眩板歪斜",
+    "混凝土护栏破损",
+    "波形梁护栏破损",
+    "波形梁护栏坠落",
+    "金属梁护栏破损"
+  ],
+  "abi": {
+    "onnx_signature": {
+      "inputs": [
+        {
+          "name": "input",
+          "shape": [
+            1,
+            3,
+            640,
+            640
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "shape": [
+            1,
+            8400,
+            6
+          ]
+        }
+      ]
+    },
+    "output_layout": "xyxy-confidence-class_id"
+  },
+  "artifacts": {
+    "model.yaml": {
+      "path": "model.yaml",
+      "sha256": "94556979f8c9dda6e6dfb437f18b249cb985e9349a1255d5769881a68e5aa991"
+    },
+    "best.onnx": {
+      "path": "onnx/best.onnx",
+      "sha256": "b7420a7e3da08033a85bb42a328673732bcca5490332bbee89a5e96491f48ad0"
+    },
+    "labels.txt": {
+      "path": "onnx/labels.txt",
+      "sha256": "5c148e2d09ecda0564371648f29a641f6e80933582c6fccfb0edac98f0a7124a"
+    },
+    "export.json": {
+      "path": "onnx/export.json",
+      "sha256": "b10ac4ba1f547930e3b2a0ef04714f99736610dde278be17e758b4702069ef3f"
+    }
+  }
+}

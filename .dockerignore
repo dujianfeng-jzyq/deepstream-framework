@@ -1,0 +1,17 @@
+# 构建上下文只需要源码与测试；渲染产物、现场答案、模型主体与发布物不进入镜像。
+.git
+build/
+dist/
+generated/
+.env
+site.env
+release.env
+models/
+docs/
+*.md
+!plugins/*/README.md
+!plugins/*/LICENSE.md
+.planning/
+**/__pycache__/
+*.py[cod]
+.DS_Store

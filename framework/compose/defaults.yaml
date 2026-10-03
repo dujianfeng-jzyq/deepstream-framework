@@ -1,0 +1,39 @@
+# 服务单元的公共定义，在单元的 compose.yaml 中用
+#   extends: {file: framework/compose/defaults.yaml, service: dsf-service}
+# 引用。注意：本文件中的相对路径以本文件所在目录为基准（Compose 的 extends 规则）。
+
+services:
+  dsf-service:
+    image: ${BASE_IMAGE}  # 运行环境来自 base，程序来自只读载荷卷
+    user: "${HOST_UID}:${HOST_GID}"  # 写入数据目录的文件归现场用户；需要 root 的平台在 profile 覆盖
+    restart: unless-stopped
+    labels:
+      io.deepstream.config-check: "true"  # 安装器在停服前用新载荷执行 --check-config
+    working_dir: ${CONTAINER_WORKSPACE}
+    environment:
+      CONTAINER_WORKSPACE: ${CONTAINER_WORKSPACE}
+      CONTAINER_CONFIG_PATH: ${CONTAINER_CONFIG_PATH}
+      CONTAINER_DATA_PATH: ${CONTAINER_DATA_PATH}
+      CONTAINER_MODELS_PATH: ${CONTAINER_MODELS_PATH}
+      PYTHONPATH: ${CONTAINER_WORKSPACE}/python
+      DSF_READY_FILE: /tmp/dsf.ready
+      # 非 root 用户的 HOME 可能不可写；插件注册表缓存放到 /tmp。
+      XDG_CACHE_HOME: /tmp/cache
+    volumes:
+      - app-files:${CONTAINER_WORKSPACE}:ro
+      - ../../generated/config:${CONTAINER_CONFIG_PATH}:ro
+      - ${HOST_DATA_PATH}:${CONTAINER_DATA_PATH}
+      - /etc/localtime:/etc/localtime:ro  # 时区与宿主一致，不依赖镜像中的 tzdata
+    # 就绪 = 服务主循环（或帧处理）在 30 秒内推进过；容器 Up 不代表就绪。
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os,sys,time; sys.exit(time.time() - os.stat('/tmp/dsf.ready').st_mtime > 30)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    depends_on:
+      deepstream-apps:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}

@@ -1,0 +1,10 @@
+# example-service 配置模板。
+logging:
+  level: info
+
+redis:
+  host: ${REDIS_HOST}
+  port: 6379
+  password: ${REDIS_PASSWORD}
+  # 与 example-app 的 redis.recording_stream 一致。
+  stream: ${PROJECT_NAME}:recordings
