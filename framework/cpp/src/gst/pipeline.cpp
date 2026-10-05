@@ -260,8 +260,11 @@ Result Pipeline::Run(const Options& options) {
   g_main_context_push_thread_default(context_);
 
   try {
+    if (options_.startup_timeout.count() < 0) {
+      Finish({false, FinishReason::kStartError, "startup_timeout must not be negative"});
+    }
     try {
-      pipeline_ = builder_();
+      if (!result_) pipeline_ = builder_();
     } catch (const std::exception& error) {
       Finish({false, FinishReason::kBuildError, error.what()});
     }
@@ -296,9 +299,12 @@ Result Pipeline::Run(const Options& options) {
           NotifyPlaying();
           break;
         default:  // ASYNC 或直播源的 NO_PREROLL：等待 STATE_CHANGED 消息
-          startup_timer_ = Attach(
-              g_timeout_source_new(static_cast<guint>(options_.startup_timeout.count())),
-              &Pipeline::OnStartupTimeout);
+          // 时限为 0 时禁用检测：按需产帧的管线可能等待首帧才能完成状态切换。
+          if (options_.startup_timeout.count() > 0) {
+            startup_timer_ = Attach(
+                g_timeout_source_new(static_cast<guint>(options_.startup_timeout.count())),
+                &Pipeline::OnStartupTimeout);
+          }
           break;
       }
     }

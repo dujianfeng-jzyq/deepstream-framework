@@ -1,4 +1,4 @@
-# DeepStream SDK 探测。SDK 可用时创建 dsf::deepstream 接口目标；否则只警告，
+# DeepStream SDK 探测。SDK 可用时创建 dsf::deepstream 接口目标；否则在开发构建中跳过，
 # 依赖 SDK 的目标（dsf_add_app 的应用、dsf_add_plugin 的插件、dsf_ds_meta）被跳过，
 # 框架其余部分与测试照常构建。发布构建设置 DSF_REQUIRE_DEEPSTREAM=ON，缺 SDK 即失败。
 
@@ -61,8 +61,6 @@ if(_dsf_ds_missing)
   if(DSF_REQUIRE_DEEPSTREAM)
     message(FATAL_ERROR "DeepStream SDK 不可用（DSF_REQUIRE_DEEPSTREAM=ON）：\n  ${_dsf_ds_text}")
   endif()
-  message(WARNING "DeepStream SDK 不可用，跳过依赖 SDK 的应用、插件与 dsf_ds_meta：\n  ${_dsf_ds_text}\n"
-                  "已安装 SDK 时用 -DDEEPSTREAM_ROOT=<路径> 重新配置。")
   set(DSF_HAVE_DEEPSTREAM OFF)
   return()
 endif()

@@ -8,8 +8,10 @@
 services/<应用>（策略：拓扑、业务逻辑、消息内容）
         │ 只依赖下面的公共接口
 dsf::app      入口（CLI、日志、运行流程）与标准组件（就绪心跳、统计）
-dsf::record   分段录像          dsf::publish  发布接口 + Redis Stream 实现
-dsf::ds       块库、元数据模型、消息编码      dsf::ds_meta（需要 SDK）元数据采集
+dsf::record   分段录像
+dsf::publish  发布接口 + Redis Stream 实现
+dsf::ds       块库、元数据模型、消息编码
+dsf::ds_meta  元数据采集（需要 SDK）
 dsf::gst      内省、图模型、Pipeline、Component
 dsf::config   配置读取
 ```
@@ -129,17 +131,18 @@ class Component {
   virtual void OnStopping();                           // 首次停止请求、发送 EOS 之前
   virtual void OnReleased();                           // 已置 NULL、流线程已停：拆探针
   virtual bool Healthy() const;                        // false 时应用以失败退出
-  virtual void Report(Stats&) const;                   // 周期统计
+  virtual void Report(Stats&) const;                   // 周期统计，可能在进入 PLAYING 前调用
 };
 ```
 
 - 全部回调在控制线程；OnCreated 按登记顺序，OnReleased 逆序且总会调用。某个组件抛异常不影响其他组件清理，并使结果失败。
 - 主循环默认运行在 GLib 默认 context 上：插件的内部定时器（例如 nvurisrcbin 的断流重连）依赖它。在多个线程中并行运行多条管线时，次要管线设置 `Options::private_context`。
 - `Pipeline::Post` 把任务排队到控制线程；`Every` 返回 `Timer`（析构即取消）；`RequestStop` 可在任意线程调用。
-- 停止：首次请求通知 OnStopping 后发送 EOS 排空（默认 5 秒）。排空完成的判据是管线 EOS，或者 EOS 已到达每个 sink 的输入且所有组件 `Drained()`——网络 sink（如 rtspclientsink）收到 EOS 后不一定结束，不会因此拖住停止，而录像器会等最后一个分段封装完成。超时或 `kImmediate` 强制结束；排空中再收到 SIGINT/SIGTERM 立即结束。启动必须在 30 秒内真正进入 PLAYING。时限可在 `assembly.options()` 调整，排空时限须小于容器的停止宽限期。
+- 停止：首次请求通知 OnStopping 后发送 EOS 排空（默认 5 秒）。排空完成的判据是管线 EOS，或者 EOS 已到达每个 sink 的输入且所有组件 `Drained()`——网络 sink（如 rtspclientsink）收到 EOS 后不一定结束，不会因此拖住停止，而录像器会等最后一个分段封装完成。超时或 `kImmediate` 强制结束；排空中再收到 SIGINT/SIGTERM 立即结束。排空时限可在 `assembly.options()` 调整，须小于容器的停止宽限期。
+- 启动：`assembly.options().startup_timeout` 默认 30 秒，设为 0 禁用启动超时，负数视为启动失败。异步切换状态的 sink 可能等待首帧，使按需产帧的管线长期无法进入 PLAYING；是否等待取决于元件及其配置。状态切换返回失败或总线报告错误时仍以 `start-error` / `run-error` 结束，`OnPlaying` 只在真正进入 PLAYING 后调用。计时在 `set_state(PLAYING)` 返回异步状态切换结果后开始，不覆盖同步初始化和阻塞调用；定时任务须等主循环运行才能执行。
 - 结果原因：`eos`、`stopped`（成功）；`forced`、`build-error`、`start-error`、`run-error`、`startup-timeout`（失败）。
 
-标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`。就绪文件 `$DSF_READY_FILE` 只在处理计数增长时更新：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时 PLAYING 期间每秒更新。
+标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`，两者在 `OnCreated` 注册定时器，由主循环按各自周期调度，不等 PLAYING。指定进度指标时，就绪文件 `$DSF_READY_FILE` 只在处理计数增长时更新：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时只要主循环在运行就每秒更新，按需产帧的源配合 `startup_timeout = 0` 使用，静止期间仍保持就绪。组件的 `Report()` 须能在进入 PLAYING 前报告统计。
 
 ## 6. 元数据（需要 SDK）
 

@@ -7,6 +7,8 @@
 #include "dsf/app/app.h"
 #include "dsf/app/components.h"
 #include "dsf/ds/blocks.h"
+#include "dsf/gst/introspect.h"
+#include "dsf/gst/pipeline.h"
 #include <unistd.h>
 
 #include "dsf_test.h"
@@ -62,6 +64,17 @@ int RunApp(std::vector<std::string> args) {
   return Main<SoftwareApp>(static_cast<int>(argv.size()), argv.data());
 }
 
+// 不出帧时，异步 fakesink 等待 preroll，使管线保持在进入 PLAYING 之前。
+dsf::gst::Graph IdleLiveGraph() {
+  dsf::gst::Graph graph;
+  graph.Chain({graph.Add("appsrc", "src")
+                   .Set("is-live", true)
+                   .Set("format", "time")
+                   .Set("caps", "video/x-raw,format=GRAY8,width=64,height=48,framerate=0/1"),
+               graph.Add("fakesink", "sink").Set("sync", false).Set("async", true)});
+  return graph;
+}
+
 }  // namespace
 
 TEST(command_line_modes_are_exclusive) {
@@ -115,6 +128,114 @@ TEST(entry_point_modes) {
 
   TempConfig unknown("frames: 5\nframe: 1\n");
   CHECK_EQ(RunApp({"--check-config", "--config", unknown.path.string()}), 1);
+}
+
+TEST(readiness_and_stats_run_before_playing) {
+  if (!dsf::gst::HasFactory("appsrc")) SKIP("GStreamer element missing: appsrc");
+  struct Observer : dsf::gst::Component {
+    std::string_view Name() const override { return "observer"; }
+    void OnPlaying(dsf::gst::Pipeline&) override { playing = true; }
+    void Report(dsf::gst::Stats&) const override { ++reports; }
+    bool playing = false;
+    mutable int reports = 0;
+  } observer, disabled_observer;
+  TempConfig config("frames: 1\n");
+  const fs::path ready = config.dir / "ready";
+  ReadinessHeartbeat readiness("", nullptr, ready.string(), std::chrono::milliseconds(50));
+  StatsReporter stats(std::chrono::seconds(1), {&observer}, {});
+  StatsReporter disabled_stats(std::chrono::seconds(0), {&disabled_observer}, {});
+  dsf::gst::Pipeline pipeline("idle-ready", IdleLiveGraph());
+  pipeline.Add(observer);
+  pipeline.Add(readiness);
+  pipeline.Add(stats);
+  pipeline.Add(disabled_stats);
+  int updates = 0;
+  int ticks = 0;
+  dsf::gst::Timer timer;
+  pipeline.Post([&] {
+    timer = pipeline.Every(std::chrono::milliseconds(200), [&] {
+      // 删除后应再次创建，验证持续更新而非只写一次，也不依赖文件系统时间精度。
+      if (fs::remove(ready)) ++updates;
+      if (updates >= 2 && observer.reports > 0) pipeline.RequestStop();
+      else if (++ticks >= 15) pipeline.RequestStop(dsf::gst::StopMode::kImmediate);
+    });
+  });
+  dsf::gst::Options options;
+  options.handle_signals = false;
+  options.startup_timeout = std::chrono::milliseconds(0);
+  const dsf::gst::Result result = pipeline.Run(options);
+  CHECK(result.success);
+  CHECK(!observer.playing);
+  CHECK(updates >= 2);
+  CHECK(observer.reports > 0);
+  CHECK_EQ(disabled_observer.reports, 0);
+  CHECK(!fs::exists(ready));
+}
+
+TEST(counted_readiness_only_updates_when_progress_changes) {
+  if (!dsf::gst::HasFactory("appsrc")) SKIP("GStreamer element missing: appsrc");
+  // 分别覆盖计数回调和元件探针；计数不变时不能退化成无条件心跳。
+  for (const bool use_callback : {true, false}) {
+    TempConfig config("frames: 1\n");
+    const fs::path ready = config.dir / "ready";
+    std::uint64_t progress = 0;
+    std::function<std::uint64_t()> counter;
+    if (use_callback) counter = [&] { return progress; };
+    ReadinessHeartbeat readiness(use_callback ? "" : "src", counter, ready.string(),
+                                 std::chrono::milliseconds(50));
+    dsf::gst::Pipeline pipeline("counted-ready", IdleLiveGraph());
+    pipeline.Add(readiness);
+    int phase = 0;
+    int idle_checks = 0;
+    int ticks = 0;
+    bool quiet_while_idle = true;
+    bool counts_match = true;
+    bool pushed = true;
+    const auto advance = [&] {
+      if (use_callback) {
+        ++progress;
+      } else {
+        GstBuffer* buffer = gst_buffer_new_allocate(nullptr, 64 * 48, nullptr);
+        GstFlowReturn flow = GST_FLOW_OK;
+        g_signal_emit_by_name(pipeline.Element("src"), "push-buffer", buffer, &flow);
+        gst_buffer_unref(buffer);
+        pushed = pushed && flow == GST_FLOW_OK;
+      }
+    };
+    dsf::gst::Timer timer;
+    pipeline.Post([&] {
+      timer = pipeline.Every(std::chrono::milliseconds(100), [&] {
+        if (++ticks >= 40) {
+          pipeline.RequestStop(dsf::gst::StopMode::kImmediate);
+          return;
+        }
+        if (phase == 0 || phase == 2) {
+          quiet_while_idle = quiet_while_idle && !fs::exists(ready);
+          if (++idle_checks == 3) {
+            advance();
+            ++phase;
+          }
+        } else if ((phase == 1 || phase == 3) && fs::exists(ready)) {
+          std::uint64_t count = 0;
+          std::ifstream(ready) >> count;
+          counts_match = counts_match && count == (phase == 1 ? 1u : 2u);
+          fs::remove(ready);
+          idle_checks = 0;
+          if (++phase == 4) pipeline.RequestStop();
+        }
+      });
+    });
+    dsf::gst::Options options;
+    options.handle_signals = false;
+    options.startup_timeout = std::chrono::milliseconds(0);
+    const dsf::gst::Result result = pipeline.Run(options);
+    CHECK(result.success);
+    CHECK_EQ(phase, 4);
+    CHECK(quiet_while_idle);
+    CHECK(counts_match);
+    CHECK(pushed);
+    CHECK(!fs::exists(ready));
+  }
 }
 
 TEST(entry_point_runs_and_cleans_readiness_file) {

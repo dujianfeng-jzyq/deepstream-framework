@@ -2,7 +2,8 @@
 //
 // 时序（全部在控制线程）：
 //   OnCreated   建图成功、进入 PLAYING 之前；按登记顺序。取元件、挂探针、连信号。
-//   OnPlaying   真正进入 PLAYING 后一次。
+//   OnPlaying   真正进入 PLAYING 后一次。异步切换状态的 sink 可能等待首帧，startup_timeout 为 0 时
+//               可能长时间不调用；随主循环运行的定时任务应在 OnCreated 中注册。
 //   OnMessage   每条总线消息；消息指针只在回调内有效。
 //   OnStopping  首次停止请求、发送 EOS 之前一次（自然 EOS 与错误不保证经过这里）。
 //   Drained     排空期间轮询，全部为 true 且 EOS 已到达每个 sink 的输入时排空完成。
@@ -57,6 +58,7 @@ class Component {
   virtual bool Drained() const { return true; }
   // 运行结束后为 false 时，应用以失败退出（例如录像没有完整收尾）。
   virtual bool Healthy() const { return true; }
+  // 周期统计可在 OnCreated 后、进入 PLAYING 前调用，须能报告尚未开始处理时的计数。
   virtual void Report(Stats& /*stats*/) const {}
 };
 

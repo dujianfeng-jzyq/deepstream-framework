@@ -8,7 +8,11 @@
 //
 // 停止：首次请求进入排空（先通知组件 OnStopping，再注入 EOS：由图构建时注入到每个源之后的元件，
 // 否则发给整条管线），排空超时或 kImmediate 强制结束；
-// 排空期间再收到 SIGINT/SIGTERM 升级为强制结束。启动必须在 startup_timeout 内真正进入 PLAYING。
+// 排空期间再收到 SIGINT/SIGTERM 升级为强制结束。
+//
+// 启动：startup_timeout 为正数时必须在时限内真正进入 PLAYING。异步切换状态的 sink 可能等待首帧，
+// 按需产帧的源可设为 0 禁用启动超时。状态切换返回失败或总线报告错误时仍以 start-error / run-error
+// 结束，等待期间的停止请求照常排空；OnPlaying 仍只在真正进入 PLAYING 后调用。
 //
 // 排空完成的判据：管线 EOS 消息；或者 EOS 已到达每个 sink 的输入、且所有组件 Drained()。
 // 后者让网络 sink（例如 rtspclientsink 等待服务端拆除会话）不会拖住停止，
@@ -57,6 +61,7 @@ struct Result {
 };
 
 struct Options {
+  // 0 表示不限等待（见文件头说明）；负数视为启动失败。
   std::chrono::milliseconds startup_timeout{30000};
   // 必须小于容器的停止宽限期，否则收尾前就会被 SIGKILL。
   std::chrono::milliseconds stop_timeout{5000};

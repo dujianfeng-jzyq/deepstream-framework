@@ -25,9 +25,18 @@ std::uint64_t ReadinessHeartbeat::Count() const {
   return progress_ ? progress_() : buffers_.load(std::memory_order_relaxed);
 }
 
-void ReadinessHeartbeat::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
+void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   std::error_code ignored;
   std::filesystem::remove(path_, ignored);  // 上次运行留下的文件不能代表本次就绪
+  // 定时器由主循环驱动，不等 PLAYING：按需产帧的管线可能等待首帧才能完成状态切换。
+  const bool counting = progress_ || !element_.empty();
+  timer_ = pipeline.Every(interval_, [this, counting] {
+    const std::uint64_t count = Count();
+    if (!counting || count != last_) {
+      last_ = count;
+      Touch(count);
+    }
+  });
   if (element_.empty() || progress_) return;
   GstElement* element = gst_bin_get_by_name(GST_BIN(bin), element_.c_str());
   if (element == nullptr) throw std::runtime_error("readiness element '" + element_ + "' is missing");
@@ -41,17 +50,6 @@ void ReadinessHeartbeat::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin)
         return GST_PAD_PROBE_OK;
       },
       &buffers_, nullptr);
-}
-
-void ReadinessHeartbeat::OnPlaying(gst::Pipeline& pipeline) {
-  const bool counting = progress_ || !element_.empty();
-  timer_ = pipeline.Every(interval_, [this, counting] {
-    const std::uint64_t count = Count();
-    if (!counting || count != last_) {
-      last_ = count;
-      Touch(count);
-    }
-  });
 }
 
 void ReadinessHeartbeat::Touch(std::uint64_t count) {
@@ -80,7 +78,7 @@ StatsReporter::StatsReporter(std::chrono::seconds interval,
                              std::vector<const publish::Channel*> channels)
     : interval_(interval), components_(std::move(components)), channels_(std::move(channels)) {}
 
-void StatsReporter::OnPlaying(gst::Pipeline& pipeline) {
+void StatsReporter::OnCreated(gst::Pipeline& pipeline, GstElement* /*bin*/) {
   if (interval_.count() <= 0) return;
   timer_ = pipeline.Every(interval_, [this] { spdlog::info("stats: {}", Line()); });
 }

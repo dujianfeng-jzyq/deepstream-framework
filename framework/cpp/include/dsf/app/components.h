@@ -20,15 +20,14 @@ namespace dsf::app {
 std::string ReadyFilePath();
 
 // 就绪心跳：计数增长时才更新就绪文件（证明输入真的在供帧）。计数来源二选一：
-// progress（例如 MetaTap::frames()），或经过 element 的 buffer 数；都为空时 PLAYING 期间每秒更新。
-// 结束时删除文件。
+// progress（例如 MetaTap::frames()），或经过 element 的 buffer 数；都为空时只要主循环在运行就每秒
+// 更新，不等 PLAYING（按需产帧的管线可能等待首帧才能完成状态切换）。结束时删除文件。
 class ReadinessHeartbeat : public gst::Component {
  public:
   ReadinessHeartbeat(std::string element, std::function<std::uint64_t()> progress, std::string path,
                      std::chrono::milliseconds interval = std::chrono::seconds(1));
   std::string_view Name() const override { return "readiness"; }
   void OnCreated(gst::Pipeline& pipeline, GstElement* bin) override;
-  void OnPlaying(gst::Pipeline& pipeline) override;
   void OnReleased() override;
   void Report(gst::Stats& stats) const override;
 
@@ -46,13 +45,13 @@ class ReadinessHeartbeat : public gst::Component {
   gst::Timer timer_;
 };
 
-// 周期统计：汇总全部组件的 Report() 与各发布通道的计数写一行日志。
+// 周期统计：汇总全部组件的 Report() 与各发布通道的计数写一行日志。主循环运行即开始，不等 PLAYING。
 class StatsReporter : public gst::Component {
  public:
   StatsReporter(std::chrono::seconds interval, std::vector<const gst::Component*> components,
                 std::vector<const publish::Channel*> channels);
   std::string_view Name() const override { return "stats"; }
-  void OnPlaying(gst::Pipeline& pipeline) override;
+  void OnCreated(gst::Pipeline& pipeline, GstElement* bin) override;
   void OnReleased() override { timer_.Cancel(); }
   std::string Line() const;
 

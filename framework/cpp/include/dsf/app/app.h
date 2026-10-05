@@ -4,7 +4,7 @@
 //     using Config = my::Config;
 //     static dsf::app::Info Describe();
 //     static Config Load(dsf::config::Reader& root);           // 读取并校验；不得有副作用
-//     static void Build(const Config&, dsf::app::Assembly&);  // 组图、登记组件与发布器；不得有副作用
+//     static void Build(const Config&, dsf::app::Assembly&);   // 组图、登记组件与发布器；不得有副作用
 //   };
 //   int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
 //
@@ -80,7 +80,8 @@ class Assembly {
 
   // 就绪心跳：progress 返回单调递增的处理计数，计数增长时更新就绪文件。
   // DeepStream 管线应使用 MetaTap::frames()：mux 之后一个 buffer 是一个批次，帧数随源而变，
-  // 多路时某一路断流批次仍会推送；按真实帧计数才反映输入在供帧。都不调用时，进入 PLAYING 即视为就绪。
+  // 多路时某一路断流批次仍会推送；按真实帧计数才反映输入在供帧。都不调用时，主循环运行即视为就绪
+  // （适用于车辆停止时不出帧这类按需产帧的源，配合 options().startup_timeout = 0）。
   void ReadyWhen(std::function<std::uint64_t()> progress) { ready_progress_ = std::move(progress); }
   // 不经过 nvstreammux 的普通 GStreamer 管线：按经过该元件的 buffer 计数。
   void ReadyWhenFramesReach(const std::string& element) { ready_element_ = element; }

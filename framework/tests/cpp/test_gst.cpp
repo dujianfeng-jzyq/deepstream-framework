@@ -47,6 +47,24 @@ Graph TestGraph(int buffers, bool live) {
   return graph;
 }
 
+// 不推数据的 live appsrc：异步 fakesink 等待 preroll，模拟按需产帧的管线。
+Graph IdleLiveGraph() {
+  Graph graph;
+  graph.Chain({graph.Add("appsrc", "src")
+                   .Set("is-live", true)
+                   .Set("format", "time")
+                   .Set("caps", "video/x-raw,format=GRAY8,width=64,height=48,framerate=0/1"),
+               graph.Add("fakesink", "sink").Set("sync", false).Set("async", true)});
+  return graph;
+}
+
+void PushFrame(GstElement* source) {
+  GstBuffer* buffer = gst_buffer_new_allocate(nullptr, 64 * 48, nullptr);
+  GstFlowReturn flow = GST_FLOW_OK;
+  g_signal_emit_by_name(source, "push-buffer", buffer, &flow);
+  gst_buffer_unref(buffer);
+}
+
 }  // namespace
 
 TEST(introspection_reports_factories_properties_and_signals) {
@@ -228,6 +246,90 @@ TEST(plugin_timers_on_the_default_context_fire) {
   g_source_remove(id);
   CHECK(result.success);
   CHECK(state.fired >= 5);
+}
+
+TEST(positive_startup_timeout_fails_without_frames) {
+  RequirePlugin("appsrc");
+  Pipeline pipeline("idle-timeout", IdleLiveGraph());
+  Options options;
+  options.handle_signals = false;
+  options.startup_timeout = std::chrono::milliseconds(300);
+  const Result result = pipeline.Run(options);
+  CHECK(!result.success);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("startup-timeout"));
+}
+
+TEST(negative_startup_timeout_is_rejected) {
+  std::vector<std::string> log;
+  Recorder component("c", &log);
+  Pipeline pipeline("negative", TestGraph(5, false));
+  pipeline.Add(component);
+  Options options;
+  options.startup_timeout = std::chrono::milliseconds(-1);
+  const Result result = pipeline.Run(options);
+  CHECK(!result.success);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("start-error"));
+  CHECK(log == std::vector<std::string>{"c:released"});
+}
+
+TEST(zero_startup_timeout_waits_for_frames_and_stops_cleanly) {
+  RequirePlugin("appsrc");
+  std::vector<std::string> log;
+  Recorder component("c", &log);
+  Pipeline pipeline("idle-wait", IdleLiveGraph());
+  pipeline.Add(component);
+  std::atomic<int> ticks{0};
+  Timer timer;
+  pipeline.Post([&] {
+    // 超过正数超时测试的等待时长仍未出帧：不应超时，停止请求照常排空。
+    timer = pipeline.Every(std::chrono::milliseconds(100), [&] {
+      if (++ticks == 6) pipeline.RequestStop();
+    });
+  });
+  Options options;
+  options.handle_signals = false;
+  options.startup_timeout = std::chrono::milliseconds(0);
+  options.stop_timeout = std::chrono::seconds(3);
+  const Result result = pipeline.Run(options);
+  CHECK(result.success);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
+  CHECK(std::find(log.begin(), log.end(), "c:playing") == log.end());
+  CHECK(std::find(log.begin(), log.end(), "c:stopping") != log.end());
+}
+
+// 首帧到达后才进入 PLAYING：OnPlaying 中请求停止。
+class StopWhenPlaying : public Component {
+ public:
+  std::string_view Name() const override { return "stop-when-playing"; }
+  void OnPlaying(Pipeline& pipeline) override {
+    playing = true;
+    pipeline.RequestStop();
+  }
+  bool playing = false;
+};
+
+TEST(zero_startup_timeout_plays_once_frames_arrive) {
+  RequirePlugin("appsrc");
+  StopWhenPlaying component;
+  Pipeline pipeline("late-frames", IdleLiveGraph());
+  pipeline.Add(component);
+  std::atomic<int> ticks{0};
+  Timer timer;
+  pipeline.Post([&] {
+    timer = pipeline.Every(std::chrono::milliseconds(100), [&] {
+      if (++ticks >= 5) PushFrame(pipeline.Element("src"));
+      // 回归失败时也应有界退出，避免零启动超时使测试一直等待。
+      if (ticks >= 30) pipeline.RequestStop(StopMode::kImmediate);
+    });
+  });
+  Options options;
+  options.handle_signals = false;
+  options.startup_timeout = std::chrono::milliseconds(0);
+  options.stop_timeout = std::chrono::seconds(3);
+  const Result result = pipeline.Run(options);
+  CHECK(result.success);
+  CHECK(component.playing);
+  CHECK(ticks >= 5);
 }
 
 TEST(private_context_pipelines_run_in_parallel) {
