@@ -124,7 +124,7 @@ sources:
 ```cpp
 class Component {
   virtual std::string_view Name() const = 0;
-  virtual void Require(Requirements&) const;            // 图之外的能力需求（例如信号）
+  virtual void Require(Requirements&) const;           // 图之外的能力需求（例如信号）
   virtual void OnCreated(Pipeline&, GstElement* bin);  // 取元件、挂探针、连信号
   virtual void OnPlaying(Pipeline&);                   // 真正进入 PLAYING 后一次
   virtual void OnMessage(GstMessage*);                 // 每条总线消息
@@ -175,7 +175,7 @@ dsf::publish::Channel& channel = redis.Open({"project:detections", 256, 10000});
 channel.TryPublish(dsf::ds::Serialize(dsf::ds::DetectionMessage(frame)));   // 不阻塞
 ```
 
-一个连接、一个后台线程、每个通道独立的有界队列，批量 pipelining 发送 `XADD <stream> MAXLEN ~ <n> * payload <json>`。语义是至多一次：队列满、断线超过缓冲能力、停止时排空超时都会丢弃并计数；不落盘、不补发。Redis 不可用时每秒重连，消息先在队列中缓冲。需要可靠投递时实现 `Publisher` 接口或在图内使用 nvmsgbroker。
+一个连接、一个后台线程、每个通道独立的有界队列；消息入队后立即发送 `XADD <stream> MAXLEN ~ <n> * payload <json>`，有积压时每轮最多 `batch_size` 条以 pipelining 合并发送。消费端应使用 `XREAD`/`XREADGROUP` 的 `BLOCK` 阻塞读取。语义是至多一次：队列满、断线超过缓冲能力、停止时排空超时都会丢弃并计数；不落盘、不补发。Redis 不可用时每秒重连，消息先在队列中缓冲。需要可靠投递时实现 `Publisher` 接口或在图内使用 nvmsgbroker。
 
 ## 8. 分段录像
 
@@ -186,7 +186,7 @@ auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(
 recorder.MarkDetected();   // 任意线程：当前分段出现过目标
 ```
 
-文件为 `<root>/<source_id>/<branch>/<source_id>-<branch>-<起始毫秒>-<序号>.mp4`，写入期间是 `.mp4.tmp`，收到 `splitmuxsink-fragment-closed` 并改名成功后才触发 `finished`。启动时删除本目录遗留的 `.tmp`。保留期与容量清理不在框架内，应由单独的服务实现。
+文件为 `<root>/<source_id>/<branch>/<source_id>-<branch>-<起始本地时间>-<序号>.mp4`，起始本地时间形如 `20261005T163012.345`（本地时间与毫秒，不带时区标记，时区取自 `/etc/localtime`），程序应使用事件中的 `start_ms` 与 `path`，不解析文件名。写入期间是 `.mp4.tmp`，收到 `splitmuxsink-fragment-closed` 并改名成功后才触发 `finished`。启动时删除本目录遗留的 `.tmp`。保留期与容量清理不在框架内，应由单独的服务实现。
 
 停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。
 

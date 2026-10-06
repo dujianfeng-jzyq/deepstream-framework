@@ -27,7 +27,7 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 渲染器把 Compose 文件按顺序写进 `.env` 的 `COMPOSE_FILE`：
 
 ```text
-docker-compose.yaml                框架级：deepstream-base、deepstream-apps（播种）、model-engine-builder
+docker-compose.yaml               框架级：deepstream-base、deepstream-apps（播种）、model-engine-builder
 services/<unit>/compose.yaml      各服务单元（按名称排序）
 profiles/<profile>.yaml           平台差异（runtime: nvidia、设备、用户）
 ```

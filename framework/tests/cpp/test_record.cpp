@@ -1,6 +1,8 @@
 // dsf::record：分段登记的纯逻辑，以及软件编码 + splitmuxsink 的真实录像流程。
 
 #include <atomic>
+#include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -19,6 +21,27 @@ using record::SegmentRecorder;
 using record::SegmentTracker;
 
 namespace {
+
+// 测试期间切换进程时区，结束后恢复。
+struct ScopedTimeZone {
+  explicit ScopedTimeZone(const char* zone) {
+    const char* previous = std::getenv("TZ");
+    had_ = previous != nullptr;
+    if (had_) previous_ = previous;
+    ::setenv("TZ", zone, 1);
+    ::tzset();
+  }
+  ~ScopedTimeZone() {
+    if (had_) {
+      ::setenv("TZ", previous_.c_str(), 1);
+    } else {
+      ::unsetenv("TZ");
+    }
+    ::tzset();
+  }
+  bool had_ = false;
+  std::string previous_;
+};
 
 struct TempDir {
   TempDir() {
@@ -205,13 +228,16 @@ TEST(eos_fallback_closes_the_segment_when_upstream_swallows_eos) {
 
 TEST(tracker_names_segments_and_never_overwrites) {
   TempDir dir;
+  ScopedTimeZone zone("UTC0");
   SegmentTracker tracker(dir.path.string(), "cam", "osd");
   const Segment first = tracker.Open(1000);
-  CHECK_EQ(first.id, std::string("cam-osd-1000-0"));
-  CHECK_EQ(first.temp_path, (dir.path / "cam/osd/cam-osd-1000-0.mp4.tmp").string());
-  std::ofstream(fs::path(first.final_path).parent_path() / "cam-osd-2000-1.mp4") << "old";
+  CHECK_EQ(first.id, std::string("cam-osd-19700101T000001.000-0"));
+  CHECK_EQ(first.temp_path,
+           (dir.path / "cam/osd/cam-osd-19700101T000001.000-0.mp4.tmp").string());
+  std::ofstream(fs::path(first.final_path).parent_path() /
+                "cam-osd-19700101T000002.000-1.mp4") << "old";
   const Segment second = tracker.Open(2000);
-  CHECK_EQ(second.id, std::string("cam-osd-2000-2"));  // 跳过已存在的文件
+  CHECK_EQ(second.id, std::string("cam-osd-19700101T000002.000-2"));  // 跳过已存在的文件
   tracker.MarkDetected();
   Segment closed;
   CHECK(!tracker.Close("/nope", &closed));
@@ -226,6 +252,13 @@ TEST(tracker_names_segments_and_never_overwrites) {
   std::ofstream(fs::path(first.final_path).parent_path() / "stale.mp4.tmp") << "x";
   CHECK_EQ(tracker.RemoveStale(), 1);
   CHECK_THROWS(SegmentTracker(dir.path.string(), "../x", "osd"), "valid paths");
+}
+
+TEST(tracker_names_segments_in_local_time) {
+  TempDir dir;
+  ScopedTimeZone zone("CST-8");  // POSIX 写法：UTC+8，不依赖 tzdata
+  SegmentTracker tracker(dir.path.string(), "cam", "raw");
+  CHECK_EQ(tracker.Open(1791196212345).id, std::string("cam-raw-20261005T183012.345-0"));
 }
 
 TEST(recorder_closes_segments_at_eos) {

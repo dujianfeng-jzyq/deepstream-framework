@@ -1,5 +1,5 @@
 // Redis Stream 发布器：一个连接、一个工作线程、多个通道。
-// 每个通道有独立队列，检测消息的洪峰不会挤掉录像事件；每轮按 pipelining 批量发送。
+// 每个通道有独立队列，检测消息的洪峰不会挤掉录像事件；入队即唤醒发送，积压时每轮以 pipelining 合并发送。
 
 #include <hiredis/hiredis.h>
 #include <spdlog/spdlog.h>

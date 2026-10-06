@@ -1,6 +1,7 @@
 // 分段录像：splitmuxsink 按时长切分 MP4，框架负责命名、收尾确认与事件通知。
 //
-// 文件布局：<root>/<source_id>/<branch>/<source_id>-<branch>-<起始毫秒>-<序号>.mp4
+// 文件布局：<root>/<source_id>/<branch>/<source_id>-<branch>-<起始本地时间>-<序号>.mp4
+// 起始本地时间形如 20261005T163012.345（本地时间与毫秒，不带时区标记），时区取自 /etc/localtime。
 // 写入期间使用 .mp4.tmp 后缀；splitmuxsink 报告 fragment-closed 后改名为 .mp4，
 // 改名成功才通知 finished，消费者因此不会读到未写完的文件。
 

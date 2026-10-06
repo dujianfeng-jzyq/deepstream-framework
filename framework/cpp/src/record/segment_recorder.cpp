@@ -4,6 +4,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
@@ -19,6 +21,21 @@ namespace {
 bool IsPathComponent(const std::string& value) {
   return !value.empty() && value != "." && value != ".." &&
          value.find_first_of("/\\") == std::string::npos;
+}
+
+// 本地时间，带毫秒，不带时区标记，例如 20261005T163012.345。
+// 时区来自容器挂载的 /etc/localtime；文件名只供人阅读，绝对时间以事件中的 start_ms 为准。
+// 不含冒号，可用于各类文件系统。
+std::string LocalTimestamp(std::uint64_t epoch_ms) {
+  ::tzset();  // 进程启动后 TZ 可能变化（测试中会切换），每次重新读取
+  const std::time_t seconds = static_cast<std::time_t>(epoch_ms / 1000);
+  std::tm local{};
+  ::localtime_r(&seconds, &local);
+  char date[32];
+  std::strftime(date, sizeof(date), "%Y%m%dT%H%M%S", &local);
+  char text[48];
+  std::snprintf(text, sizeof(text), "%s.%03u", date, static_cast<unsigned>(epoch_ms % 1000));
+  return text;
 }
 
 }  // namespace
@@ -41,7 +58,7 @@ Segment SegmentTracker::Open(std::uint64_t start_ms) {
   Segment segment;
   segment.start_ms = start_ms;
   do {
-    segment.id = source_id_ + "-" + branch_ + "-" + std::to_string(start_ms) + "-" +
+    segment.id = source_id_ + "-" + branch_ + "-" + LocalTimestamp(start_ms) + "-" +
                  std::to_string(sequence_++);
     segment.final_path = (fs::path(Directory()) / (segment.id + ".mp4")).string();
     segment.temp_path = segment.final_path + ".tmp";
