@@ -45,7 +45,10 @@ Config Load(Reader& root) {
   config.redis.recording_stream = redis.Get<std::string>("recording_stream", "recordings", NonEmpty());
   config.redis.only_on_detection = redis.Get("only_on_detection", true);
   config.redis.queue_capacity = redis.Get("queue_capacity", 256, AtLeast(1));
-  config.redis.max_length = redis.Get("max_length", 10000, AtLeast(1));
+  config.redis.max_length = redis.Get("max_length", 100, AtLeast(1));
+  config.redis.queue_bytes =
+      static_cast<std::size_t>(redis.Get("queue_bytes_mb", 64, AtLeast(1))) << 20;
+  config.redis.image = dsf::ds::ImageSpec::Read(redis.Section("image"));
 
   // ---- 跨字段规则 ----
   if (config.tracker.enabled && config.inference.empty()) {
@@ -56,6 +59,12 @@ Config Load(Reader& root) {
   }
   if (config.records() && config.recording.root.empty()) {
     root.Fail("recording.root", "is required when raw or osd recording is enabled");
+  }
+  if (config.redis.image.enabled && !config.redis.enabled) {
+    root.Fail("redis.image.enabled", "requires redis.enabled (images are sent with detection messages)");
+  }
+  if (config.redis.image.enabled && config.inference.empty()) {
+    root.Fail("redis.image.enabled", "requires at least one inference entry (images are taken on detections)");
   }
   if (config.rtsp_out.enabled && config.rtsp_out.url.empty()) {
     root.Fail("rtsp_out.url", "is required when rtsp_out is enabled");

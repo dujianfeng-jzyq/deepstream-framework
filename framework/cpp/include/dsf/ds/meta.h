@@ -40,6 +40,14 @@ struct ObjectRecord {
   nlohmann::json extra = nlohmann::json::object();  // 提取器追加的数据（例如 analytics 状态）
 };
 
+// 编码后的整帧图片（MetaTap 的 image 选项）。尺寸是编码输出尺寸，未缩放时等于帧尺寸。
+struct Image {
+  std::string format;  // "jpeg"
+  int width = 0;
+  int height = 0;
+  std::string bytes;   // 编码数据（二进制）
+};
+
 struct FrameRecord {
   std::string source_id;
   std::uint32_t pad_index = 0;
@@ -51,6 +59,7 @@ struct FrameRecord {
   int height = 0;
   std::vector<ObjectRecord> objects;
   nlohmann::json extra = nlohmann::json::object();
+  std::optional<Image> image;  // 只在编码了这一帧时有值
 };
 
 struct BatchRecord {

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "dsf/config/config.h"
@@ -24,16 +25,22 @@ struct ChannelStats {
 };
 
 struct ChannelSpec {
-  std::string target;      // Redis：Stream 键名
-  int capacity = 256;      // 队列容量：后端慢或断线时能缓冲的消息数
-  int max_length = 10000;  // Redis：XADD MAXLEN ~ 近似上限
+  std::string target;         // Redis：Stream 键名
+  int capacity = 256;         // 队列容量：后端慢或断线时能缓冲的消息数
+  int max_length = 10000;     // Redis：XADD MAXLEN ~ 近似上限
+  std::size_t max_bytes = 0;  // 队列中消息的总字节上限（字段名与值），0 不限；大消息（图片）时设置
 };
+
+// 一条消息的字段（Redis Stream 的 field/value 对），值是任意二进制。
+using Fields = std::vector<std::pair<std::string, std::string>>;
 
 class Channel {
  public:
   virtual ~Channel() = default;
-  // 不阻塞；返回 false 表示消息已被丢弃（并计数）。可在任意线程调用。
-  virtual bool TryPublish(std::string payload) = 0;
+  // 不阻塞；返回 false 表示消息已被丢弃（并计数）。可在任意线程调用。空字段列表被丢弃。
+  virtual bool TryPublish(Fields fields) = 0;
+  // 单字段消息：等价于 {{"payload", payload}}。
+  bool TryPublish(std::string payload) { return TryPublish(Fields{{"payload", std::move(payload)}}); }
   virtual ChannelStats Stats() const = 0;
   virtual const std::string& target() const = 0;
 };
@@ -60,8 +67,9 @@ struct RedisOptions {
   int command_timeout_ms = 1000;  // 半死的连接不能让后台线程一直卡住
   int drain_timeout_ms = 2000;    // 停止时为剩余消息保留的时间
   int batch_size = 64;            // 每轮 pipelining 发送的最大条数
+  int batch_bytes = 8 << 20;      // 每轮发送的字节上限（至少一条）：大消息不能让 Redis 单线程长时间卡住
 
-  // 读取 host/port/password/*_timeout_ms/batch_size。
+  // 读取 host/port/password/*_timeout_ms/batch_size/batch_bytes。
   static RedisOptions Read(config::Reader reader);
 };
 

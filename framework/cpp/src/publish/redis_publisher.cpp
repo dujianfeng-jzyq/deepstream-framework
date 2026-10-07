@@ -1,5 +1,6 @@
 // Redis Stream 发布器：一个连接、一个工作线程、多个通道。
 // 每个通道有独立队列，检测消息的洪峰不会挤掉录像事件；入队即唤醒发送，积压时每轮以 pipelining 合并发送。
+// 每轮同时受条数与字节上限约束：带图片的大消息一轮发得太多会让 Redis 单线程长时间卡住。
 
 #include <hiredis/hiredis.h>
 #include <spdlog/spdlog.h>
@@ -10,6 +11,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -28,12 +30,19 @@ timeval ToTimeval(int milliseconds) {
   return value;
 }
 
+std::size_t SizeOf(const Fields& fields) {
+  std::size_t size = 0;
+  for (const auto& [name, value] : fields) size += name.size() + value.size();
+  return size;
+}
+
 class RedisPublisher;
 
 class RedisChannel : public Channel {
  public:
   RedisChannel(RedisPublisher& owner, ChannelSpec spec) : owner_(owner), spec_(std::move(spec)) {}
-  bool TryPublish(std::string payload) override;
+  using Channel::TryPublish;
+  bool TryPublish(Fields fields) override;
   ChannelStats Stats() const override;
   const std::string& target() const override { return spec_.target; }
 
@@ -41,7 +50,8 @@ class RedisChannel : public Channel {
   friend class RedisPublisher;
   RedisPublisher& owner_;
   ChannelSpec spec_;
-  std::deque<std::string> queue_;  // 由 owner_.mutex_ 保护
+  std::deque<Fields> queue_;  // 由 owner_.mutex_ 保护
+  std::size_t queued_bytes_ = 0;
   std::atomic<std::uint64_t> published_{0};
   std::atomic<std::uint64_t> dropped_{0};
   std::atomic<std::uint64_t> failed_{0};
@@ -49,7 +59,11 @@ class RedisChannel : public Channel {
 
 class RedisPublisher : public Publisher {
  public:
-  explicit RedisPublisher(RedisOptions options) : options_(std::move(options)) {}
+  explicit RedisPublisher(RedisOptions options) : options_(std::move(options)) {
+    if (options_.batch_size <= 0 || options_.batch_bytes <= 0) {
+      throw std::invalid_argument("batch_size and batch_bytes must be positive");
+    }
+  }
   ~RedisPublisher() override { Stop(); }
 
   Channel& Open(const ChannelSpec& spec) override {
@@ -101,11 +115,17 @@ class RedisPublisher : public Publisher {
     return text;
   }
 
-  bool Enqueue(RedisChannel& channel, std::string payload) {
+  bool Enqueue(RedisChannel& channel, Fields fields) {
+    const std::size_t size = SizeOf(fields);
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (accepting_ && channel.queue_.size() < static_cast<std::size_t>(channel.spec_.capacity)) {
-        channel.queue_.push_back(std::move(payload));
+      const std::size_t max_bytes = channel.spec_.max_bytes;
+      // 字节上限只约束积压：空队列总能放下一条，单条超过上限的消息不会永远发不出去。
+      const bool fits = max_bytes == 0 || channel.queue_.empty() || channel.queued_bytes_ + size <= max_bytes;
+      if (accepting_ && !fields.empty() && fits &&
+          channel.queue_.size() < static_cast<std::size_t>(channel.spec_.capacity)) {
+        channel.queue_.push_back(std::move(fields));
+        channel.queued_bytes_ += size;
         wakeup_.notify_one();
         return true;
       }
@@ -121,7 +141,7 @@ class RedisPublisher : public Publisher {
   }
 
  private:
-  using Batch = std::vector<std::pair<RedisChannel*, std::string>>;
+  using Batch = std::vector<std::pair<RedisChannel*, Fields>>;
 
   bool HasWork() const {
     for (const auto& channel : channels_) {
@@ -130,18 +150,25 @@ class RedisPublisher : public Publisher {
     return false;
   }
 
-  // 轮流从各通道取消息，避免某个通道独占一轮。
+  // 轮流从各通道取消息，避免某个通道独占一轮。超过字节上限时停止，但每轮至少取一条。
   Batch Take() {
     Batch batch;
+    std::size_t bytes = 0;
+    const auto full = [&] {
+      return batch.size() >= static_cast<std::size_t>(options_.batch_size) ||
+             bytes >= static_cast<std::size_t>(options_.batch_bytes);
+    };
     bool progressed = true;
-    while (progressed && batch.size() < static_cast<std::size_t>(options_.batch_size)) {
+    while (progressed && !full()) {
       progressed = false;
       for (const auto& channel : channels_) {
-        if (channel->queue_.empty() || batch.size() >= static_cast<std::size_t>(options_.batch_size)) {
-          continue;
-        }
+        if (channel->queue_.empty() || full()) continue;
+        const std::size_t size = SizeOf(channel->queue_.front());
+        if (!batch.empty() && bytes + size > static_cast<std::size_t>(options_.batch_bytes)) continue;
         batch.emplace_back(channel.get(), std::move(channel->queue_.front()));
         channel->queue_.pop_front();
+        channel->queued_bytes_ -= size;
+        bytes += size;
         progressed = true;
       }
     }
@@ -178,6 +205,7 @@ class RedisPublisher : public Publisher {
         channel->dropped_ += channel->queue_.size();
         remaining += channel->queue_.size();
         channel->queue_.clear();
+        channel->queued_bytes_ = 0;
       }
     }
     if (remaining > 0) spdlog::warn("publisher stopped with {} unsent message(s)", remaining);
@@ -217,9 +245,20 @@ class RedisPublisher : public Publisher {
   }
 
   void Send(Batch& batch) {
-    for (auto& [channel, payload] : batch) {
-      redisAppendCommand(context_, "XADD %s MAXLEN ~ %d * payload %b", channel->target().c_str(),
-                         channel->spec_.max_length, payload.data(), payload.size());
+    std::vector<const char*> argv;
+    std::vector<std::size_t> lengths;
+    for (auto& [channel, fields] : batch) {
+      // 用 argv 形式按长度传参：字段值可以是任意二进制（例如 JPEG），hiredis 不做转义与复制之外的处理。
+      const std::string max_length = std::to_string(channel->spec_.max_length);
+      argv = {"XADD", channel->target().c_str(), "MAXLEN", "~", max_length.c_str(), "*"};
+      lengths = {4, channel->target().size(), 6, 1, max_length.size(), 1};
+      for (const auto& [name, value] : fields) {
+        argv.push_back(name.data());
+        lengths.push_back(name.size());
+        argv.push_back(value.data());
+        lengths.push_back(value.size());
+      }
+      redisAppendCommandArgv(context_, static_cast<int>(argv.size()), argv.data(), lengths.data());
     }
     for (std::size_t i = 0; i < batch.size(); ++i) {
       RedisChannel& channel = *batch[i].first;
@@ -267,7 +306,7 @@ class RedisPublisher : public Publisher {
   std::atomic<std::int64_t> last_warning_ms_{-1000000};
 };
 
-bool RedisChannel::TryPublish(std::string payload) { return owner_.Enqueue(*this, std::move(payload)); }
+bool RedisChannel::TryPublish(Fields fields) { return owner_.Enqueue(*this, std::move(fields)); }
 
 ChannelStats RedisChannel::Stats() const {
   return {published_.load(), dropped_.load(), failed_.load(), owner_.Queued(*this)};
@@ -284,6 +323,7 @@ RedisOptions RedisOptions::Read(config::Reader reader) {
   options.command_timeout_ms = reader.Get("command_timeout_ms", 1000, config::AtLeast(1));
   options.drain_timeout_ms = reader.Get("drain_timeout_ms", 2000, config::AtLeast(1));
   options.batch_size = reader.Get("batch_size", 64, config::AtLeast(1));
+  options.batch_bytes = reader.Get("batch_bytes", 8 << 20, config::AtLeast(1));
   return options;
 }
 

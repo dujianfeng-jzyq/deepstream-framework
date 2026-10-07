@@ -5,6 +5,12 @@
 //   OnBatch        同步，在媒体线程执行，必须快（打录像标记、入队消息）
 //   OnBatchAsync   框架复制记录并投递到工作线程，队列满时丢弃并计数
 // 提取器把框架不认识的元数据（自定义 user meta 等）转换为 FrameRecord/ObjectRecord 的 extra。
+//
+// image.enabled 时，在转换之后、处理函数之前，用 DeepStream 的批量编码库（nvds_obj_enc：Jetson 上是
+// NVJPG 硬件，dGPU 上是 nvJPEG/CUDA）把选中的帧整帧编码为 JPEG，直接读取 GPU 上的批次 surface，
+// 数据复制进 FrameRecord::image。编码在采集点的流线程同步完成（每批等待一次 GPU），
+// AddMetaTap 用同一个 ImageSpec 在采集点前插入 queue，使编码与上游推理并行。
+// 编码失败只计数，该帧照常交给处理函数，image 为空。
 
 #ifndef DSF_DS_META_TAP_H
 #define DSF_DS_META_TAP_H
@@ -22,6 +28,7 @@
 #include <gst/gst.h>
 #include <nvdsmeta.h>
 
+#include "dsf/ds/blocks.h"
 #include "dsf/ds/meta.h"
 #include "dsf/gst/component.h"
 
@@ -32,6 +39,7 @@ class MetaTap : public gst::Component {
   using Handler = std::function<void(const BatchRecord&)>;
   using FrameExtractor = std::function<void(const NvDsFrameMeta&, FrameRecord&)>;
   using ObjectExtractor = std::function<void(const NvDsObjectMeta&, ObjectRecord&)>;
+  using ImageFilter = std::function<bool(const FrameRecord&)>;
 
   struct Options {
     std::string element;  // AddMetaTap 的元件名
@@ -39,6 +47,8 @@ class MetaTap : public gst::Component {
     int height = 0;
     bool classifiers = true;  // 采集二级分类结果
     bool analytics = false;   // 采集 nvdsanalytics 结果（帧级计数与目标状态）
+    ImageSpec image;          // 整帧图片编码；默认关闭
+    int gpu_id = 0;           // 编码使用的 GPU（与 mux 的 gpu_id 一致）
   };
 
   MetaTap(Options options, SourceRegistry sources);
@@ -48,6 +58,8 @@ class MetaTap : public gst::Component {
   void OnBatchAsync(Handler handler, std::size_t capacity = 64);
   void AddFrameExtractor(FrameExtractor extractor);
   void AddObjectExtractor(ObjectExtractor extractor);
+  // 选择要编码图片的帧（媒体线程，必须快）；默认选择有目标的帧。只在 image.enabled 时生效。
+  void SetImageFilter(ImageFilter filter);
 
   std::string_view Name() const override { return name_; }
   void OnCreated(gst::Pipeline& pipeline, GstElement* bin) override;
@@ -60,7 +72,8 @@ class MetaTap : public gst::Component {
   struct Async;
   static GstPadProbeReturn OnBuffer(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   void Handle(GstBuffer* buffer);
-  BatchRecord Convert(NvDsBatchMeta* batch) const;
+  BatchRecord Convert(NvDsBatchMeta* batch, std::vector<NvDsFrameMeta*>& metas) const;
+  void Encode(GstBuffer* buffer, BatchRecord& record, const std::vector<NvDsFrameMeta*>& metas);
 
   Options options_;
   SourceRegistry sources_;
@@ -69,10 +82,16 @@ class MetaTap : public gst::Component {
   std::vector<std::unique_ptr<Async>> async_;
   std::vector<FrameExtractor> frame_extractors_;
   std::vector<ObjectExtractor> object_extractors_;
+  ImageFilter image_filter_;
+  void* encoder_ = nullptr;  // NvDsObjEncCtxHandle；OnCreated 创建，OnReleased 销毁
   GstPad* pad_ = nullptr;
   gulong probe_ = 0;
   std::atomic<std::uint64_t> frames_{0};
   std::atomic<bool> warned_missing_{false};
+  std::atomic<std::uint64_t> images_{0};
+  std::atomic<std::uint64_t> image_failures_{0};
+  std::atomic<std::uint64_t> encode_batches_{0};
+  std::atomic<std::uint64_t> encode_us_{0};
 };
 
 // 运行环境中的 DeepStream 版本（读取 SDK 的 version 文件），读不到返回 "unknown"。

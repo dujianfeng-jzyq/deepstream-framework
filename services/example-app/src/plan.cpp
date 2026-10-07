@@ -38,7 +38,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
   for (const auto& infer : config.inference) tail = ds::AddInfer(graph, tail, infer);
   if (config.tracker.enabled) tail = ds::AddTracker(graph, tail, config.tracker);
   if (config.analytics.enabled) tail = ds::AddAnalytics(graph, tail, config.analytics);
-  tail = ds::AddMetaTap(graph, tail, kMetaTap);
+  tail = ds::AddMetaTap(graph, tail, kMetaTap, config.redis.image);
 
   const bool rtsp = config.rtsp_out.enabled;
   const bool osd_recording = config.recording.osd;

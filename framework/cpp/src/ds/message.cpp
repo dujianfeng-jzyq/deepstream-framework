@@ -70,7 +70,20 @@ nlohmann::json DetectionMessage(const FrameRecord& frame) {
   }
   message["objects"] = std::move(objects);
   if (!frame.extra.empty()) message["extra"] = frame.extra;
+  if (frame.image) {
+    message["image"] = {{"format", frame.image->format},
+                        {"width", frame.image->width},
+                        {"height", frame.image->height},
+                        {"size", frame.image->bytes.size()}};
+  }
   return message;
+}
+
+std::vector<std::pair<std::string, std::string>> DetectionEntry(const FrameRecord& frame) {
+  std::vector<std::pair<std::string, std::string>> fields;
+  fields.emplace_back("payload", Serialize(DetectionMessage(frame)));
+  if (frame.image) fields.emplace_back("image", frame.image->bytes);
+  return fields;
 }
 
 nlohmann::json RecordingMessage(const RecordingEvent& event) {

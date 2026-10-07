@@ -7,9 +7,13 @@
 #include <unordered_map>
 
 #include <gstnvdsmeta.h>
+#include <nvbufsurface.h>
 #include <nvds_analytics_meta.h>
+#include <nvds_obj_enc.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <stdexcept>
 
@@ -90,6 +94,8 @@ void MetaTap::AddObjectExtractor(ObjectExtractor extractor) {
   object_extractors_.push_back(std::move(extractor));
 }
 
+void MetaTap::SetImageFilter(ImageFilter filter) { image_filter_ = std::move(filter); }
+
 void MetaTap::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
   GstElement* element = gst_bin_get_by_name(GST_BIN(bin), options_.element.c_str());
   if (element == nullptr) {
@@ -98,6 +104,12 @@ void MetaTap::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
   pad_ = gst_element_get_static_pad(element, "src");
   gst_object_unref(element);
   if (pad_ == nullptr) throw std::runtime_error("element '" + options_.element + "' has no src pad");
+  if (options_.image.enabled) {
+    encoder_ = nvds_obj_enc_create_context(options_.gpu_id);
+    if (encoder_ == nullptr) {
+      throw std::runtime_error("cannot create image encoder on GPU " + std::to_string(options_.gpu_id));
+    }
+  }
   for (auto& async : async_) async->Start();
   probe_ = gst_pad_add_probe(pad_, GST_PAD_PROBE_TYPE_BUFFER, &MetaTap::OnBuffer, this, nullptr);
 }
@@ -109,6 +121,9 @@ void MetaTap::OnReleased() {
     gst_object_unref(pad_);
     pad_ = nullptr;
   }
+  // 管线已置 NULL、流线程已停止，不会再有编码在进行。
+  if (encoder_ != nullptr) nvds_obj_enc_destroy_context(static_cast<NvDsObjEncCtxHandle>(encoder_));
+  encoder_ = nullptr;
   for (auto& async : async_) async->Stop();
 }
 
@@ -117,6 +132,12 @@ void MetaTap::Report(gst::Stats& stats) const {
   std::uint64_t dropped = 0;
   for (const auto& async : async_) dropped += async->dropped.load();
   if (!async_.empty()) stats.Add(options_.element + "_async_dropped", dropped);
+  if (options_.image.enabled) {
+    stats.Add(options_.element + "_images", images_.load());
+    stats.Add(options_.element + "_image_failures", image_failures_.load());
+    const std::uint64_t batches = encode_batches_.load();
+    stats.Add(options_.element + "_encode_us_avg", batches == 0 ? 0 : encode_us_.load() / batches);
+  }
 }
 
 GstPadProbeReturn MetaTap::OnBuffer(GstPad* /*pad*/, GstPadProbeInfo* info, gpointer self) {
@@ -139,8 +160,10 @@ void MetaTap::Handle(GstBuffer* buffer) {
     }
     return;
   }
-  const BatchRecord record = Convert(batch);
+  std::vector<NvDsFrameMeta*> metas;
+  BatchRecord record = Convert(batch, metas);
   frames_ += record.frames.size();
+  if (encoder_ != nullptr) Encode(buffer, record, metas);
   for (const Handler& handler : handlers_) handler(record);
   for (auto& async : async_) async->Push(record);
 }
@@ -192,13 +215,104 @@ void ReadClassifiers(const NvDsObjectMeta& object, ObjectRecord& record) {
   }
 }
 
+std::vector<NvDsUserMeta*> ImageMetas(const NvDsFrameMeta& frame) {
+  std::vector<NvDsUserMeta*> metas;
+  for (NvDsMetaList* item = frame.frame_user_meta_list; item != nullptr; item = item->next) {
+    auto* user = static_cast<NvDsUserMeta*>(item->data);
+    if (user != nullptr && user->base_meta.meta_type == NVDS_CROP_IMAGE_META) metas.push_back(user);
+  }
+  return metas;
+}
+
 }  // namespace
 
-BatchRecord MetaTap::Convert(NvDsBatchMeta* batch) const {
+// 编码结果由库以 NVDS_CROP_IMAGE_META 挂到帧上。上游的其他采集点也可能挂过同类元数据，
+// 因此按编码前后的差异找到本次的结果；复制数据后立即移除，编码缓冲随之归还，不随批次流向下游。
+void MetaTap::Encode(GstBuffer* buffer, BatchRecord& record, const std::vector<NvDsFrameMeta*>& metas) {
+  struct Job {
+    std::size_t index;
+    std::vector<NvDsUserMeta*> before;
+    int width;
+    int height;
+  };
+  std::vector<Job> jobs;
+  for (std::size_t i = 0; i < record.frames.size(); ++i) {
+    const FrameRecord& frame = record.frames[i];
+    if (image_filter_ ? image_filter_(frame) : !frame.objects.empty()) jobs.push_back({i, {}, 0, 0});
+  }
+  if (jobs.empty()) return;
+
+  GstMapInfo map;
+  if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+    image_failures_ += jobs.size();
+    spdlog::warn("cannot map batch buffer at '{}' for image encoding", options_.element);
+    return;
+  }
+  auto* surface = reinterpret_cast<NvBufSurface*>(map.data);
+  auto* context = static_cast<NvDsObjEncCtxHandle>(encoder_);
+  const ImageSpec& spec = options_.image;
+  const auto begin = std::chrono::steady_clock::now();
+  std::vector<Job> submitted;
+  for (Job& job : jobs) {
+    NvDsFrameMeta* meta = metas[job.index];
+    if (meta->batch_id >= surface->numFilled) {
+      ++image_failures_;
+      continue;
+    }
+    const NvBufSurfaceParams& params = surface->surfaceList[meta->batch_id];
+    job.width = spec.width > 0 ? spec.width : static_cast<int>(params.width);
+    job.height = spec.height > 0 ? spec.height : static_cast<int>(params.height);
+    job.before = ImageMetas(*meta);
+    NvDsObjEncUsrArgs args{};
+    args.isFrame = true;
+    args.attachUsrMeta = true;
+    args.saveImg = false;
+    args.quality = spec.quality;
+    if (spec.width > 0) {
+      args.scaleImg = true;
+      args.scaledWidth = spec.width;
+      args.scaledHeight = spec.height;
+    }
+    if (nvds_obj_enc_process(context, &args, surface, nullptr, meta)) {
+      submitted.push_back(std::move(job));
+    } else {
+      ++image_failures_;
+    }
+  }
+  // 等待本批全部编码完成；之后才能读取结果。
+  nvds_obj_enc_finish(context);
+  gst_buffer_unmap(buffer, &map);
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  encode_us_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());
+  ++encode_batches_;
+
+  for (const Job& job : submitted) {
+    NvDsFrameMeta* meta = metas[job.index];
+    NvDsUserMeta* produced = nullptr;
+    for (NvDsUserMeta* user : ImageMetas(*meta)) {
+      if (std::find(job.before.begin(), job.before.end(), user) == job.before.end()) produced = user;
+    }
+    const auto* out = produced != nullptr ? static_cast<NvDsObjEncOutParams*>(produced->user_meta_data) : nullptr;
+    if (out == nullptr || out->outBuffer == nullptr || out->outLen == 0) {
+      ++image_failures_;
+    } else {
+      Image image;
+      image.format = "jpeg";
+      image.width = job.width;
+      image.height = job.height;
+      image.bytes.assign(reinterpret_cast<const char*>(out->outBuffer), out->outLen);
+      record.frames[job.index].image = std::move(image);
+      ++images_;
+    }
+    if (produced != nullptr) nvds_remove_user_meta_from_frame(meta, produced);
+  }
+}
+
+BatchRecord MetaTap::Convert(NvDsBatchMeta* batch, std::vector<NvDsFrameMeta*>& metas) const {
   BatchRecord record;
   const std::uint64_t now = WallMilliseconds();
   for (NvDsMetaList* f = batch->frame_meta_list; f != nullptr; f = f->next) {
-    const auto* frame = static_cast<NvDsFrameMeta*>(f->data);
+    auto* frame = static_cast<NvDsFrameMeta*>(f->data);
     if (frame == nullptr) continue;
     FrameRecord out;
     out.pad_index = frame->pad_index;
@@ -228,6 +342,7 @@ BatchRecord MetaTap::Convert(NvDsBatchMeta* batch) const {
     if (options_.analytics) ReadAnalyticsFrame(*frame, out);
     for (const auto& extractor : frame_extractors_) extractor(*frame, out);
     record.frames.push_back(std::move(out));
+    metas.push_back(frame);
   }
   return record;
 }

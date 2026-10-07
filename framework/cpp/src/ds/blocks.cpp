@@ -269,9 +269,26 @@ Element AddPreprocess(Graph& graph, const gst::Endpoint& input, const ConfigFile
   return element;
 }
 
-Element AddMetaTap(Graph& graph, const gst::Endpoint& input, const std::string& name) {
+ImageSpec ImageSpec::Read(Reader reader) {
+  ImageSpec spec;
+  spec.enabled = reader.Get("enabled", false);
+  spec.quality = reader.Get("quality", 85, config::Range(1, 100));
+  ReadOutputSize(reader, &spec.width, &spec.height);
+  spec.properties = reader.Props("properties");
+  return spec;
+}
+
+Element AddMetaTap(Graph& graph, const gst::Endpoint& input, const std::string& name,
+                   const ImageSpec& image) {
   Element tap = graph.Add("identity", name);
-  graph.Link(input, tap);
+  if (image.enabled) {
+    Element queue = graph.Add("queue", name + "_queue");
+    queue.Apply(image.properties);
+    graph.Chain({queue, tap});
+    graph.Link(input, queue);
+  } else {
+    graph.Link(input, tap);
+  }
   return tap;
 }
 

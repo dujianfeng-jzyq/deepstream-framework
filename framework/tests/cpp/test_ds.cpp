@@ -155,6 +155,58 @@ TEST(detection_message_schema) {
   CHECK(!DetectionMessage(frame)["objects"][0].contains("track_id"));
 }
 
+TEST(detection_entry_carries_binary_image) {
+  FrameRecord frame;
+  frame.source_id = "cam";
+  frame.width = 100;
+  frame.height = 50;
+  const auto plain = DetectionEntry(frame);
+  CHECK_EQ(plain.size(), 1u);
+  CHECK_EQ(plain[0].first, std::string("payload"));
+  CHECK(!nlohmann::json::parse(plain[0].second).contains("image"));
+
+  const std::string jpeg("\xFF\xD8\x00\xFF\xD9", 5);  // 含 NUL 与非 UTF-8 字节
+  frame.image = Image{"jpeg", 50, 25, jpeg};
+  const auto entry = DetectionEntry(frame);
+  CHECK_EQ(entry.size(), 2u);
+  const auto message = nlohmann::json::parse(entry[0].second);
+  CHECK_EQ(message["image"]["format"].get<std::string>(), std::string("jpeg"));
+  CHECK_EQ(message["image"]["width"].get<int>(), 50);
+  CHECK_EQ(message["image"]["height"].get<int>(), 25);
+  CHECK_EQ(message["image"]["size"].get<int>(), 5);
+  CHECK_EQ(entry[1].first, std::string("image"));
+  CHECK(entry[1].second == jpeg);
+}
+
+TEST(meta_tap_queue_only_with_image_encoding) {
+  Graph plain;
+  AddMetaTap(plain, plain.Add("identity", "in"), "meta");
+  CHECK(plain.Describe().find("in -> meta") != std::string::npos);
+  CHECK(!plain.Contains("meta_queue"));
+
+  const Document document = Document::LoadText(
+      "image: {enabled: true, quality: 90, width: 960, height: 540, properties: {max-size-buffers: 2}}\n", "t");
+  dsf::config::Reader root = document.Root();
+  const ImageSpec spec = ImageSpec::Read(root.Section("image"));
+  root.Finish();
+  CHECK_EQ(spec.quality, 90);
+  CHECK_EQ(spec.width, 960);
+  Graph graph;
+  AddMetaTap(graph, graph.Add("identity", "in"), "meta", spec);
+  const std::string text = graph.Describe();
+  CHECK(text.find("in -> meta_queue") != std::string::npos);
+  CHECK(text.find("meta_queue -> meta") != std::string::npos);
+  CHECK_EQ(Property(graph, "meta_queue", "max-size-buffers"), std::string("2"));
+
+  const auto read = [](const std::string& yaml) {
+    const Document bad = Document::LoadText(yaml, "t");
+    dsf::config::Reader reader = bad.Root();
+    return ImageSpec::Read(reader.Section("image"));
+  };
+  CHECK_THROWS(read("image: {quality: 0}\n"), "image.quality");
+  CHECK_THROWS(read("image: {width: 640}\n"), "set together");
+}
+
 TEST(recording_messages) {
   RecordingEvent event;
   event.source_id = "cam";

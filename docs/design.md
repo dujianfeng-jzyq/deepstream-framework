@@ -227,6 +227,8 @@ DeepStream 应用通过 `ReadyWhen` 使用 `MetaTap::frames()`，按批次元数
 
 默认采集包含检测与分类结果；analytics 由选项启用。`AddFrameExtractor` 和 `AddObjectExtractor` 允许应用将 SDK 自定义元数据转换为记录中的 `extra`。
 
+采集点可选地把选中的帧整帧编码为 JPEG，放入帧记录。编码使用 SDK 的批量编码库直接读取 GPU 上的批次 surface，Jetson 上由 NVJPG 硬件完成，dGPU 上由 nvJPEG（CUDA）完成，避免把整帧拷回主机内存；图片与元数据来自同一个 buffer，天然对应同一帧。编码在采集点的流线程中同步等待完成，`AddMetaTap` 在启用编码时插入 queue，使编码与上游推理处于不同的流线程。帧选择规则（默认有目标的帧）由应用决定。编码结果以 user meta 形式挂到帧上，复制后立即移除，不随批次流向下游。
+
 `OnBatch` 在媒体线程同步执行，适合计数、录像标记和快速入队；`OnBatchAsync` 使用有界队列交给工作线程，队列满时丢弃并计数。异步处理不延长 SDK 元数据对象的生命周期。
 
 ### 6.3 消息与投递
@@ -235,7 +237,9 @@ DeepStream 应用通过 `ReadyWhen` 使用 `MetaTap::frames()`，按批次元数
 
 内置消息以 `schema_version`、`event_type`、`source_id`、`timestamp_ms` 为公共字段。检测消息在编码时处理边界框裁剪、取整和无效面积过滤；录像完成消息中的 `duration_ms` 为主机墙钟差，不代表精确媒体时长。字段约定见 [框架使用指南](framework.md)。
 
-`Publisher` 管理连接和运行生命周期，`Channel` 提供非等待网络的 `TryPublish`。Redis Stream 实现使用一个连接、一个工作线程和多个独立有界队列，避免检测消息占用录像事件的队列容量。消息入队后立即唤醒工作线程发送，不等待凑批；积压时每轮最多取 `batch_size` 条，以 pipelining 合并发送 `XADD`，减少往返次数。发送时按配置进行近似长度裁剪。
+`Publisher` 管理连接和运行生命周期，`Channel` 提供非等待网络的 `TryPublish`。Redis Stream 实现使用一个连接、一个工作线程和多个独立有界队列，避免检测消息占用录像事件的队列容量。消息入队后立即唤醒工作线程发送，不等待凑批；积压时每轮最多取 `batch_size` 条、`batch_bytes` 字节，以 pipelining 合并发送 `XADD`，减少往返次数，同时避免大消息使 Redis 单线程长时间阻塞。发送时按配置进行近似长度裁剪。
+
+一条消息由若干字段组成，字段值二进制安全。检测消息的图片作为同一条记录的 `image` 字段原样发送，`payload` 中只有图片描述；不做 base64，也不另开 Stream，消费端从一条记录同时得到检测结果和对应画面。图片使消息达到数百 KB，因此通道可以设置积压字节上限，Redis 应部署在本机，Stream 长度只按抖动缓冲设置（例如 100 条）。存盘、上传等证据处理由消费服务完成，应用不写图片文件。
 
 选用 Redis Stream 而非 Pub/Sub，是因为消费端离线或处理变慢时消息仍保留在 Stream 中，可通过消费组分担处理并确认进度；Pub/Sub 在无订阅者时直接丢弃消息。消费端应使用阻塞读取（`XREAD`/`XREADGROUP` 的 `BLOCK`），新消息写入后即被唤醒，不应采用定时轮询。
 

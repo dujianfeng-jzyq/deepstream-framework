@@ -4,6 +4,7 @@
 #ifndef EXAMPLE_APP_CONFIG_H
 #define EXAMPLE_APP_CONFIG_H
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -35,7 +36,9 @@ struct RedisConfig {
   std::string recording_stream;
   bool only_on_detection = true;  // 没有目标的帧不发消息：现场绝大多数帧是空的
   int queue_capacity = 256;
-  int max_length = 10000;
+  int max_length = 100;            // 只为吸收消费端的短暂抖动，不是存储
+  std::size_t queue_bytes = 64u << 20;  // 发布队列的字节上限（带图片时一条约几百 KB）
+  dsf::ds::ImageSpec image;        // 有目标的帧编码 JPEG，随检测消息发送
 };
 
 struct Config {

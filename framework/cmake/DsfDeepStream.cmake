@@ -6,21 +6,23 @@ set(DEEPSTREAM_ROOT "/opt/nvidia/deepstream/deepstream" CACHE PATH "DeepStream S
 option(DSF_REQUIRE_DEEPSTREAM "SDK 不可用时配置失败（发布构建使用）" OFF)
 
 # 每次配置都重新判定：补装或切换 SDK 后无需清缓存。
-foreach(_var DSF_NVDS_META_LIBRARY DSF_NVDSGST_META_LIBRARY DSF_DEEPSTREAM_LINKABLE)
+foreach(_var DSF_NVDS_META_LIBRARY DSF_NVDSGST_META_LIBRARY DSF_NVDS_JPEGENC_LIBRARY DSF_DEEPSTREAM_LINKABLE)
   unset(${_var} CACHE)
   unset(${_var})
 endforeach()
 
 set(_dsf_ds_include "${DEEPSTREAM_ROOT}/sources/includes")
 set(_dsf_ds_missing)
-foreach(_header IN ITEMS nvdsmeta.h gstnvdsmeta.h nvdsinfer.h nvds_analytics_meta.h)
+foreach(_header IN ITEMS nvdsmeta.h gstnvdsmeta.h nvdsinfer.h nvds_analytics_meta.h nvds_obj_enc.h nvbufsurface.h)
   if(NOT EXISTS "${_dsf_ds_include}/${_header}")
     list(APPEND _dsf_ds_missing "${_dsf_ds_include}/${_header}")
   endif()
 endforeach()
 find_library(DSF_NVDS_META_LIBRARY NAMES nvds_meta PATHS "${DEEPSTREAM_ROOT}/lib" NO_DEFAULT_PATH)
 find_library(DSF_NVDSGST_META_LIBRARY NAMES nvdsgst_meta PATHS "${DEEPSTREAM_ROOT}/lib" NO_DEFAULT_PATH)
-foreach(_lib DSF_NVDS_META_LIBRARY DSF_NVDSGST_META_LIBRARY)
+# 批量 JPEG 编码（nvds_obj_enc）：MetaTap 的整帧图片编码使用。
+find_library(DSF_NVDS_JPEGENC_LIBRARY NAMES nvds_batch_jpegenc PATHS "${DEEPSTREAM_ROOT}/lib" NO_DEFAULT_PATH)
+foreach(_lib DSF_NVDS_META_LIBRARY DSF_NVDSGST_META_LIBRARY DSF_NVDS_JPEGENC_LIBRARY)
   if(NOT ${_lib})
     list(APPEND _dsf_ds_missing "${DEEPSTREAM_ROOT}/lib/${_lib}")
   endif()
@@ -39,7 +41,7 @@ if(NOT _dsf_ds_missing)
   set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
   set(CMAKE_REQUIRED_INCLUDES "${_dsf_ds_include}")
   set(CMAKE_REQUIRED_LIBRARIES
-    "${DSF_NVDSGST_META_LIBRARY}" "${DSF_NVDS_META_LIBRARY}"
+    "${DSF_NVDSGST_META_LIBRARY}" "${DSF_NVDS_META_LIBRARY}" "${DSF_NVDS_JPEGENC_LIBRARY}"
     PkgConfig::DSF_GSTREAMER PkgConfig::DSF_GSTREAMER_VIDEO)
   set(CMAKE_REQUIRED_LINK_OPTIONS "-Wl,-rpath,${DEEPSTREAM_ROOT}/lib")
   check_cxx_source_compiles([=[
@@ -47,7 +49,11 @@ if(NOT _dsf_ds_missing)
     #include <gstnvdsmeta.h>
     #include <nvds_analytics_meta.h>
     #include <nvdsinfer.h>
-    int main() { return gst_buffer_get_nvds_batch_meta(nullptr) != nullptr; }
+    #include <nvds_obj_enc.h>
+    int main() {
+      if (gst_buffer_get_nvds_batch_meta(nullptr) != nullptr) return 1;
+      return nvds_obj_enc_create_context != nullptr ? 0 : 1;
+    }
   ]=] DSF_DEEPSTREAM_LINKABLE)
   cmake_pop_check_state()
   if(NOT DSF_DEEPSTREAM_LINKABLE)

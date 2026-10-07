@@ -8,3 +8,5 @@ redis:
   password: ${REDIS_PASSWORD}
   # 与 example-app 的 redis.recording_stream 一致。
   stream: ${PROJECT_NAME}:recordings
+  # 与 example-app 的 redis.detection_stream 一致；空串不订阅检测消息。
+  detection_stream: ${PROJECT_NAME}:detections

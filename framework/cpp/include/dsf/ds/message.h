@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -19,8 +21,13 @@ namespace dsf::ds {
 inline constexpr int kSchemaVersion = 1;
 
 // event_type=detection。框选裁剪到帧内后取整，取整后零宽或零高的目标被丢弃；
-// 置信度保留三位小数，非有限值记为 0。
+// 置信度保留三位小数，非有限值记为 0。帧带图片时加 image 描述（format/width/height/size），
+// 不含图片数据本身。
 nlohmann::json DetectionMessage(const FrameRecord& frame);
+
+// 检测消息的 Stream 字段：payload 为 Serialize(DetectionMessage(frame))；帧带图片时追加 image 字段，
+// 值为编码数据原样（二进制，不做 base64）。返回类型与 dsf::publish::Fields 相同，可直接 TryPublish。
+std::vector<std::pair<std::string, std::string>> DetectionEntry(const FrameRecord& frame);
 
 struct RecordingEvent {
   enum class Type { kStarted, kFinished };

@@ -72,6 +72,23 @@ class RedisServer {
   }
   int port() const { return port_; }
 
+  // 最后一条记录的字段。
+  Fields Last(const std::string& stream) const {
+    redisContext* context = redisConnect("127.0.0.1", port_);
+    auto* reply = static_cast<redisReply*>(redisCommand(context, "XREVRANGE %s + - COUNT 1", stream.c_str()));
+    Fields fields;
+    if (reply != nullptr && reply->type == REDIS_REPLY_ARRAY && reply->elements == 1) {
+      const redisReply* values = reply->element[0]->element[1];
+      for (std::size_t i = 0; i + 1 < values->elements; i += 2) {
+        fields.emplace_back(std::string(values->element[i]->str, values->element[i]->len),
+                            std::string(values->element[i + 1]->str, values->element[i + 1]->len));
+      }
+    }
+    if (reply != nullptr) freeReplyObject(reply);
+    redisFree(context);
+    return fields;
+  }
+
   long long Length(const std::string& stream, const std::string& password = {}) const {
     redisContext* context = redisConnect("127.0.0.1", port_);
     if (!password.empty()) freeReplyObject(redisCommand(context, "AUTH %s", password.c_str()));
@@ -113,6 +130,43 @@ TEST(publishes_to_independent_channels) {
   CHECK_EQ(server.Length("test:recordings"), 1LL);
   CHECK(!detections.TryPublish("late"));  // 停止后丢弃
   CHECK_THROWS(publisher->Open({"x", 1, 1}), "before Start");
+}
+
+TEST(publishes_binary_fields_and_trims_to_max_length) {
+  RedisServer server;
+  RedisOptions options = Options(server.port());
+  options.batch_bytes = 1;  // 每轮只发一条：字节上限不能让大消息永远发不出去
+  auto publisher = MakeRedisStreamPublisher(options);
+  Channel& channel = publisher->Open({"test:images", 300, 10});
+  publisher->Start();
+  const std::string jpeg("\xFF\xD8\x00\r\n\xFF\xD9", 7);
+  for (int i = 0; i < 250; ++i) CHECK(channel.TryPublish(Fields{{"payload", "{}"}, {"image", jpeg}}));
+  CHECK(!channel.TryPublish(Fields{}));
+  publisher->Stop();
+  CHECK_EQ(channel.Stats().published, 250u);
+  CHECK_EQ(channel.Stats().dropped, 1u);
+  const Fields last = server.Last("test:images");
+  CHECK_EQ(last.size(), 2u);
+  CHECK_EQ(last[1].first, std::string("image"));
+  CHECK(last[1].second == jpeg);
+  // MAXLEN ~ 按整个内部节点（默认 100 条）裁剪：长度不超过上限加一个节点。
+  CHECK(server.Length("test:images") <= 10LL + 100LL);
+}
+
+TEST(byte_limit_drops_when_backlog_is_full) {
+  RedisOptions options = Options(FreePort());  // 没有服务监听：消息只能积压
+  options.connect_timeout_ms = 100;
+  options.drain_timeout_ms = 200;
+  auto publisher = MakeRedisStreamPublisher(options);
+  ChannelSpec spec{"test:x", 100, 100};
+  spec.max_bytes = 2500;
+  Channel& channel = publisher->Open(spec);
+  publisher->Start();
+  const std::string big(1000, 'x');
+  CHECK(channel.TryPublish(Fields{{"image", std::string(5000, 'x')}}));  // 空队列总能放下一条
+  CHECK(!channel.TryPublish(Fields{{"image", big}}));
+  publisher->Stop();
+  CHECK_EQ(channel.Stats().dropped, 2u);  // 1 条超限 + 1 条排空期满仍未发出
 }
 
 TEST(buffers_while_disconnected_and_drops_on_overflow) {

@@ -36,8 +36,9 @@ struct ExampleApp {
       auto& publisher = assembly.AddPublisher(dsf::publish::MakeRedisStreamPublisher(config.redis.options));
       const int capacity = config.redis.queue_capacity;
       const int max_length = config.redis.max_length;
-      detections = &publisher.Open({config.redis.detection_stream, capacity, max_length});
-      recordings = &publisher.Open({config.redis.recording_stream, capacity, max_length});
+      const std::size_t bytes = config.redis.queue_bytes;
+      detections = &publisher.Open({config.redis.detection_stream, capacity, max_length, bytes});
+      recordings = &publisher.Open({config.redis.recording_stream, capacity, max_length, bytes});
     }
 
     // 每路源的录像器，供检测结果给当前分段打“出现过目标”的标记。
@@ -79,6 +80,8 @@ struct ExampleApp {
     options.width = config.mux.width;
     options.height = config.mux.height;
     options.analytics = config.analytics.enabled;
+    options.image = config.redis.image;  // 默认对有目标的帧编码
+    options.gpu_id = config.mux.gpu_id;
     auto& tap = assembly.Add<dsf::ds::MetaTap>(options, sources);
     if (!config.inference.empty()) {
       const bool only_on_detection = config.redis.only_on_detection;
@@ -88,7 +91,7 @@ struct ExampleApp {
             for (auto* recorder : by_source[frame.pad_index]) recorder->MarkDetected();
           }
           if (detections != nullptr && (!only_on_detection || !frame.objects.empty())) {
-            detections->TryPublish(dsf::ds::Serialize(dsf::ds::DetectionMessage(frame)));
+            detections->TryPublish(dsf::ds::DetectionEntry(frame));
           }
         }
       });

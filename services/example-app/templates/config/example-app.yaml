@@ -80,4 +80,13 @@ redis:
   recording_stream: ${PROJECT_NAME}:recordings
   only_on_detection: true
   queue_capacity: 256
-  max_length: 10000
+  queue_bytes_mb: 64
+  # Stream 只吸收消费端的短暂抖动（XADD MAXLEN ~，实际长度可能略多于该值），不是存储。
+  max_length: 100
+  # 有目标的帧整帧编码为 JPEG（Jetson 硬件 / dGPU nvJPEG），作为同一条记录的 image 字段（二进制）发送；
+  # payload 中的 image 描述尺寸与大小。图片在 OSD 之前编码，不含框，坐标与 bbox 一致。
+  image:
+    enabled: false
+    quality: 85
+    width: 0     # 0 保持 mux 输出尺寸
+    height: 0

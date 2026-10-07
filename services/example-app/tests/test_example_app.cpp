@@ -110,6 +110,16 @@ TEST(message_only_deployment_has_no_encoder) {
   CHECK(graph.find("nvv4l2h264enc") == std::string::npos);
 }
 
+TEST(image_encoding_adds_a_queue_before_the_tap) {
+  CHECK(Describe(Load(Template())).find("tracker -> meta") != std::string::npos);
+  const auto config = Load(Replace(Template(), "  image:\n    enabled: false", "  image:\n    enabled: true"));
+  CHECK(config.redis.image.enabled);
+  CHECK_EQ(config.redis.max_length, 100);
+  const std::string graph = Describe(config);
+  CHECK(graph.find("tracker -> meta_queue") != std::string::npos);
+  CHECK(graph.find("meta_queue -> meta") != std::string::npos);
+}
+
 TEST(cross_field_rules) {
   const std::string base = Template();
   CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",
@@ -121,6 +131,9 @@ TEST(cross_field_rules) {
   CHECK_THROWS(Load(no_output), "enable at least one output");
   CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");
   CHECK_THROWS(Load(Replace(base, "  codec: h264", "  codec: vp9")), "encoder.codec");
+  const std::string images = Replace(base, "  image:\n    enabled: false", "  image:\n    enabled: true");
+  CHECK_THROWS(Load(Replace(images, "redis:\n  enabled: true", "redis:\n  enabled: false")),
+               "redis.image.enabled: requires redis.enabled");
 }
 
 DSF_TEST_MAIN()

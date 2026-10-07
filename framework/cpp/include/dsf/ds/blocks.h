@@ -122,8 +122,21 @@ Element AddAnalytics(Graph& graph, const gst::Endpoint& input, const ConfigFileS
 Element AddPreprocess(Graph& graph, const gst::Endpoint& input, const ConfigFileSpec& spec,
                       const std::string& name = "preprocess");
 
-// 元数据采集点：identity，探针挂在它的 src pad 上。
-Element AddMetaTap(Graph& graph, const gst::Endpoint& input, const std::string& name);
+// 采集点上的整帧图片编码（MetaTap::Options::image）。编码数据随 FrameRecord::image 交给处理函数。
+struct ImageSpec {
+  bool enabled = false;
+  int quality = 85;  // JPEG 质量 1–100
+  int width = 0;     // 编码输出尺寸，0 保持帧尺寸（mux 输出尺寸，即框坐标空间）
+  int height = 0;
+  Properties properties;  // 透传给采集点前的 queue
+
+  static ImageSpec Read(Reader reader);
+};
+
+// 元数据采集点：identity，探针挂在它的 src pad 上。image.enabled 时在前面插入 queue（<name>_queue）：
+// 编码在采集点的流线程中同步完成，queue 让它与上游的推理并行，而不是串行累加到每个批次上。
+Element AddMetaTap(Graph& graph, const gst::Endpoint& input, const std::string& name,
+                   const ImageSpec& image = {});
 
 // ---- 画面输出 ----
 

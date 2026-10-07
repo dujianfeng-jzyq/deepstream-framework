@@ -91,11 +91,15 @@ class ExampleServiceTest(unittest.TestCase):
             time.sleep(0.5)  # 服务从 "$" 开始读，确保 XREAD 已经在等待
             client.xadd("p:recordings", {"payload": '{"event_type":"recording_finished","source_id":"cam",'
                                                     '"branch":"osd","path":"/data/a.mp4","duration_ms":5}'})
+            client.xadd("p:detections", {"payload": '{"event_type":"detection","source_id":"cam",'
+                                                    '"frame_num":3,"objects":[{}]}',
+                                         "image": b"\xff\xd8\x00\xff\xd9"})
             time.sleep(1.5)
             service.send_signal(signal.SIGTERM)
             output, _ = service.communicate(timeout=10)
             self.assertEqual(service.returncode, 0, output)
             self.assertIn("event: cam osd /data/a.mp4 duration_ms=5", output)
+            self.assertIn("event: detection cam frame=3 objects=1 image=5 bytes", output)
             self.assertIn("redis.password=***", output)
             self.assertFalse((self.dir / "ready").exists())
         finally:

@@ -50,7 +50,7 @@ if(DSF_HAVE_DEEPSTREAM)
   add_library(dsf::ds_meta ALIAS dsf_ds_meta)
   target_link_libraries(dsf_ds_meta
     PUBLIC dsf_ds dsf::deepstream
-    PRIVATE dsf_logging dsf_warnings)
+    PRIVATE "${DSF_NVDS_JPEGENC_LIBRARY}" dsf_logging dsf_warnings)
   target_compile_definitions(dsf_ds_meta PRIVATE
     DSF_DEEPSTREAM_VERSION_FILE="${DEEPSTREAM_ROOT}/version")
 endif()

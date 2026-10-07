@@ -94,7 +94,7 @@ sometimes pad（nvurisrcbin、decodebin）在 pad 出现时自动连接。属性
 | `AddInfer` | `InferSpec::Read` / `ReadInferences` | nvinfer 或 nvinferserver，可串接多级 |
 | `AddTracker` | `TrackerSpec::Read` | nvtracker |
 | `AddAnalytics` / `AddPreprocess` | `ConfigFileSpec::Read` | nvdsanalytics / nvdspreprocess |
-| `AddMetaTap` | — | 元数据采集点（identity） |
+| `AddMetaTap` | `ImageSpec::Read` | 元数据采集点（identity）；启用图片编码时前面加 queue |
 | `AddOsd` | `OsdSpec::Read` | nvdsosd（前后各一次格式转换） |
 | `AddTiler` / `AddDemux` | `TilerSpec::Read` | 多路拼接 / 按源拆分（`demux.Pad("src_i")`） |
 | `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；编码器属性在 Jetson 与 dGPU 不同，用 `properties` |
@@ -155,6 +155,17 @@ tap.AddObjectExtractor([](const NvDsObjectMeta& meta, dsf::ds::ObjectRecord& out
 });
 ```
 
+图片编码（可选，默认关闭）：
+
+```cpp
+options.image = dsf::ds::ImageSpec::Read(reader.Section("image"));   // enabled quality width height properties
+options.gpu_id = mux.gpu_id;
+dsf::ds::AddMetaTap(graph, tail, "meta", options.image);             // 同一个 ImageSpec：在采集点前插入 queue
+tap.SetImageFilter([](const dsf::ds::FrameRecord& f) { return !f.objects.empty(); });  // 可选，默认即此规则
+```
+
+选中的帧在转换之后、处理函数之前用 `nvds_obj_enc` 整帧编码为 JPEG（Jetson 为 NVJPG 硬件，dGPU 为 nvJPEG/CUDA），直接读取 GPU 上的批次 surface，结果复制进 `FrameRecord::image`（`format` `width` `height` `bytes`）。采集点位于 OSD 之前时图片不含框，尺寸默认等于 mux 输出尺寸，与 bbox 坐标一致；`width/height` 设置后缩放，bbox 需按比例换算。编码在采集点的流线程中同步等待 GPU 完成，queue 使它与上游推理并行：吞吐要求每批编码时间小于帧间隔，延时增加一次编码时间。统计 `<element>_images`、`_image_failures`、`_encode_us_avg`；编码失败的帧照常交给处理函数，`image` 为空。
+
 `BatchRecord → FrameRecord → ObjectRecord` 是纯数据：`source_id`（由 `SourceRegistry` 按 `pad_index` 映射）、`frame_num`、`pts_ns`、`ntp_ms`、`wall_ms`、帧尺寸（mux 输出尺寸，即框坐标空间）、目标的类别、标签、置信度、框、`track_id`（仅被跟踪时有值）、二级分类结果 `classes`、`extra`。`options.analytics = true` 时采集 nvdsanalytics 的帧级计数与目标状态。
 
 ## 7. 消息
@@ -163,7 +174,7 @@ tap.AddObjectExtractor([](const NvDsObjectMeta& meta, dsf::ds::ObjectRecord& out
 
 | event_type | 字段 |
 |---|---|
-| `detection` | `frame_num` `pts_ns` `ntp_ms`(有值时) `frame_width` `frame_height` `objects[]`：`class_id` `label` `confidence`(三位小数) `bbox{x,y,width,height}`（裁剪到帧内后取整，零面积丢弃）`track_id`(被跟踪时) `classes[]`(有值时) `extra`(有值时)；帧级 `extra` |
+| `detection` | `frame_num` `pts_ns` `ntp_ms`(有值时) `frame_width` `frame_height` `objects[]`：`class_id` `label` `confidence`(三位小数) `bbox{x,y,width,height}`（裁剪到帧内后取整，零面积丢弃）`track_id`(被跟踪时) `classes[]`(有值时) `extra`(有值时)；帧级 `extra`；`image{format,width,height,size}`(帧带图片时，只是描述) |
 | `recording_started` | `branch` `segment_id` `start_ms` |
 | `recording_finished` | 另加 `end_ms` `duration_ms`（主机墙钟差）`detected` `path`（已封装完成、可直接读取的文件） |
 
@@ -172,10 +183,20 @@ tap.AddObjectExtractor([](const NvDsObjectMeta& meta, dsf::ds::ObjectRecord& out
 ```cpp
 auto& redis = assembly.AddPublisher(dsf::publish::MakeRedisStreamPublisher(options));
 dsf::publish::Channel& channel = redis.Open({"project:detections", 256, 10000});
-channel.TryPublish(dsf::ds::Serialize(dsf::ds::DetectionMessage(frame)));   // 不阻塞
+channel.TryPublish(dsf::ds::Serialize(dsf::ds::DetectionMessage(frame)));   // 不阻塞，单字段 payload
+channel.TryPublish(dsf::ds::DetectionEntry(frame));   // payload + 帧带图片时的 image 字段（JPEG 原始字节）
 ```
 
-一个连接、一个后台线程、每个通道独立的有界队列；消息入队后立即发送 `XADD <stream> MAXLEN ~ <n> * payload <json>`，有积压时每轮最多 `batch_size` 条以 pipelining 合并发送。消费端应使用 `XREAD`/`XREADGROUP` 的 `BLOCK` 阻塞读取。语义是至多一次：队列满、断线超过缓冲能力、停止时排空超时都会丢弃并计数；不落盘、不补发。Redis 不可用时每秒重连，消息先在队列中缓冲。需要可靠投递时实现 `Publisher` 接口或在图内使用 nvmsgbroker。
+一个连接、一个后台线程、每个通道独立的有界队列；消息入队后立即发送 `XADD <stream> MAXLEN ~ <n> * <field> <value> ...`（字段值二进制安全，图片不做 base64），有积压时每轮最多 `batch_size` 条、`batch_bytes` 字节（至少一条）以 pipelining 合并发送。`ChannelSpec::max_bytes` 限制队列积压的总字节数（0 不限，空队列总能放下一条），带图片的通道应设置。`MAXLEN ~` 按 Stream 内部节点（默认 100 条）裁剪，实际长度可能略多于设定值。
+
+带图片的检测记录读取方式（redis-py，`decode_responses=False`）：
+
+```python
+event = json.loads(fields[b"payload"])
+jpeg = fields.get(b"image")        # bytes；该帧没有图片时为 None
+```
+
+图片随消息走内存：Redis 应与应用在同一主机（Compose 网络内），Stream 的 `MAXLEN` 只用来吸收消费端的短暂抖动（例如 100），不作为存储；消费端读取后自行存盘或上传，慢操作放到读取循环之外。消费端应使用 `XREAD`/`XREADGROUP` 的 `BLOCK` 阻塞读取。语义是至多一次：队列满、断线超过缓冲能力、停止时排空超时都会丢弃并计数；不落盘、不补发。Redis 不可用时每秒重连，消息先在队列中缓冲。需要可靠投递时实现 `Publisher` 接口或在图内使用 nvmsgbroker。
 
 ## 8. 分段录像
 
