@@ -20,6 +20,7 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 - 发布构建设置 `DSF_REQUIRE_DEEPSTREAM=ON`：SDK 不可用即失败，不会产出缺少应用的载荷。
 - builder 安装 Redis 服务端与软件编解码插件（并用 SDK 自带脚本恢复上游裁掉的编解码库），使录像与消息的集成测试真正执行。
 - runtime-check 回到原始 base，对每个应用执行 `--version` 与 `--selftest`，并导入 Python 运行时；任何失败都不会生成 apps 镜像。
+- JPEG 编码库在 `image.enabled` 的采集组件启动时才加载，构建和无 GPU 自检不加载其设备依赖。目标 Jetson 仍须使用与 JetPack 匹配的 DeepStream 镜像和 NVIDIA runtime；缺少运行库时启用图片会明确报错。
 - 镜像名由渲染器派生：`<项目>/deepstream-<DS版本>-base:<BASE_VERSION>-<输入摘要>`、`<项目>/deepstream-<DS版本>-apps:<APPS_VERSION>`。base 的输入摘要覆盖 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES`：输入变化一定得到新 tag，同名 tag 不会代表两种内容。
 
 ## 2. 服务与 Compose
@@ -124,6 +125,6 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 
 ## 7. 平台与现场验证
 
-profile 中写平台差异：`dgpu-ds80`、`dgpu-ds71` 为 x86_64 独立显卡，`dev-arm64` 用于 Apple Silicon 上的构建与无 GPU 自检（不运行推理）。Jetson 平台新增 profile 时，在 `x-build` 指定 L4T 版本的上游镜像，在 `services` 中加入设备与 `group_add`，编码器差异写在应用配置的 `encoder.properties`。
+profile 中写平台差异：`dgpu-ds71`、`dgpu-ds80` 为 x86_64 独立显卡，`arm64-ds71`、`arm64-ds80` 用于 Apple Silicon 上的构建与无 GPU 自检（不运行推理）。Jetson 部署时选择与 JetPack 匹配的上游镜像，在 `services` 中加入 `runtime: nvidia`、所需设备与 `group_add`，编码器差异写在应用配置的 `encoder.properties`。
 
 镜像构建与自检不证明 GPU 推理可用。目标机仍需核对：真实 RTSP 输入、推理与跟踪结果、Redis 消息、完整 MP4 与停止时最后一段、RTSP 输出、engine 再次启动时复用、Linux 下的属主与设备权限。Docker Desktop 上的结果不能替代 Linux 验证。

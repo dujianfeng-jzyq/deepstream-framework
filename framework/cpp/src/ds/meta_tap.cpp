@@ -6,10 +6,11 @@
 #include <string>
 #include <unordered_map>
 
+#include <dlfcn.h>
 #include <gstnvdsmeta.h>
 #include <nvbufsurface.h>
 #include <nvds_analytics_meta.h>
-#include <nvds_obj_enc.h>
+#include <nvds_obj_encode.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -20,6 +21,61 @@
 #include "dsf/gst/pipeline.h"
 
 namespace dsf::ds {
+
+// Jetson 的 surface/transform 库由 NVIDIA runtime 提供，无 GPU 的构建和自检不应加载它们。
+// 按 soname 加载：由可执行文件的 RUNPATH（dsf::deepstream 写入的 SDK lib 目录）解析，
+// 不把构建机解析出的版本目录写进载荷。x86 镜像的 ld.so.conf 不含 SDK 目录，RUNPATH 不可省。
+// 库必须存活到编码上下文销毁之后；构造失败时也由 RAII 释放已打开的句柄。
+struct MetaTap::Encoder {
+  explicit Encoder(int gpu_id) : library_(Open()) {
+    auto create = Symbol<decltype(&nvds_obj_enc_create_context)>("nvds_obj_enc_create_context");
+    destroy_ = Symbol<decltype(&nvds_obj_enc_destroy_context)>("nvds_obj_enc_destroy_context");
+    process_ = Symbol<decltype(&nvds_obj_enc_process)>("nvds_obj_enc_process");
+    finish_ = Symbol<decltype(&nvds_obj_enc_finish)>("nvds_obj_enc_finish");
+    context_ = create(gpu_id);
+    if (context_ == nullptr) {
+      throw std::runtime_error("cannot create image encoder on GPU " + std::to_string(gpu_id));
+    }
+  }
+
+  ~Encoder() { destroy_(context_); }
+
+  bool Process(NvDsObjEncUsrArgs* args, NvBufSurface* surface, NvDsFrameMeta* frame) {
+    return process_(context_, args, surface, nullptr, frame);
+  }
+
+  void Finish() { finish_(context_); }
+
+ private:
+  static void* Open() {
+    void* library = dlopen("libnvds_batch_jpegenc.so", RTLD_NOW | RTLD_LOCAL);
+    if (library == nullptr) {
+      throw std::runtime_error(std::string("cannot load image encoder: ") + dlerror() +
+                               "; image encoding requires NVIDIA runtime libraries");
+    }
+    return library;
+  }
+
+  template <typename Function>
+  Function Symbol(const char* name) {
+    dlerror();
+    void* symbol = dlsym(library_.get(), name);
+    if (const char* error = dlerror()) {
+      throw std::runtime_error(std::string("cannot resolve image encoder symbol ") + name + ": " + error);
+    }
+    return reinterpret_cast<Function>(symbol);
+  }
+
+  struct LibraryCloser {
+    void operator()(void* library) const { dlclose(library); }
+  };
+
+  std::unique_ptr<void, LibraryCloser> library_;
+  NvDsObjEncCtxHandle context_ = nullptr;
+  decltype(&nvds_obj_enc_destroy_context) destroy_ = nullptr;
+  decltype(&nvds_obj_enc_process) process_ = nullptr;
+  decltype(&nvds_obj_enc_finish) finish_ = nullptr;
+};
 
 // 有界队列 + 单工作线程；记录按值入队，媒体线程不等待处理。
 struct MetaTap::Async {
@@ -105,10 +161,7 @@ void MetaTap::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
   gst_object_unref(element);
   if (pad_ == nullptr) throw std::runtime_error("element '" + options_.element + "' has no src pad");
   if (options_.image.enabled) {
-    encoder_ = nvds_obj_enc_create_context(options_.gpu_id);
-    if (encoder_ == nullptr) {
-      throw std::runtime_error("cannot create image encoder on GPU " + std::to_string(options_.gpu_id));
-    }
+    encoder_ = std::make_unique<Encoder>(options_.gpu_id);
   }
   for (auto& async : async_) async->Start();
   probe_ = gst_pad_add_probe(pad_, GST_PAD_PROBE_TYPE_BUFFER, &MetaTap::OnBuffer, this, nullptr);
@@ -122,8 +175,7 @@ void MetaTap::OnReleased() {
     pad_ = nullptr;
   }
   // 管线已置 NULL、流线程已停止，不会再有编码在进行。
-  if (encoder_ != nullptr) nvds_obj_enc_destroy_context(static_cast<NvDsObjEncCtxHandle>(encoder_));
-  encoder_ = nullptr;
+  encoder_.reset();
   for (auto& async : async_) async->Stop();
 }
 
@@ -249,7 +301,6 @@ void MetaTap::Encode(GstBuffer* buffer, BatchRecord& record, const std::vector<N
     return;
   }
   auto* surface = reinterpret_cast<NvBufSurface*>(map.data);
-  auto* context = static_cast<NvDsObjEncCtxHandle>(encoder_);
   const ImageSpec& spec = options_.image;
   const auto begin = std::chrono::steady_clock::now();
   std::vector<Job> submitted;
@@ -268,19 +319,19 @@ void MetaTap::Encode(GstBuffer* buffer, BatchRecord& record, const std::vector<N
     args.attachUsrMeta = true;
     args.saveImg = false;
     args.quality = spec.quality;
-    if (spec.width > 0) {
+    if (spec.width > 0 && spec.height > 0) {
       args.scaleImg = true;
       args.scaledWidth = spec.width;
       args.scaledHeight = spec.height;
     }
-    if (nvds_obj_enc_process(context, &args, surface, nullptr, meta)) {
+    if (encoder_->Process(&args, surface, meta)) {
       submitted.push_back(std::move(job));
     } else {
       ++image_failures_;
     }
   }
   // 等待本批全部编码完成；之后才能读取结果。
-  nvds_obj_enc_finish(context);
+  encoder_->Finish();
   gst_buffer_unmap(buffer, &map);
   const auto elapsed = std::chrono::steady_clock::now() - begin;
   encode_us_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());

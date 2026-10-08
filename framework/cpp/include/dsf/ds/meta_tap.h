@@ -70,6 +70,7 @@ class MetaTap : public gst::Component {
 
  private:
   struct Async;
+  struct Encoder;
   static GstPadProbeReturn OnBuffer(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   void Handle(GstBuffer* buffer);
   BatchRecord Convert(NvDsBatchMeta* batch, std::vector<NvDsFrameMeta*>& metas) const;
@@ -83,7 +84,7 @@ class MetaTap : public gst::Component {
   std::vector<FrameExtractor> frame_extractors_;
   std::vector<ObjectExtractor> object_extractors_;
   ImageFilter image_filter_;
-  void* encoder_ = nullptr;  // NvDsObjEncCtxHandle；OnCreated 创建，OnReleased 销毁
+  std::unique_ptr<Encoder> encoder_;  // OnCreated 加载库并创建上下文，OnReleased 释放
   GstPad* pad_ = nullptr;
   gulong probe_ = 0;
   std::atomic<std::uint64_t> frames_{0};
