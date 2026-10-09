@@ -202,12 +202,15 @@ jpeg = fields.get(b"image")        # bytes；该帧没有图片时为 None
 
 ```cpp
 auto sink = dsf::record::AddSegmentSink(graph, encoded, "h264", 60, "rec_0");
-auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(
-    dsf::record::RecorderOptions{root, source_id, "osd", "rec_0"}, events);
+dsf::record::RecorderOptions options{root, source_id, "osd", "rec_0"};
+options.retention = {1440, 60, 5ull << 30};  // max_files keep_files min_free_bytes；默认全 0 不清理
+auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(options, events);
 recorder.MarkDetected();   // 任意线程：当前分段出现过目标
 ```
 
-文件为 `<root>/<source_id>/<branch>/<source_id>-<branch>-<起始本地时间>-<序号>.mp4`，起始本地时间形如 `20261005T163012.345`（本地时间与毫秒，不带时区标记，时区取自 `/etc/localtime`），程序应使用事件中的 `start_ms` 与 `path`，不解析文件名。写入期间是 `.mp4.tmp`，收到 `splitmuxsink-fragment-closed` 并改名成功后才触发 `finished`。启动时删除本目录遗留的 `.tmp`。保留期与容量清理不在框架内，应由单独的服务实现。
+文件为 `<root>/<source_id>/<branch>/<source_id>-<branch>-<起始本地时间>-<序号>[-detected].mp4`，起始本地时间形如 `20261005T163012.345`（本地时间与毫秒，不带时区标记，时区取自 `/etc/localtime`），程序应使用事件中的 `start_ms` 与 `path`，不解析文件名。写入期间是 `.mp4.tmp`，收到 `splitmuxsink-fragment-closed` 并改名成功后才触发 `finished`；分段内调用过 `MarkDetected()` 时最终文件名带 `-detected`（`segment_id` 不变，`path` 为实际路径）。启动时删除本目录遗留的 `.tmp`。
+
+保留策略 `RecorderOptions::retention` 按录像器（每个源的每个分支）独立计数，在启动时与每个分段收尾后执行，均在控制线程：已收尾分段按修改时间从新到旧，最新 `keep_files` 个始终保留；总数超过 `max_files` 时在其余分段中先删最旧的无目标分段，再删最旧的有目标分段；文件系统剩余空间低于 `min_free_bytes` 时按同样顺序继续删除，并可删入保护区（记 warning）。只处理符合本录像器命名的 `.mp4`，不动 `.tmp` 与其他文件。`max_files` 非 0 时须不小于 `keep_files`，否则构造时抛异常。统计 `<element>_pruned`；删除失败计入 `_failures` 并使 `Healthy()` 为 false。重启后有无目标从文件名还原。
 
 停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。
 

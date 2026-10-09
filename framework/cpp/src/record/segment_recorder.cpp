@@ -4,11 +4,15 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <limits>
+#include <regex>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "dsf/ds/meta.h"
 #include "dsf/ds/blocks.h"
@@ -38,6 +42,17 @@ std::string LocalTimestamp(std::uint64_t epoch_ms) {
   return text;
 }
 
+constexpr const char* kDetectedSuffix = "-detected";
+
+// 已收尾分段文件名在 "<source_id>-<branch>-" 之后的部分；匹配时写入是否带检测标记。
+bool ParseFinishedName(const std::string& rest, bool* detected) {
+  static const std::regex kPattern(R"(\d{8}T\d{6}\.\d{3}-\d+(-detected)?\.mp4)");
+  std::smatch match;
+  if (!std::regex_match(rest, match, kPattern)) return false;
+  *detected = match[1].matched;
+  return true;
+}
+
 }  // namespace
 
 // ---- SegmentTracker ----
@@ -53,6 +68,10 @@ std::string SegmentTracker::Directory() const {
   return (fs::path(root_) / source_id_ / branch_).string();
 }
 
+std::string SegmentTracker::FinalPath(const std::string& id, bool detected) const {
+  return (fs::path(Directory()) / (id + (detected ? kDetectedSuffix : "") + ".mp4")).string();
+}
+
 Segment SegmentTracker::Open(std::uint64_t start_ms) {
   fs::create_directories(Directory());
   Segment segment;
@@ -60,10 +79,10 @@ Segment SegmentTracker::Open(std::uint64_t start_ms) {
   do {
     segment.id = source_id_ + "-" + branch_ + "-" + LocalTimestamp(start_ms) + "-" +
                  std::to_string(sequence_++);
-    segment.final_path = (fs::path(Directory()) / (segment.id + ".mp4")).string();
+    segment.final_path = FinalPath(segment.id, false);
     segment.temp_path = segment.final_path + ".tmp";
   } while (open_.count(segment.temp_path) != 0 || fs::exists(segment.final_path) ||
-           fs::exists(segment.temp_path));
+           fs::exists(FinalPath(segment.id, true)) || fs::exists(segment.temp_path));
   open_[segment.temp_path] = segment;
   return segment;
 }
@@ -72,6 +91,8 @@ bool SegmentTracker::Close(const std::string& temp_path, Segment* closed) {
   const auto found = open_.find(temp_path);
   if (found == open_.end()) return false;
   *closed = found->second;
+  // 是否出现过目标到收尾时才确定，因此只有最终文件名带标记，分段 id 不变。
+  if (closed->detected) closed->final_path = FinalPath(closed->id, true);
   open_.erase(found);
   ++closed_;
   return true;
@@ -96,6 +117,90 @@ int SegmentTracker::RemoveStale() const {
   return removed;
 }
 
+PruneResult SegmentTracker::Prune(const Retention& retention,
+                                  const std::function<std::uint64_t()>& available) const {
+  PruneResult result;
+  if (retention.max_files == 0 && retention.min_free_bytes == 0) return result;
+
+  struct File {
+    fs::path path;
+    fs::file_time_type time;
+    bool detected;
+  };
+  // 只统计本录像器命名的已收尾分段；.tmp 与其他文件不参与计数，也不会被删除。
+  // 按修改时间（收尾时刻）排序：文件名中的本地时间在时区调整或夏令时回拨时不单调。
+  const std::string prefix = source_id_ + "-" + branch_ + "-";
+  std::vector<File> files;
+  std::error_code code;
+  for (const auto& entry : fs::directory_iterator(Directory(), code)) {
+    const std::string name = entry.path().filename().string();
+    bool detected = false;
+    if (name.compare(0, prefix.size(), prefix) != 0 ||
+        !ParseFinishedName(name.substr(prefix.size()), &detected)) {
+      continue;
+    }
+    std::error_code time_code;
+    if (!entry.is_regular_file(time_code)) continue;
+    const auto time = entry.last_write_time(time_code);
+    if (time_code) continue;
+    files.push_back({entry.path(), time, detected});
+  }
+  std::sort(files.begin(), files.end(), [](const File& a, const File& b) {
+    return a.time != b.time ? a.time < b.time : a.path < b.path;
+  });
+
+  // 删除顺序：保护区（最新 keep_files 个）之外先删无目标、再删有目标，各自从旧到新；
+  // 保护区内同样排序，只在剩余空间不足时才会进入。
+  const std::size_t total = files.size();
+  const std::size_t unprotected = total > retention.keep_files ? total - retention.keep_files : 0;
+  std::vector<const File*> order;
+  for (const auto& [begin, end] : {std::pair<std::size_t, std::size_t>{0, unprotected},
+                                   std::pair<std::size_t, std::size_t>{unprotected, total}}) {
+    for (const bool detected : {false, true}) {
+      for (std::size_t i = begin; i < end; ++i) {
+        if (files[i].detected == detected) order.push_back(&files[i]);
+      }
+    }
+  }
+
+  const auto free_bytes = [&]() -> std::uint64_t {
+    if (available) return available();
+    std::error_code space_code;
+    const fs::space_info space = fs::space(Directory(), space_code);
+    // 查询失败（例如目录尚未创建）视为空间充足：无法判断时不删除录像。
+    return space_code ? std::numeric_limits<std::uint64_t>::max()
+                      : static_cast<std::uint64_t>(space.available);
+  };
+  const auto remove = [&](const File& file) {
+    std::error_code remove_code;
+    fs::remove(file.path, remove_code);
+    if (remove_code) {
+      ++result.failed;
+      result.errors.push_back("cannot remove " + file.path.string() + ": " + remove_code.message());
+      return;
+    }
+    ++result.removed;
+    if (&file - files.data() >= static_cast<std::ptrdiff_t>(unprotected)) ++result.removed_protected;
+  };
+
+  std::size_t next = 0;
+  // 数量上限：keep_files ≤ max_files，所以超出部分总能在保护区之外删完。
+  const std::size_t excess =
+      retention.max_files > 0 && total > retention.max_files ? total - retention.max_files : 0;
+  for (; next < excess && next < unprotected; ++next) remove(*order[next]);
+  // 剩余空间兜底：可以进入保护区，因为写满磁盘会使全部录像失败。
+  if (retention.min_free_bytes > 0) {
+    while (free_bytes() < retention.min_free_bytes) {
+      if (next == order.size()) {
+        result.low_space = true;
+        break;
+      }
+      remove(*order[next++]);
+    }
+  }
+  return result;
+}
+
 void SegmentTracker::MarkDetected() {
   for (auto& [path, segment] : open_) segment.detected = true;
 }
@@ -106,7 +211,11 @@ SegmentRecorder::SegmentRecorder(RecorderOptions options, Events events)
     : options_(std::move(options)),
       events_(std::move(events)),
       name_("recorder:" + options_.element),
-      tracker_(options_.root, options_.source_id, options_.branch) {}
+      tracker_(options_.root, options_.source_id, options_.branch) {
+  if (options_.retention.max_files > 0 && options_.retention.keep_files > options_.retention.max_files) {
+    throw std::invalid_argument("retention keep_files must not exceed max_files");
+  }
+}
 
 SegmentRecorder::~SegmentRecorder() { OnReleased(); }
 
@@ -129,6 +238,7 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   if (const int stale = tracker_.RemoveStale(); stale > 0) {
     spdlog::warn("removed {} unfinished segment(s) from {}", stale, tracker_.Directory());
   }
+  Prune();
   handler_ = g_signal_connect(sink_, "format-location", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
                               this);
 }
@@ -193,6 +303,23 @@ void SegmentRecorder::OnMessage(GstMessage* message) {
   }
   spdlog::info("recording finished: {} detected={}", segment.final_path, segment.detected);
   if (events_.finished) events_.finished(segment, ds::WallMilliseconds());
+  Prune();
+}
+
+void SegmentRecorder::Prune() {
+  const PruneResult result = tracker_.Prune(options_.retention);
+  if (result.removed_protected > 0) {
+    spdlog::warn("{}: free space below {} bytes; removed {} recent segment(s) inside keep_files",
+                 options_.element, options_.retention.min_free_bytes, result.removed_protected);
+  }
+  if (result.low_space) {
+    spdlog::warn("{}: free space is still below {} bytes after removing every finished segment",
+                 options_.element, options_.retention.min_free_bytes);
+  }
+  for (const auto& error : result.errors) spdlog::error("{}: {}", options_.element, error);
+  std::lock_guard<std::mutex> lock(mutex_);
+  pruned_ += static_cast<std::uint64_t>(result.removed);
+  failures_ += static_cast<std::uint64_t>(result.failed);
 }
 
 void SegmentRecorder::OnStopping() {
@@ -227,6 +354,7 @@ bool SegmentRecorder::Healthy() const {
 void SegmentRecorder::Report(gst::Stats& stats) const {
   std::lock_guard<std::mutex> lock(mutex_);
   stats.Add(options_.element + "_segments", tracker_.closed_count());
+  stats.Add(options_.element + "_pruned", pruned_);
   if (failures_ > 0) stats.Add(options_.element + "_failures", failures_);
 }
 

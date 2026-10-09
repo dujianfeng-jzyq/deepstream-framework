@@ -1,6 +1,8 @@
 // dsf::record：分段登记的纯逻辑，以及软件编码 + splitmuxsink 的真实录像流程。
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -244,14 +246,135 @@ TEST(tracker_names_segments_and_never_overwrites) {
   std::ofstream(first.temp_path) << "data";
   CHECK(tracker.Close(first.temp_path, &closed));
   CHECK(closed.detected);
+  CHECK_EQ(closed.id, first.id);  // started 事件中的 id 不变，只有最终文件名带标记
+  CHECK_EQ(closed.final_path,
+           (dir.path / "cam/osd/cam-osd-19700101T000001.000-0-detected.mp4").string());
   std::string error;
   CHECK(SegmentTracker::Finalize(closed, &error));
-  CHECK(fs::exists(first.final_path));
+  CHECK(fs::exists(closed.final_path));
+  CHECK(!fs::exists(first.final_path));
   CHECK(!SegmentTracker::Finalize(closed, &error));
   CHECK_EQ(tracker.open_count(), 1u);
   std::ofstream(fs::path(first.final_path).parent_path() / "stale.mp4.tmp") << "x";
   CHECK_EQ(tracker.RemoveStale(), 1);
   CHECK_THROWS(SegmentTracker(dir.path.string(), "../x", "osd"), "valid paths");
+}
+
+TEST(tracker_skips_names_taken_by_detected_segments) {
+  TempDir dir;
+  ScopedTimeZone zone("UTC0");
+  SegmentTracker tracker(dir.path.string(), "cam", "osd");
+  fs::create_directories(dir.path / "cam/osd");
+  std::ofstream(dir.path / "cam/osd/cam-osd-19700101T000001.000-0-detected.mp4") << "old";
+  CHECK_EQ(tracker.Open(1000).id, std::string("cam-osd-19700101T000001.000-1"));
+}
+
+namespace {
+
+// 在录像目录中按给定顺序（从旧到新）创建已收尾分段，修改时间依次递增。
+// 名称中的 'd' 表示带检测标记，返回各文件名。
+std::vector<std::string> MakeSegments(const fs::path& dir, const std::string& kinds) {
+  fs::create_directories(dir);
+  std::vector<std::string> names;
+  const auto base = fs::file_time_type::clock::now() - std::chrono::hours(1);
+  for (std::size_t i = 0; i < kinds.size(); ++i) {
+    const std::string name = "cam-osd-20261008T100000.000-" + std::to_string(i) +
+                             (kinds[i] == 'd' ? "-detected" : "") + ".mp4";
+    std::ofstream(dir / name) << "x";
+    fs::last_write_time(dir / name, base + std::chrono::seconds(i));
+    names.push_back(name);
+  }
+  return names;
+}
+
+std::string Remaining(const fs::path& dir, const std::vector<std::string>& names) {
+  std::string kept;
+  for (std::size_t i = 0; i < names.size(); ++i) kept += fs::exists(dir / names[i]) ? '1' : '0';
+  return kept;
+}
+
+}  // namespace
+
+TEST(prune_keeps_recent_files_and_removes_undetected_first) {
+  TempDir dir;
+  const fs::path segments = dir.path / "cam/osd";
+  SegmentTracker tracker(dir.path.string(), "cam", "osd");
+  // 从旧到新：d n d n n | n n（最后 2 个为保护区）
+  const auto names = MakeSegments(segments, "dndnnnn");
+  std::ofstream(segments / "cam-osd-20261008T100000.000-99.mp4.tmp") << "x";  // 正在写
+  std::ofstream(segments / "notes.mp4") << "x";                              // 不是本录像器的命名
+  std::ofstream(segments / "cam-raw-20261008T100000.000-0.mp4") << "x";      // 其他分支
+  record::Retention retention;
+  retention.max_files = 4;
+  retention.keep_files = 2;
+  const record::PruneResult result = tracker.Prune(retention);
+  CHECK_EQ(result.removed, 3);
+  CHECK_EQ(result.removed_protected, 0);
+  // 删除顺序：保护区外最旧的无目标（1、3、4）先于有目标（0、2）。
+  CHECK_EQ(Remaining(segments, names), std::string("1010011"));
+  CHECK(fs::exists(segments / "cam-osd-20261008T100000.000-99.mp4.tmp"));
+  CHECK(fs::exists(segments / "notes.mp4"));
+  CHECK(fs::exists(segments / "cam-raw-20261008T100000.000-0.mp4"));
+
+  // 再超出一个：保护区外已没有无目标分段，删最旧的有目标分段。
+  retention.max_files = 3;
+  CHECK_EQ(tracker.Prune(retention).removed, 1);
+  CHECK_EQ(Remaining(segments, names), std::string("0010011"));
+
+  // 未超限时不删除；全部为 0 时不清理。
+  CHECK_EQ(tracker.Prune(retention).removed, 0);
+  CHECK_EQ(tracker.Prune(record::Retention{}).removed, 0);
+}
+
+TEST(prune_never_enters_keep_files_for_the_count_limit) {
+  TempDir dir;
+  const fs::path segments = dir.path / "cam/osd";
+  SegmentTracker tracker(dir.path.string(), "cam", "osd");
+  const auto names = MakeSegments(segments, "dddnn");
+  record::Retention retention;
+  retention.max_files = 3;
+  retention.keep_files = 3;
+  CHECK_EQ(tracker.Prune(retention).removed, 2);
+  CHECK_EQ(Remaining(segments, names), std::string("00111"));
+}
+
+TEST(prune_frees_space_even_inside_keep_files) {
+  TempDir dir;
+  const fs::path segments = dir.path / "cam/osd";
+  SegmentTracker tracker(dir.path.string(), "cam", "osd");
+  const auto names = MakeSegments(segments, "ndnnd");
+  record::Retention retention;
+  retention.max_files = 10;
+  retention.keep_files = 3;
+  retention.min_free_bytes = 100;
+  // 模拟磁盘：起始剩余 10 字节，每删一个分段释放 30 字节，需要删 3 个。
+  const auto available = [&] {
+    std::uint64_t free_bytes = 10;
+    for (const auto& name : names) {
+      if (!fs::exists(segments / name)) free_bytes += 30;
+    }
+    return free_bytes;
+  };
+  const record::PruneResult result = tracker.Prune(retention, available);
+  CHECK_EQ(result.removed, 3);
+  CHECK_EQ(result.removed_protected, 1);
+  CHECK(!result.low_space);
+  // 保护区外：先删无目标 0，再删有目标 1；仍不足时进入保护区（2、3、4）并先删无目标 2。
+  CHECK_EQ(Remaining(segments, names), std::string("00011"));
+
+  // 删光仍不足时报告 low_space，不删除其他文件。
+  std::ofstream(segments / "notes.mp4") << "x";
+  const record::PruneResult exhausted = tracker.Prune(retention, [] { return std::uint64_t{0}; });
+  CHECK_EQ(exhausted.removed, 2);
+  CHECK(exhausted.low_space);
+  CHECK(fs::exists(segments / "notes.mp4"));
+}
+
+TEST(recorder_rejects_keep_files_above_max_files) {
+  record::RecorderOptions options{"/tmp", "cam", "osd", "rec"};
+  options.retention.max_files = 2;
+  options.retention.keep_files = 3;
+  CHECK_THROWS(SegmentRecorder(options, {}), "keep_files");
 }
 
 TEST(tracker_names_segments_in_local_time) {
@@ -277,6 +400,32 @@ TEST(recorder_closes_segments_at_eos) {
     CHECK(fs::file_size(segment.final_path) > 0);
     CHECK(!fs::exists(segment.temp_path));
   }
+}
+
+TEST(recorder_prunes_after_each_segment) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  Events events;
+  record::RecorderOptions options{dir.path.string(), "cam", "raw", "rec"};
+  options.retention.max_files = 1;
+  options.retention.keep_files = 1;
+  SegmentRecorder recorder(options, events.Callbacks());
+  gst::Pipeline pipeline("record-prune", RecordingGraph(75, false));
+  pipeline.Add(recorder);
+  const gst::Result result = pipeline.Run();
+  CHECK(result.success);
+  CHECK(recorder.Healthy());
+  CHECK(events.finished.size() >= 2);
+  int files = 0;
+  for (const auto& entry : fs::directory_iterator(dir.path / "cam/raw")) {
+    ++files;
+    CHECK_EQ(entry.path().string(), events.finished.back().final_path);  // 只留最新的分段
+  }
+  CHECK_EQ(files, 1);
+  gst::Stats stats;
+  recorder.Report(stats);
+  CHECK(stats.Text().find("rec_pruned=" + std::to_string(events.finished.size() - 1)) !=
+        std::string::npos);
 }
 
 TEST(recorder_finishes_last_segment_on_drain_stop) {

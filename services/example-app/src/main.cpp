@@ -69,9 +69,9 @@ struct ExampleApp {
         event.path = segment.final_path;
         publish(event);
       };
-      auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(
-          dsf::record::RecorderOptions{config.recording.root, source_id, branch, slot.element},
-          std::move(events));
+      dsf::record::RecorderOptions options{config.recording.root, source_id, branch, slot.element};
+      options.retention = config.recording.retention;
+      auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(options, std::move(events));
       by_source[static_cast<std::size_t>(slot.source)].push_back(&recorder);
     }
 

@@ -61,6 +61,13 @@ encoder:
 recording:
   root: ${CONTAINER_DATA_PATH}/recordings
   segment_seconds: 60
+  # 每个录像器（每路源的每个分支）独立计数。保留最新 keep_files 个分段；超过 max_files 时在其余分段中
+  # 先删无目标的、再删有目标的（文件名带 -detected）。剩余空间低于 min_free_mb 时继续删，可删到最新的分段。
+  # 0 表示不限制。每个分段约 segment_seconds × 码率，例如 60 s × 8 Mbps ≈ 60 MB，1440 个约 86 GB。
+  retention:
+    max_files: 1440
+    keep_files: 60
+    min_free_mb: 5120
   raw: false
   osd: true
 

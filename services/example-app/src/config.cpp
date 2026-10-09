@@ -31,6 +31,13 @@ Config Load(Reader& root) {
   config.recording.raw = recording.Get("raw", false);
   config.recording.osd = recording.Get("osd", true);
   config.recording.properties = recording.Props("properties");
+  Reader retention = recording.Section("retention");
+  config.recording.retention.max_files =
+      static_cast<std::size_t>(retention.Get("max_files", 0, AtLeast(0)));
+  config.recording.retention.keep_files =
+      static_cast<std::size_t>(retention.Get("keep_files", 0, AtLeast(0)));
+  config.recording.retention.min_free_bytes =
+      static_cast<std::uint64_t>(retention.Get("min_free_mb", 0, AtLeast(0))) << 20;
 
   Reader rtsp = root.Section("rtsp_out");
   config.rtsp_out.enabled = rtsp.Get("enabled", false);
@@ -59,6 +66,10 @@ Config Load(Reader& root) {
   }
   if (config.records() && config.recording.root.empty()) {
     root.Fail("recording.root", "is required when raw or osd recording is enabled");
+  }
+  if (config.recording.retention.max_files > 0 &&
+      config.recording.retention.keep_files > config.recording.retention.max_files) {
+    root.Fail("recording.retention.keep_files", "must not exceed max_files");
   }
   if (config.redis.image.enabled && !config.redis.enabled) {
     root.Fail("redis.image.enabled", "requires redis.enabled (images are sent with detection messages)");

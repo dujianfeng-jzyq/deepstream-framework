@@ -130,6 +130,18 @@ TEST(cross_field_rules) {
   no_output = Replace(no_output, "redis:\n  enabled: true", "redis:\n  enabled: false");
   CHECK_THROWS(Load(no_output), "enable at least one output");
   CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");
+  // 只替换保留策略的数值，不依赖模板中的具体值（现场可能为验证而调小）。
+  const std::regex retention(R"(    max_files: \d+\n    keep_files: \d+\n    min_free_mb: \d+)");
+  const auto with_retention = [&](const std::string& values) {
+    const std::string text = std::regex_replace(base, retention, values);
+    if (text == base) throw std::runtime_error("template has no recording.retention");
+    return text;
+  };
+  CHECK_THROWS(Load(with_retention("    max_files: 2\n    keep_files: 3\n    min_free_mb: 0")),
+               "recording.retention.keep_files: must not exceed max_files");
+  const auto config = Load(with_retention("    max_files: 0\n    keep_files: 3\n    min_free_mb: 7"));
+  CHECK_EQ(config.recording.retention.max_files, std::size_t{0});  // 0 表示不限数量，不检查 keep_files
+  CHECK_EQ(config.recording.retention.min_free_bytes, std::uint64_t{7} << 20);
   CHECK_THROWS(Load(Replace(base, "  codec: h264", "  codec: vp9")), "encoder.codec");
   const std::string images = Replace(base, "  image:\n    enabled: false", "  image:\n    enabled: true");
   CHECK_THROWS(Load(Replace(images, "redis:\n  enabled: true", "redis:\n  enabled: false")),
