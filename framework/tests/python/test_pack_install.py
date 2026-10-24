@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from deploy_support import FakeDocker, ProjectTestCase, docker_cli_available
+from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
 from dsf_deploy import inventory, layout, naming, pack, render, site
 from dsf_deploy.envfile import DeployError, read
 from dsf_deploy.install import Options, install
@@ -42,8 +42,8 @@ class PackInstallTest(ProjectTestCase):
             tar.extractall(target)
         return target / archive.name[: -len(".tar.gz")]
 
-    def install(self, package, **options):
-        target = FakeDocker()
+    def install(self, package, target=None, **options):
+        target = target or FakeDocker()
         target.images = {}
         options.setdefault("install_dir", self.install_dir)
         options.setdefault("interactive", False)
@@ -52,6 +52,22 @@ class PackInstallTest(ProjectTestCase):
         with redirect_stdout(output):
             install(Options(package, **options), target)
         return target, output.getvalue()
+
+    def press_enter(self, prompts):
+        """交互提问一律回车，提示文本记入 prompts。"""
+        real_ask = site.ask
+
+        def record(text):
+            prompts.append(text)
+            return ""
+
+        return mock.patch.object(site, "ask", lambda item, default=None: real_ask(
+            item, default, prompt=record, prompt_secret=record))
+
+    def set_profile_build(self, name, values):
+        """写 profiles/<name>.yaml：在测试 profile 之上加 x-build 变量。"""
+        build = "".join(f"  {key}: {value}\n" for key, value in values.items())
+        (self.root / f"profiles/{name}.yaml").write_text(PROFILE.replace("x-build:\n", "x-build:\n" + build))
 
     # ---- pack ----
 
@@ -168,21 +184,29 @@ class PackInstallTest(ProjectTestCase):
 
     def test_interactive_defaults_follow_the_profile(self):
         # 回车保存的答案必须是 profile 的值，否则 site.env 会遮住 profile 的 x-build。
-        profile = self.root / "profiles/test.yaml"
-        profile.write_text(profile.read_text().replace("x-build:\n", "x-build:\n  CAMERA_ID: profile-cam\n"))
+        self.set_profile_build("test", {"CAMERA_ID": "profile-cam"})
         package = self.pack(with_base=True)
         prompts = []
-        real_ask = site.ask
-
-        def ask(item, default=None):
-            record = lambda text: prompts.append(text) or ""  # noqa: E731
-            return real_ask(item, default, prompt=record, prompt_secret=record)
-
-        with mock.patch.object(site, "ask", ask):
+        with self.press_enter(prompts):
             self.install(package, interactive=True, profile="test")
         self.assertTrue(any("[profile-cam]" in text for text in prompts), prompts)
         self.assertEqual(read(self.install_dir / layout.SITE_ENV)["CAMERA_ID"], "profile-cam")
         self.assertIn("camera: profile-cam", (self.install_dir / "generated/config/app.yaml").read_text())
+
+    def test_changing_profile_drops_answers_that_were_old_defaults(self):
+        self.set_profile_build("other", {"CAMERA_ID": "other-cam", "SITE_NAME": "other-site"})
+        package = self.pack(with_base=True)
+        self.install(package)
+        # 当时回车接受的清单默认值 cam0，与现场输入的 custom
+        (self.install_dir / layout.SITE_ENV).write_text("CAMERA_ID=cam0\nSITE_NAME=custom\n")
+        _, output = self.install(package, profile="other")
+        self.assertIn("profile changed: CAMERA_ID follow the new profile", output)
+        self.assertEqual(read(self.install_dir / layout.SITE_ENV), {"SITE_NAME": "custom"})
+        config = (self.install_dir / "generated/config/app.yaml").read_text()
+        self.assertIn("camera: other-cam", config)
+        self.assertIn("site: custom", config)
+        self.install(package, profile="other")  # profile 不变时答案原样沿用
+        self.assertEqual(read(self.install_dir / layout.SITE_ENV), {"SITE_NAME": "custom"})
 
     def test_integrity_and_platform_are_checked_first(self):
         package = self.pack(with_base=True)

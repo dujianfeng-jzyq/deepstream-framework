@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
@@ -90,14 +91,25 @@ def _choose_profile(options: Options, release: dict[str, str], install_dir: Path
 
 
 def _collect_answers(options: Options, install_dir: Path, package_root: Path,
-                     inherited: Callable[[], dict[str, str]]):
+                     inherited: Callable[[], dict[str, str]],
+                     previous: Callable[[], dict[str, str]] | None = None):
     """升级沿用已保存的答案（包括显式空答案）；--ask 与 --clean-install 重新收集。
     非交互时只保存已有答案，缺失键留给渲染按 project.env/profile 继承。
-    交互提问的默认值与渲染的继承值一致：回车保存的答案不会遮住所选 profile 的设置。"""
+    交互提问的默认值与渲染的继承值一致：回车保存的答案不会遮住所选 profile 的设置。
+    previous 是改换 profile 前的继承值：等于旧默认值的答案视为当时回车接受的默认值，
+    新 profile 的默认值不同时丢弃，改为重新提问或继承；现场输入的其他值保留。"""
     fields = site.parse_fields(package_root / layout.SITE_FIELDS)
     fresh = options.ask or options.clean
     answers = {} if fresh else site.read_answers(install_dir / layout.SITE_ENV, fields)
     answers = {k: v for k, v in answers.items() if k in {f.key for f in fields}}
+    if answers and previous is not None:
+        old, new = site.defaults(fields, previous()), site.defaults(fields, inherited())
+        stale = sorted(key for key, value in answers.items() if value == old[key] != new[key])
+        for key in stale:
+            del answers[key]
+        if stale:
+            print(f"profile changed: {', '.join(stale)} follow the new profile "
+                  "(the saved values were the previous profile's defaults)")
     pending = [item for item in fields if item.key not in answers] if options.interactive else []
     if pending:
         suggested = site.defaults(fields, inherited())
@@ -135,7 +147,7 @@ def _load_images(package_root: Path, docker: Docker, loaded: set[str], only: str
             loaded.add(archive.name)
 
 
-def _run_deploy_tool(root: Path, args: list[str], base_image: str, docker: Docker, writable: bool,
+def _run_deploy_tool(root: Path, args: list[str], base_image: str, docker: Docker, *, writable: bool,
                      package_root: Path, loaded: set[str]) -> str:
     """宿主没有 PyYAML 时用 base 镜像（自带 python3-yaml）运行部署工具，只挂载 root，不挂载荷卷。"""
     if not docker.image_exists(base_image):
@@ -150,13 +162,26 @@ def _run_deploy_tool(root: Path, args: list[str], base_image: str, docker: Docke
     return result.stdout
 
 
-def _profile_variables(package_root: Path, profile: str, base_image: str, docker: Docker,
+def _profile_variables(root: Path, profile: str, base_image: str, docker: Docker, package_root: Path,
                        loaded: set[str]) -> dict[str, str]:
+    """root 中 profile 的 x-build；root 是发布包或旧安装目录。"""
     if _host_has_yaml():
-        return render.profile_variables(package_root, profile)
-    output = _run_deploy_tool(package_root, ["profile-variables", "--profile", profile], base_image,
-                              docker, False, package_root, loaded)
+        return render.profile_variables(root, profile)
+    output = _run_deploy_tool(root, ["profile-variables", "--profile", profile], base_image, docker,
+                              writable=False, package_root=package_root, loaded=loaded)
     return json.loads(output)
+
+
+def _previous_inherited(options: Options, install_dir: Path, profile: str, base_image: str, docker: Docker,
+                        package_root: Path, loaded: set[str]) -> Callable[[], dict[str, str]] | None:
+    """升级时改换了 profile：返回旧安装的继承值（旧 project.env 与旧 profile）；否则 None。"""
+    if options.ask or options.clean or not (install_dir / layout.ENV).is_file():
+        return None
+    old = envfile.read(install_dir / layout.ENV).get("CONFIG_PROFILE", "")
+    if not old or old == profile or not (install_dir / layout.PROFILES / f"{old}.yaml").is_file():
+        return None
+    project = envfile.read(install_dir / layout.PROJECT_ENV, expand_home=False)
+    return lambda: {**project, **_profile_variables(install_dir, old, base_image, docker, package_root, loaded)}
 
 
 def _render_in_stage(stage: Path, profile: str, base_image: str, docker: Docker, package_root: Path,
@@ -165,8 +190,8 @@ def _render_in_stage(stage: Path, profile: str, base_image: str, docker: Docker,
     if _host_has_yaml():
         render.write_plan(stage, render.build_plan(stage, profile))
         return
-    _run_deploy_tool(stage, ["render", "--profile", profile, "--quiet"], base_image, docker, True,
-                     package_root, loaded)
+    _run_deploy_tool(stage, ["render", "--profile", profile, "--quiet"], base_image, docker,
+                     writable=True, package_root=package_root, loaded=loaded)
 
 
 def _relocate(services: dict, stage: Path, install_dir: Path) -> None:
@@ -233,8 +258,11 @@ def prepare(options: Options, docker: Docker) -> Plan:
     # 3. 现场选择（读取旧值必须在任何删除之前）
     profile, source = _choose_profile(options, release, install_dir, package_root)
     loaded: set[str] = set()
-    fields, answers = _collect_answers(options, install_dir, package_root, lambda: {
-        **release, **_profile_variables(package_root, profile, release["BASE_IMAGE"], docker, loaded)})
+    base_image = release["BASE_IMAGE"]
+    inherited = functools.cache(lambda: {
+        **release, **_profile_variables(package_root, profile, base_image, docker, package_root, loaded)})
+    previous = _previous_inherited(options, install_dir, profile, base_image, docker, package_root, loaded)
+    fields, answers = _collect_answers(options, install_dir, package_root, inherited, previous)
     print(f"install to:  {install_dir}")
     print(f"profile:     {profile} ({source})")
     if answers:
