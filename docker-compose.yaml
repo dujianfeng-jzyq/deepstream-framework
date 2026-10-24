@@ -30,6 +30,7 @@ services:
         BASE_IMAGE: ${BASE_IMAGE}
         APPS_VERSION: ${APPS_VERSION}
         PIP_INDEX_URL: ${PIP_INDEX_URL}
+        SOURCE_REVISION: ${SOURCE_REVISION:-}  # 打包时与当前源码比对；发布包的 .env 中没有它
     network_mode: none
     restart: "no"
     volumes:

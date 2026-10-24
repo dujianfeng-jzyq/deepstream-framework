@@ -48,6 +48,13 @@ class Docker:
                                 capture_output=True, text=True)
         return result.stdout.strip() if result.returncode == 0 else ""
 
+    def image_label(self, image: str, key: str) -> str:
+        """镜像标签的值；镜像或标签不存在返回空串。"""
+        result = subprocess.run(["docker", "image", "inspect", "--format",
+                                 f'{{{{index .Config.Labels "{key}"}}}}', image], capture_output=True, text=True)
+        value = result.stdout.strip() if result.returncode == 0 else ""
+        return "" if value == "<no value>" else value
+
     def pull(self, image: str, platform: str) -> None:
         self._run(["docker", "pull", "--platform", f"linux/{platform}", image])
 

@@ -21,6 +21,11 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# 构建只由渲染出的 .env 决定：shell 中的这些变量优先于 .env，会让 Compose 构建另一组文件
+# （与 framework/deploy/dsf_deploy/docker.py 的 COMPOSE_SELECTORS 一致）。
+unset COMPOSE_FILE COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_PATH_SEPARATOR \
+      COMPOSE_PROJECT_NAME COMPOSE_PROFILES
+
 # 先渲染：构建与打包都使用渲染出的镜像名与版本。
 python3 "${DEPLOY}" render --root "${ROOT}" ${profile_args[@]+"${profile_args[@]}"}
 if [[ "${build}" -eq 1 ]]; then

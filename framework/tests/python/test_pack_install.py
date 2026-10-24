@@ -116,6 +116,31 @@ class PackInstallTest(ProjectTestCase):
         self.assertNotIn("SITE_NAME", release)              # 现场答案不进包
         self.assertTrue(package.name.endswith("demo-v1.2.1-ds8.0"))
 
+    def test_pack_refuses_an_apps_image_built_from_other_source(self):
+        def git(*args):
+            subprocess.run(["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                           check=True, capture_output=True)
+        (self.root / ".gitignore").write_text("/.env\n/site.env\n/generated/\n/dist/\n")
+        git("init", "-q")
+        git("add", "-A")
+        git("commit", "-q", "-m", "initial")
+        revision = render.source_revision(self.root)
+        self.assertRegex(revision, r"^[0-9a-f]{12}$")
+        with self.assertRaisesRegex(DeployError, "built from source \\(unknown\\) but the source is now"):
+            self.pack()  # 镜像没有记录版本：可能是旧构建
+        self.docker.labels[self.apps] = {layout.SOURCE_REVISION_LABEL: revision}
+        package = self.pack()
+        self.assertEqual(read(package / layout.RELEASE_ENV, expand_home=False)["SOURCE_REVISION"], revision)
+
+        (self.root / "services/app/src/main.cpp").write_text("int main() { return 1; }\n")
+        with self.assertRaisesRegex(DeployError, f"built from source {revision} but the source is now {revision}-dirty"):
+            self.pack()  # 改了源码却没有重新构建
+        self.docker.labels[self.apps] = {layout.SOURCE_REVISION_LABEL: f"{revision}-dirty"}
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            self.pack()
+        self.assertIn("uncommitted changes", errors.getvalue())
+
     def test_base_is_packed_on_request_and_platforms_must_match(self):
         self.pack(with_base=True)
         self.assertIn(self.base, [call[1] for call in self.docker.calls if call[0] == "save"])

@@ -8,6 +8,7 @@ release.env（发布事实）与 package-files.json（完整性清单）。不�
 from __future__ import annotations
 
 import shutil
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -72,6 +73,19 @@ def _require_platform(docker: Docker, image: str) -> str:
     return value
 
 
+def _check_source_revision(docker: Docker, apps_image: str, current: str) -> None:
+    """apps 镜像的 tag 只含版本号：源码改了而没有重新构建时，同名镜像仍是旧程序。"""
+    if not current:
+        return  # 不是 git 仓库，无从比对
+    built = docker.image_label(apps_image, layout.SOURCE_REVISION_LABEL)
+    if built != current:
+        raise DeployError(f"{apps_image} was built from source {built or '(unknown)'} but the source is now "
+                          f"{current}; rebuild it (scripts/build-release.sh without --no-build)")
+    if current.endswith("-dirty"):
+        print("WARNING: the working tree has uncommitted changes; the package cannot prove which of them "
+              "the image contains. Commit, rebuild and pack for a traceable release.", file=sys.stderr)
+
+
 def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None = None) -> Path:
     docker = docker or Docker()
     plan = render.render(root, profile)
@@ -91,6 +105,8 @@ def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None
         if actual != target_platform:
             raise DeployError(f"{image} is {actual} but {base_image} is {target_platform}; "
                               "all images in a package must share one platform")
+
+    _check_source_revision(docker, apps_image, values.get("SOURCE_REVISION", ""))
 
     name = naming.package_name(project, values["APPS_VERSION"], values.get("DEEPSTREAM_VERSION", ""))
     dist = root / "dist"
@@ -122,6 +138,7 @@ def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None
             "BASE_VERSION": values["BASE_VERSION"],
             "BASE_IMAGE": base_image,
             "APPS_IMAGE": apps_image,
+            "SOURCE_REVISION": values.get("SOURCE_REVISION", ""),
             **dependencies,
         })
         envfile.write(package / layout.RELEASE_ENV, release, (f"release {name}", "GENERATED — DO NOT EDIT"))

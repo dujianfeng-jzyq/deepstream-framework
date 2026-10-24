@@ -77,6 +77,7 @@ class FakeDocker(Docker):
         self.ps_rows: list[dict] | None = None
         self.fail_on: str | None = None
         self.env_files: list[tuple[int, str]] = []
+        self.labels: dict[str, dict[str, str]] = {}
 
     def available(self) -> bool:
         return True
@@ -92,6 +93,9 @@ class FakeDocker(Docker):
 
     def image_platform(self, image):
         return self.images.get(image, "")
+
+    def image_label(self, image, key):
+        return self.labels.get(image, {}).get(key, "")
 
     def pull(self, image, platform):
         self._record("pull", image, platform)

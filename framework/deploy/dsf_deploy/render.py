@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -136,6 +137,21 @@ def _load_profile(root: Path, name: str) -> dict:
     return profile
 
 
+def source_revision(root: Path) -> str:
+    """源码版本：git 提交号，工作区有未提交的改动（含未跟踪文件）时加 -dirty；不是 git 仓库返回空串。
+    构建时写进 apps 镜像的标签，打包时与当前源码比对，防止发布与源码不符的旧镜像。"""
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise OSError(result.stderr.strip())
+        return result.stdout.strip()
+    try:
+        revision = git("rev-parse", "--short=12", "HEAD")
+        return revision + ("-dirty" if git("status", "--porcelain") else "")
+    except OSError:  # 没有 git，或不是仓库（例如发布包、构建上下文中的副本）
+        return ""
+
+
 def _build_variables(profile: dict) -> dict[str, str]:
     return {k: str(v) for k, v in (profile.get("x-build") or {}).items() if k not in IDENTITY_KEYS}
 
@@ -227,6 +243,7 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
         variables.update(naming.image_names(variables["PROJECT_NAME"], variables["DEEPSTREAM_VERSION"],
                                             variables["APPS_VERSION"], variables["BASE_VERSION"],
                                             variables["BASE_INPUTS"]))
+        variables["SOURCE_REVISION"] = source_revision(root)
     variables.setdefault("HOST_DATA_PATH", os.path.expanduser(f"~/{variables['PROJECT_NAME']}/data"))
     variables.update(layout.MOUNTS)
     # 业务容器以渲染用户运行，写进数据目录的文件归现场用户所有。

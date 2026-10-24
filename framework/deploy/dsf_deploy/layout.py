@@ -35,6 +35,8 @@ PACKAGE_EXCLUDED_NAMES = ("__pycache__", ".DS_Store")
 # 服务声明支持无副作用预检的标签。
 CONFIG_CHECK_LABEL = "io.deepstream.config-check"
 PAYLOAD_VOLUME = "app-files"
+# apps 镜像记录构建时源码版本的标签（render.source_revision），打包时比对。
+SOURCE_REVISION_LABEL = "io.deepstream.source-revision"
 
 
 def payload_volume(project_name: str) -> str:

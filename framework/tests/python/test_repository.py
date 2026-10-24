@@ -66,6 +66,21 @@ class RepositoryTest(unittest.TestCase):
             result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, f"{script}: {result.stderr}")
 
+    def test_build_release_ignores_compose_selectors_from_the_shell(self):
+        sys.path.insert(0, str(FRAMEWORK / "deploy"))
+        from dsf_deploy.docker import COMPOSE_SELECTORS
+        text = (ROOT / "scripts/build-release.sh").read_text()
+        lines = text.splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("unset "))
+        words = []
+        while True:  # 反斜杠续行
+            line = lines[index]
+            words += line.rstrip("\\").split()
+            if not line.endswith("\\"):
+                break
+            index += 1
+        self.assertEqual(set(words[1:]), set(COMPOSE_SELECTORS))
+
     def test_deploy_tool_rejects_old_python_with_a_clear_message(self):
         code = ("import runpy, sys; sys.version_info = (3, 8, 10, 'final', 0); sys.argv = ['dsf-deploy', '--help']; "
                 "runpy.run_path(sys.argv_path, run_name='__main__')").replace("sys.argv_path", repr(

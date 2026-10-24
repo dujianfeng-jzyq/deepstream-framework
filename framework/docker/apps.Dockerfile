@@ -9,13 +9,13 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE} AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 编译工具与测试依赖只在 builder：Redis 服务端、软件编解码插件与 Docker/Compose CLI 让集成测试
+# 编译工具与测试依赖只在 builder：Redis 服务端、软件编解码插件、Docker/Compose CLI 与 git 让集成测试
 # 真正执行而不是 SKIP。部署测试只用 `docker compose config` 解析文件，不需要（也不启动）守护进程。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update || true; \
     apt-get install -y --no-install-recommends \
-      build-essential cmake ninja-build pkg-config python3-pyflakes \
+      build-essential cmake ninja-build pkg-config python3-pyflakes git \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       redis-server python3-redis gstreamer1.0-tools docker.io docker-compose-v2 \
       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
@@ -85,4 +85,7 @@ RUN --network=none set -eu; \
 # ---------------- payload ----------------
 FROM busybox:1.36
 COPY --from=runtime-check /workspace /workspace
+# 构建时的源码版本（git 提交号，未提交改动时带 -dirty），打包时与当前源码比对。只影响这一层。
+ARG SOURCE_REVISION=""
+LABEL io.deepstream.source-revision="${SOURCE_REVISION}"
 CMD ["true"]

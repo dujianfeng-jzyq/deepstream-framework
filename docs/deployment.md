@@ -100,7 +100,9 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 
 - apps 与依赖镜像（所有非空 `*_IMAGE`，排除上游与本项目镜像）每次都带；缺失的依赖镜像按 base 的平台拉取；所有镜像必须与 base 同平台。base 只在 `--with-base` 时带。
 - 部署文件：`docker-compose.yaml`、`framework/{compose,deploy,python/dsf}`、各单元的 `compose.yaml` 与 `templates/`、`profiles/`、`models/`、`site-fields.env`、`install.sh`。不含源码、Dockerfile、渲染结果、现场答案与 engine。
-- `release.env`：项目公共输入加本次发布事实（版本、镜像、平台、建议 profile）。`package-files.json`：全部文件的 SHA-256（完整性校验，不是签名）。
+- apps 镜像的 tag 只含版本号，源码改了而没有重新构建时同名镜像仍是旧程序。渲染记录源码版本 `SOURCE_REVISION`（git 提交号，有未提交改动时带 `-dirty`），构建把它写进 apps 镜像的标签 `io.deepstream.source-revision`；打包时两者不一致即拒绝，提示重新构建。工作区有未提交改动时只警告：无法证明镜像包含了哪些改动。不是 git 仓库时不比对。
+- 构建只由渲染出的 `.env` 决定：脚本忽略 shell 中的 `COMPOSE_FILE`、`COMPOSE_PROJECT_NAME`、`COMPOSE_PROFILES` 等变量（它们优先于 `.env`）。
+- `release.env`：项目公共输入加本次发布事实（版本、镜像、平台、建议 profile、源码版本）。`package-files.json`：全部文件的 SHA-256（完整性校验，不是签名）。
 
 ## 6. 安装
 
