@@ -96,7 +96,7 @@ Pipeline::Pipeline(std::string name, const Graph& graph)
 
 Pipeline::Pipeline(std::string name, Builder builder)
     : name_(std::move(name)), builder_(std::move(builder)) {
-  // 默认 context；Run 时选择私有 context 会替换它，此前通过 Post/Every 登记的任务随之丢弃。
+  // 默认 context；Run 时选择私有 context 会替换它。Run 之前 Post 的任务暂存，Run 选定 context 后再挂上。
   context_ = g_main_context_ref(g_main_context_default());
   loop_ = g_main_loop_new(context_, FALSE);
 }
@@ -125,6 +125,7 @@ Pipeline::~Pipeline() {
       g_source_unref(source);
     }
     posted_.clear();
+    pending_.clear();
   }
   if (pipeline_ != nullptr) {  // 仅在 Run 异常中断时出现
     gst_element_set_state(pipeline_, GST_STATE_NULL);
@@ -184,6 +185,14 @@ gboolean Pipeline::RunPosted(gpointer data) {
 void Pipeline::Post(std::function<void()> task) {
   std::lock_guard<std::mutex> lock(posted_mutex_);
   if (closed_) return;
+  if (!attached_) {
+    pending_.push_back(std::move(task));
+    return;
+  }
+  AttachPostedLocked(std::move(task));
+}
+
+void Pipeline::AttachPostedLocked(std::function<void()> task) {
   GSource* source = g_idle_source_new();
   g_source_set_callback(source, &Pipeline::RunPosted, new PostedTask{this, source, std::move(task)},
                         DeletePosted);
@@ -258,6 +267,13 @@ Result Pipeline::Run(const Options& options) {
             "the default main context is owned by another thread; use Options::private_context"};
   }
   g_main_context_push_thread_default(context_);
+  {
+    // context_ 已确定：此后 Post 直接挂到它上面。在锁内切换，Post 不会读到被替换的 context。
+    std::lock_guard<std::mutex> lock(posted_mutex_);
+    attached_ = true;
+    for (auto& task : pending_) AttachPostedLocked(std::move(task));
+    pending_.clear();
+  }
 
   try {
     if (options_.startup_timeout.count() < 0) {
@@ -381,11 +397,6 @@ void Pipeline::Cleanup() {
     }
     posted_.clear();
   }
-  for (auto& watch : sink_watches_) {
-    gst_pad_remove_probe(watch->pad, watch->probe);
-    gst_object_unref(watch->pad);
-  }
-  sink_watches_.clear();
   for (GSource* source : sources_) {
     g_source_destroy(source);
     g_source_unref(source);
@@ -395,7 +406,13 @@ void Pipeline::Cleanup() {
   if (pipeline_ != nullptr) {
     gst_element_set_state(pipeline_, GST_STATE_NULL);
   }
-  // 流线程已停止：组件可以安全拆除探针与信号。
+  // 流线程已停止，之后才能释放 sink 探针的数据：gst_pad_remove_probe 不等待正在执行的回调，
+  // 强制停止时 EOS 可能仍在流向其余 sink。组件同理，在这里之后拆除探针与信号。
+  for (auto& watch : sink_watches_) {
+    gst_pad_remove_probe(watch->pad, watch->probe);
+    gst_object_unref(watch->pad);
+  }
+  sink_watches_.clear();
   const std::string error = ForEach("OnReleased", [](Component& c) { c.OnReleased(); }, true);
   if (!error.empty() && result_->success) {
     result_ = Result{false, FinishReason::kRunError, error};

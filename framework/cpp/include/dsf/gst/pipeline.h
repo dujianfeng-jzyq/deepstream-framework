@@ -17,6 +17,10 @@
 // 排空完成的判据：管线 EOS 消息；或者 EOS 已到达每个 sink 的输入、且所有组件 Drained()。
 // 后者让网络 sink（例如 rtspclientsink 等待服务端拆除会话）不会拖住停止，
 // 而需要收尾的组件（录像器等待最后一个分段封装完成）仍然被等待。
+// 只观察管线直接子元件中的 sink：sink 本身是 bin（splitmuxsink、rtspclientsink、应用自建的
+// mux+filesink bin）时，EOS 到达的是 bin 的输入，不代表内部已经收尾，而内部元件可能运行后才创建，
+// 无法事先观察。这类 sink 若需要完整收尾（例如封装 MP4），必须由组件的 Drained() 报告，
+// 否则排空会在封装完成前结束（参见 record::SegmentRecorder）。
 
 #ifndef DSF_GST_PIPELINE_H
 #define DSF_GST_PIPELINE_H
@@ -109,6 +113,7 @@ class Pipeline {
   // 任意线程调用；动作排队到控制线程执行。
   void RequestStop(StopMode mode = StopMode::kDrain);
   // 在控制线程上执行任务（排队，绝不内联）；任务异常只记录。
+  // Run 之前提交的任务暂存，Run 选定 context 后按提交顺序执行。
   // 管线结束后提交的任务与尚未执行的任务都会被丢弃（默认 context 跨管线共享，不能留下悬空任务）。
   void Post(std::function<void()> task);
   // 在控制线程上周期执行；任务异常只记录。管线结束时自动停止，Timer 可以提前取消。
@@ -138,6 +143,7 @@ class Pipeline {
   GSource* Attach(GSource* source, GSourceFunc callback);
   void Destroy(GSource** source);
 
+  void AttachPostedLocked(std::function<void()> task);  // 调用方持有 posted_mutex_
   static gboolean RunPosted(gpointer data);
   static gboolean OnBus(GstBus* bus, GstMessage* message, gpointer self);
   static gboolean OnSignal(gpointer self);
@@ -154,6 +160,8 @@ class Pipeline {
   std::vector<GSource*> sources_;  // 内部源（总线、超时、信号），清理时销毁
   std::mutex posted_mutex_;
   std::set<GSource*> posted_;      // Post 的一次性任务（持有引用），执行或清理时移除
+  std::vector<std::function<void()>> pending_;  // Run 选定 context 之前 Post 的任务
+  bool attached_ = false;          // Run 已选定 context，Post 直接挂上
   bool closed_ = false;            // Cleanup 之后不再接受 Post
   GSource* startup_timer_ = nullptr;
   std::atomic<State> state_{State::kReady};

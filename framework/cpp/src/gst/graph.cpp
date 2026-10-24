@@ -39,6 +39,21 @@ bool HasSometimesSource(GstElement* element) {
   return false;
 }
 
+// 已存在且未连接的 src pad：有它时连接失败是真实错误（caps 不兼容等），不能推迟成等待 pad-added，
+// 否则错误会变成运行时无声的卡住。
+bool HasUnlinkedSource(GstElement* element) {
+  bool found = false;
+  GstIterator* pads = gst_element_iterate_src_pads(element);
+  GValue item = G_VALUE_INIT;
+  while (!found && gst_iterator_next(pads, &item) == GST_ITERATOR_OK) {
+    found = !gst_pad_is_linked(GST_PAD(g_value_get_object(&item)));
+    g_value_reset(&item);
+  }
+  g_value_unset(&item);
+  gst_iterator_free(pads);
+  return found;
+}
+
 // 源元件运行后才出现的 pad（nvurisrcbin、decodebin 等）：pad-added 时连接第一个能连上的。
 struct DelayedLink {
   GstElement* sink;  // 由 bin 持有，回调期间有效
@@ -307,6 +322,7 @@ GstElement* Graph::Instantiate(const std::string& pipeline_name) const {
         }
         gst_object_unref(sink_pad);
       }
+      if (!linked && HasUnlinkedSource(src)) throw std::runtime_error("cannot link " + text);
       if (!linked) delay();
       continue;
     }

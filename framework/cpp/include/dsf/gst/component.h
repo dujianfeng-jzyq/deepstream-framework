@@ -7,6 +7,8 @@
 //   OnMessage   每条总线消息；消息指针只在回调内有效。
 //   OnStopping  首次停止请求、发送 EOS 之前一次（自然 EOS 与错误不保证经过这里）。
 //   Drained     排空期间轮询，全部为 true 且 EOS 已到达每个 sink 的输入时排空完成。
+//               EOS 到达 sink bin 的输入不代表 bin 内部已收尾：需要收尾的 sink bin 必须有组件
+//               在这里报告，否则管线会在收尾前置 NULL（见 pipeline.h）。
 //   OnReleased  管线已置 NULL、流线程已停止；按登记逆序。拆探针、断信号。
 //               即使 OnCreated 没有被调用或抛了异常也会调用，实现须容忍。
 // 构造函数不得产生副作用（建目录、删文件、连网络）：--check-config 也会构造组件。

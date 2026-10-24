@@ -58,6 +58,30 @@ Graph IdleLiveGraph() {
   return graph;
 }
 
+// 同时有 always src pad 与 sometimes 模板的元件：区分“连接失败”与“等待 pad 出现”。
+const char* RegisterDualSource() {
+  static const GType type = g_type_register_static_simple(
+      GST_TYPE_ELEMENT, "DsfTestDualSource", sizeof(GstElementClass),
+      +[](gpointer klass, gpointer) {
+        auto* element_class = GST_ELEMENT_CLASS(klass);
+        GstCaps* caps = gst_caps_from_string("video/x-raw");
+        gst_element_class_add_pad_template(element_class,
+                                           gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, caps));
+        gst_element_class_add_pad_template(
+            element_class, gst_pad_template_new("dyn_%u", GST_PAD_SRC, GST_PAD_SOMETIMES, caps));
+        gst_caps_unref(caps);
+        gst_element_class_set_static_metadata(element_class, "dual source", "Source/Video", "test", "dsf");
+      },
+      sizeof(GstElement),
+      +[](GTypeInstance* instance, gpointer klass) {
+        GstPadTemplate* templ = gst_element_class_get_pad_template(GST_ELEMENT_CLASS(klass), "src");
+        gst_element_add_pad(GST_ELEMENT(instance), gst_pad_new_from_template(templ, "src"));
+      },
+      GTypeFlags(0));
+  gst_element_register(nullptr, "dsftestdual", GST_RANK_NONE, type);
+  return "dsftestdual";
+}
+
 void PushFrame(GstElement* source) {
   GstBuffer* buffer = gst_buffer_new_allocate(nullptr, 64 * 48, nullptr);
   GstFlowReturn flow = GST_FLOW_OK;
@@ -392,6 +416,30 @@ TEST(sometimes_pads_are_linked_when_they_appear) {
   Pipeline pipeline("delayed", graph);
   const Result result = pipeline.Run();
   CHECK(result.success);
+}
+
+TEST(link_failure_with_unlinked_static_pad_is_a_build_error) {
+  EnsureInitialized();
+  Graph graph;
+  graph.Chain({graph.Add(RegisterDualSource(), "dual"), graph.Caps("audio/x-raw", "audio")});
+  CHECK_THROWS(gst_object_unref(graph.Instantiate("dual")), "cannot link dual -> audio");
+}
+
+TEST(tasks_posted_before_run_execute_on_the_private_context) {
+  Pipeline pipeline("early", TestGraph(0, true));
+  std::thread::id ran_on;
+  pipeline.Post([&] {
+    ran_on = std::this_thread::get_id();
+    pipeline.RequestStop();
+  });
+  Options options;
+  options.handle_signals = false;
+  options.private_context = true;
+  // 任务若留在默认 context 上就永不执行，live 管线停不下来（由 CTest 超时判为失败）。
+  const Result result = pipeline.Run(options);
+  CHECK(result.success);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
+  CHECK(ran_on == std::this_thread::get_id());
 }
 
 TEST(request_pads_by_template_and_tee_branches) {
