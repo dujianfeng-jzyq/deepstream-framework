@@ -73,7 +73,7 @@ TEST(single_source_shares_one_encoder) {
   CHECK(text.find("pgie -> tracker") != std::string::npos);
   CHECK(text.find("tracker -> meta") != std::string::npos);
   CHECK(text.find("enc -> enc_tee") != std::string::npos);
-  CHECK(text.find("rtsp_out = rtspclientsink location=rtsp://mediamtx:8554/x-out") != std::string::npos);
+  CHECK(text.find("rtsp_out = rtspclientsink location=***") != std::string::npos);
   CHECK(text.find("uri=***") != std::string::npos);
   CHECK_EQ(plan.recorders.size(), 1u);
   CHECK_EQ(plan.recorders[0].element, std::string("rec_osd_0"));

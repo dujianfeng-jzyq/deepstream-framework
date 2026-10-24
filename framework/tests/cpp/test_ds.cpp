@@ -95,7 +95,7 @@ TEST(mux_infer_and_outputs_build_expected_graph) {
   Element tiler = AddTiler(graph, tail, TilerSpec{}, 3);
   EncoderSpec encoder;
   encoder.codec = "h265";
-  AddRtspOut(graph, AddEncoder(graph, tiler, encoder, "enc"), "h265", "rtsp://out/x", "rtsp");
+  AddRtspOut(graph, AddEncoder(graph, tiler, encoder, "enc"), "h265", "rtsp://u:pw@out/x", "rtsp");
 
   CHECK_EQ(Property(graph, "mux", "batch-size"), std::string("2"));
   CHECK_EQ(Property(graph, "mux", "live-source"), std::string("true"));
@@ -103,12 +103,14 @@ TEST(mux_infer_and_outputs_build_expected_graph) {
   CHECK_EQ(Property(graph, "tiler", "rows"), std::string("2"));
   CHECK_EQ(Property(graph, "tiler", "columns"), std::string("2"));
   CHECK_EQ(Property(graph, "rtsp_parse", "config-interval"), std::string("-1"));
+  CHECK_EQ(Property(graph, "rtsp", "location"), std::string("rtsp://u:pw@out/x"));
   CHECK(graph.Contains("enc"));
   CHECK_EQ(graph.nodes()[static_cast<std::size_t>(graph.Find("enc").Pad("").element)].factory,
            std::string("nvv4l2h265enc"));
   const std::string text = graph.Describe();
   CHECK(text.find("src1_nvmm -> mux.sink_1") != std::string::npos);
   CHECK(text.find("pgie -> sgie") != std::string::npos);
+  CHECK(text.find("pw") == std::string::npos);
   const std::string requirements = graph.Requirements().Describe();
   CHECK(requirements.find("value    nvinferserver.interval=2") != std::string::npos);
 }

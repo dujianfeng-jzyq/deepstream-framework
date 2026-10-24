@@ -376,7 +376,8 @@ Element AddRtspOut(Graph& graph, const gst::Endpoint& encoded, const std::string
                    const std::string& url, const std::string& name, const Properties& properties) {
   Element parser = AddParser(graph, encoded, codec, name + "_parse", true);
   Element sink = graph.Add("rtspclientsink", name);
-  sink.Set("location", url).Set("protocols", "tcp").Apply(properties);
+  // 地址可能带推流口令：诊断输出中整个地址打码，与 RTSP 源一致。
+  sink.SetSecret("location", url).Set("protocols", "tcp").Apply(properties);
   graph.Link(parser, sink);
   return sink;
 }
