@@ -2,7 +2,6 @@
 
 import importlib.util
 import re
-import shutil
 import subprocess
 import sys
 import unittest
@@ -81,15 +80,6 @@ class RepositoryTest(unittest.TestCase):
         code = ("import sys; sys.modules['yaml'] = None; sys.path[:0] = [sys.argv[1]]; "
                 "import dsf_deploy.cli, dsf_deploy.install, dsf_deploy.pack")
         result = subprocess.run([sys.executable, "-c", code, str(FRAMEWORK / "deploy")],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    @unittest.skipUnless(shutil.which("docker"), "docker CLI not installed")
-    def test_rendered_compose_is_valid(self):
-        env = ROOT / ".env"
-        if not env.is_file():
-            self.skipTest("project not rendered (scripts/apply-profile.sh)")
-        result = subprocess.run(["docker", "compose", "config", "--quiet"], cwd=ROOT,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 

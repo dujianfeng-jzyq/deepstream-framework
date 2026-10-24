@@ -30,14 +30,28 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       gst-inspect-1.0 "$element" >/dev/null || { echo "missing GStreamer element: $element" >&2; exit 1; }; \
     done
 
+# 编译与测试以非 root 运行：业务容器也是非 root，root 会掩盖权限相关的失败（并让对应用例 SKIP）。
+RUN useradd --create-home dsf-builder && install -d -o dsf-builder /build/build
 WORKDIR /build
-COPY ./ ./
+# 先复制源码与测试读取的文件；profiles/ 与项目输入在编译之后复制，改动它们只重跑 profile 校验。
+COPY CMakeLists.txt docker-compose.yaml ./
+COPY framework/ framework/
+COPY services/ services/
+COPY plugins/ plugins/
+COPY scripts/ scripts/
+COPY tools/ tools/
+USER dsf-builder
 # DSF_REQUIRE_DEEPSTREAM：SDK 不可用即失败，不会产出缺少应用的载荷。
+# DSF_FORBID_SKIPS：builder 带齐全部测试依赖，任何 SKIP 都计为失败。
 RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
       -DDSF_REQUIRE_DEEPSTREAM=ON -DCMAKE_INSTALL_PREFIX=/workspace && \
     cmake --build build && \
-    ctest --test-dir build --output-on-failure && \
-    cmake --install build
+    DSF_FORBID_SKIPS=1 ctest --test-dir build --output-on-failure --label-exclude profiles
+COPY profiles/ profiles/
+COPY project.env site-fields.env ./
+RUN DSF_FORBID_SKIPS=1 ctest --test-dir build --output-on-failure --label-regex profiles
+USER root
+RUN cmake --install build
 
 # 各 Python 单元的依赖（CMake 汇总）装进载荷，服务通过 PYTHONPATH 使用。
 # ARG 之后的每个 RUN 都隐式依赖它：只在这里声明，改版本号或 pip 源不会重跑 apt 与编译。

@@ -249,7 +249,7 @@ sys.exit(Service("my-service", "说明").run(load, main))
 | 应用核心 | 模板与读取代码一致、拓扑结构、跨字段规则 | 开发机 |
 | SDK 层 | 应用与插件编译链接、CLI 冒烟测试 | builder 镜像 |
 | 部署 | 渲染、打包、安装（假 Docker）、engine 工具（假 trtexec）、仓库约定 | 开发机（docker CLI 可选） |
-| 镜像 | builder 中的 CTest（以上各层全部执行，不 SKIP），原始 base 中的非 root 无网络自检 | 有 Docker 的开发机或编译服务器 |
+| 镜像 | builder 中的 CTest（以上各层全部执行，`DSF_FORBID_SKIPS=1` 使 SKIP 计为失败），每个 profile 的渲染与 Compose 解析，原始 base 中的非 root 无网络自检 | 有 Docker 的开发机或编译服务器 |
 | 目标机 | 真实视频、推理与跟踪、Redis 消息、MP4 收尾、RTSP 输出、engine 复用、Linux 权限 | 目标设备 |
 
-宿主缺少 redis-server、软件编码插件或 docker CLI 时相关用例显示 SKIP 并成功退出，查看详细输出确认实际覆盖范围；镜像构建是必须通过的完整验证。
+宿主缺少 redis-server、软件编码插件或 docker CLI 时相关用例显示 SKIP 并成功退出，查看详细输出确认实际覆盖范围；镜像构建是必须通过的完整验证。C++ 的 `dsf_test.h` 与 Python 的 `run_unittest.py`（`dsf_add_python_test` 的入口）都读取 `DSF_FORBID_SKIPS`。

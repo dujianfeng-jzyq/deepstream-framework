@@ -18,7 +18,8 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 
 - 载荷范围只由 CMake 的 install 规则决定（`dsf_add_app`、`dsf_add_plugin`、`dsf_add_python_service`）；Python 依赖由 CMake 汇总各单元的 `requirements.txt` 后 `pip --target` 安装。
 - 发布构建设置 `DSF_REQUIRE_DEEPSTREAM=ON`：SDK 不可用即失败，不会产出缺少应用的载荷。
-- builder 安装 Redis 服务端与软件编解码插件（并用 SDK 自带脚本恢复上游裁掉的编解码库），使录像与消息的集成测试真正执行。
+- builder 安装 Redis 服务端、软件编解码插件（并用 SDK 自带脚本恢复上游裁掉的编解码库）、pyflakes 与 Docker/Compose CLI，以非 root 运行 CTest，并设置 `DSF_FORBID_SKIPS=1`：任何 SKIP 都使构建失败。
+- `profiles/`、`project.env`、`site-fields.env` 在编译之后才复制，随后只运行带 `profiles` 标签的测试（每个 profile 渲染并经 `docker compose config` 解析）；改动它们不会重新编译。
 - runtime-check 回到原始 base，对每个应用执行 `--version` 与 `--selftest`，并导入 Python 运行时；任何失败都不会生成 apps 镜像。
 - JPEG 编码库在 `image.enabled` 的采集组件启动时才加载，构建和无 GPU 自检不加载其设备依赖。目标 Jetson 仍须使用与 JetPack 匹配的 DeepStream 镜像和 NVIDIA runtime；缺少运行库时启用图片会明确报错。
 - 镜像名由渲染器派生：`<项目>/deepstream-<DS版本>-base:<BASE_VERSION>-<输入摘要>`、`<项目>/deepstream-<DS版本>-apps:<APPS_VERSION>`。base 的输入摘要覆盖 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES`：输入变化一定得到新 tag，同名 tag 不会代表两种内容。

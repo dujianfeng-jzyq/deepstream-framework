@@ -92,7 +92,9 @@ function(dsf_add_python_test name script)
     return()
   endif()
   get_filename_component(_script "${script}" ABSOLUTE)
-  add_test(NAME ${name} COMMAND "${DSF_PYTHON}" "${_script}" ${ARG_ARGS})
+  # 经 run_unittest.py 运行：DSF_FORBID_SKIPS=1 时 SKIP 计为失败。
+  add_test(NAME ${name} COMMAND "${DSF_PYTHON}" "${DSF_FRAMEWORK_DIR}/tests/python/run_unittest.py"
+           "${_script}" ${ARG_ARGS})
   set_tests_properties(${name} PROPERTIES
     ENVIRONMENT "PYTHONPATH=${DSF_FRAMEWORK_DIR}/python:${DSF_FRAMEWORK_DIR}/deploy:${DSF_FRAMEWORK_DIR}/tests/python;PYTHONDONTWRITEBYTECODE=1")
   if(ARG_TIMEOUT)

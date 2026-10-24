@@ -16,3 +16,7 @@ foreach(_test IN LISTS _python_tests)
   get_filename_component(_name "${_test}" NAME_WE)
   dsf_add_python_test(dsf_${_name} "${_test}" TIMEOUT 120)
 endforeach()
+# 依赖 profiles/ 与项目输入；builder 在编译之后才复制它们，按此标签单独运行。
+if(TEST dsf_test_profiles)
+  set_tests_properties(dsf_test_profiles PROPERTIES LABELS profiles)
+endif()

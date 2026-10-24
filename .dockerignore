@@ -1,6 +1,6 @@
-# 构建上下文用白名单：builder 只需要源码、测试，以及测试读取的部署文件（docker-compose.yaml、
-# scripts/、tools/）。渲染产物、现场答案、profile、模型与发布物都不进入上下文，改动它们不会让编译缓存失效。
-# 新增需要参与镜像构建的顶层路径时在这里加一行。
+# 构建上下文用白名单：builder 只需要源码、测试，以及测试读取的部署文件。渲染产物、现场答案、
+# 模型与发布物都不进入上下文。profiles/ 与项目输入由 apps.Dockerfile 在编译之后单独复制，
+# 改动它们不会让编译缓存失效。新增需要参与镜像构建的顶层路径时，在这里和 apps.Dockerfile 各加一处。
 *
 !CMakeLists.txt
 !framework/
@@ -9,6 +9,9 @@
 !scripts/
 !tools/
 !docker-compose.yaml
+!profiles/
+!project.env
+!site-fields.env
 **/__pycache__/
 **/*.py[cod]
 **/.DS_Store

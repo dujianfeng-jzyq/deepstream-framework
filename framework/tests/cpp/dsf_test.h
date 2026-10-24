@@ -1,5 +1,6 @@
 // 极简测试支持：TEST 注册、CHECK 断言、SKIP。不引入第三方测试框架，测试可执行文件
-// 直接由 CTest 运行；返回码非零即失败。
+// 直接由 CTest 运行；返回码非零即失败。DSF_FORBID_SKIPS=1 时（builder 中）SKIP 也计为失败：
+// CTest 只看返回码，看不到可执行文件内部的 SKIP。
 
 #ifndef DSF_TEST_H
 #define DSF_TEST_H
@@ -42,12 +43,14 @@ struct Skip : std::exception {
 
 inline int RunAll() {
   int failed = 0;
+  int skipped = 0;
   for (const Case& test : Registry()) {
     try {
       test.body();
       std::cout << "[ OK ] " << test.name << "\n";
     } catch (const Skip& skip) {
       std::cout << "[SKIP] " << test.name << ": " << skip.what() << "\n";
+      ++skipped;
     } catch (const std::exception& error) {
       std::cout << "[FAIL] " << test.name << ": " << error.what() << "\n";
       ++failed;
@@ -55,6 +58,11 @@ inline int RunAll() {
   }
   std::cout << Registry().size() - static_cast<std::size_t>(failed) << "/" << Registry().size()
             << " passed\n";
+  const char* forbid = std::getenv("DSF_FORBID_SKIPS");
+  if (skipped > 0 && forbid != nullptr && std::string(forbid) == "1") {
+    std::cout << "DSF_FORBID_SKIPS=1: " << skipped << " skipped test(s) count as failures\n";
+    return 1;
+  }
   return failed == 0 ? 0 : 1;
 }
 

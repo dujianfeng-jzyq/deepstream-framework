@@ -35,7 +35,7 @@
 
 ## 验证
 
-- 必须：`docker compose build deepstream-apps`。builder 中的 CTest 要求 SDK，并带齐 pyflakes、redis-server 与软件编解码插件，用例真正执行而不是 SKIP；之后在原始 base 中做非 root、无网络自检。任何失败都不产出镜像。
+- 必须：`docker compose build deepstream-apps`。builder 中的 CTest 要求 SDK，带齐 pyflakes、redis-server、Docker/Compose CLI 与软件编解码插件，以非 root 运行，`DSF_FORBID_SKIPS=1` 使任何 SKIP 计为失败；编译之后再单独校验每个 profile（标签 `profiles`）；最后在原始 base 中做非 root、无网络自检。新增测试依赖时把它装进 builder，不要让用例在 builder 中 SKIP。任何失败都不产出镜像。
 - 可选的快速循环：宿主 `cmake --build build && (cd build && ctest --output-on-failure)` 用于框架、配置与拓扑代码的增量迭代；只改 Python 时直接运行 `python3 -m unittest`（`PYTHONPATH` 与 CTest 相同，见 `framework/cmake/DsfUnits.cmake`）。宿主缺少 SDK、pyflakes 或 redis-server 时相应用例 SKIP，不能替代镜像构建。
 - 真实视频、推理、RTSP、录像收尾、engine 复用与 Linux 权限只能在目标环境验证，镜像构建与容器健康检查不能替代。
 
