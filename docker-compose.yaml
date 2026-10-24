@@ -58,5 +58,6 @@ services:
       options: {max-size: 10m, max-file: "3"}
 
 volumes:
-  # 默认卷名 <PROJECT_NAME>_app-files。卷只在为空时播种：更换载荷必须 docker compose down -v。
+  # 默认卷名 <PROJECT_NAME>_app-files。卷只在为空时播种：更换载荷必须删除这个卷
+  # （安装器只删它；docker compose down -v 会连同服务的其他命名卷一起删除）。
   app-files:

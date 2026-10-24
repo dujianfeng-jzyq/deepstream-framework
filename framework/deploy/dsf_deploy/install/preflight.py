@@ -205,6 +205,16 @@ def _relocate(services: dict, stage: Path, install_dir: Path) -> None:
                 mount["source"] = str(install_dir / source.relative_to(stage))
 
 
+def _docker_env_file(service: str, environment: dict[str, str]) -> str:
+    """docker run --env-file 的格式：每行 KEY=VALUE，值按字面到行尾，不能包含换行。"""
+    lines = []
+    for key, value in sorted(environment.items()):
+        if "\n" in value or "\r" in value:
+            raise DeployError(f"{service}: environment {key} contains a line break; it cannot be passed to --check-config")
+        lines.append(f"{key}={value}")
+    return "\n".join(lines) + "\n"
+
+
 def _check_configs(services: dict, stage: Path, release: dict[str, str], docker: Docker) -> None:
     """用新载荷离线执行声明了预检标签的服务入口：不联网、只读、不挂数据目录与旧载荷卷。"""
     checks = {name: s for name, s in services.items()
@@ -214,6 +224,8 @@ def _check_configs(services: dict, stage: Path, release: dict[str, str], docker:
     workspace = layout.MOUNTS["CONTAINER_WORKSPACE"]
     payload = stage / "payload"
     payload.mkdir()
+    environments = stage / "check-env"
+    environments.mkdir(mode=0o700)
     docker.export_directory(release["APPS_IMAGE"], workspace, payload)
     for name, service in sorted(checks.items()):
         entrypoint = service.get("entrypoint")
@@ -224,9 +236,14 @@ def _check_configs(services: dict, stage: Path, release: dict[str, str], docker:
                 "--workdir", service.get("working_dir") or workspace,
                 "-v", f"{payload}:{workspace}:ro",
                 "-v", f"{stage / layout.GENERATED / 'config'}:{layout.MOUNTS['CONTAINER_CONFIG_PATH']}:ro"]
-        for key, value in sorted((service.get("environment") or {}).items()):
-            if value is not None:
-                args += ["-e", f"{key}={value}"]
+        # 环境变量经 0600 文件传入：-e KEY=VALUE 会让其中的口令出现在宿主的进程列表中。
+        environment = {key: str(value) for key, value in (service.get("environment") or {}).items()
+                       if value is not None}
+        if environment:
+            env_file = environments / f"{name}.env"
+            env_file.touch(mode=0o600)
+            env_file.write_text(_docker_env_file(name, environment), encoding="utf-8")
+            args += ["--env-file", str(env_file)]
         args += ["--entrypoint", entrypoint[0], service["image"], *entrypoint[1:], "--check-config"]
         print(f"checking configuration: {name}")
         docker.run(args)
@@ -303,14 +320,15 @@ def prepare(options: Options, docker: Docker) -> Plan:
 def describe(plan: Plan, docker: Docker) -> str:
     lines = [f"installation directory: {plan.install_dir}"]
     if (plan.install_dir / layout.ENV).is_file():
-        lines.append("stop: current services (docker compose down -v) using the installed definition")
+        lines.append("stop: current services (docker compose down) using the installed definition, "
+                     "then remove the payload volume")
     if plan.clean:
         lines.append(f"wipe: {plan.install_dir}")
     lines += [f"remove obsolete: {path}" for path in plan.obsolete]
     lines.append(f"write: {len(inventory.managed(plan.files))} release files, "
                  f"{len(plan.configuration)} configuration files, {layout.SITE_ENV}")
     lines += [f"writable mount: {path}" for path in plan.data_paths]
-    volume = f"{plan.release['PROJECT_NAME']}_{layout.PAYLOAD_VOLUME}"
+    volume = layout.payload_volume(plan.release["PROJECT_NAME"])
     if not (plan.install_dir / layout.ENV).is_file() and docker.volume_exists(volume):
         lines.append(f"warning: stale payload volume {volume} exists and would not be refreshed; "
                      f"remove it with: docker volume rm {volume}")

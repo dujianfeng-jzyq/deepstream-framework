@@ -14,6 +14,7 @@ from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_avai
 from dsf_deploy import cli, inventory, layout, naming, pack, render, site
 from dsf_deploy.envfile import DeployError, read
 from dsf_deploy.install import Options, install, preflight
+from dsf_deploy.install.apply import apply
 
 
 class ToolDocker(FakeDocker):
@@ -135,9 +136,15 @@ class PackInstallTest(ProjectTestCase):
         check = next(call for call in target.calls if call[0] == "run" and "--check-config" in call)
         self.assertIn("--network", check)
         self.assertEqual(check[check.index("--network") + 1], "none")
+        # 环境变量经 0600 文件传入，不出现在命令行（进程列表）中
+        self.assertNotIn("-e", check)
+        self.assertEqual(len(target.env_files), 1)
+        mode, environment = target.env_files[0]
+        self.assertEqual(mode, 0o600)
+        self.assertIn("DSF_READY_FILE=/tmp/dsf.ready\n", environment)
         # 首次安装：没有 down；最后 up -d
         compose = [call[2:] for call in target.calls if call[0] == "compose"]
-        self.assertNotIn(["down", "-v", "--remove-orphans"], compose)
+        self.assertFalse([call for call in compose if call[:1] == ["down"]])
         self.assertEqual(compose[-1], ["up", "-d"])
         self.assertIn("all services are ready", output)
 
@@ -162,12 +169,31 @@ class PackInstallTest(ProjectTestCase):
         (self.root / "models/m/deployment/config.txt").unlink()
         (self.root / "models/m/deployment/new.txt").write_text("[property]\n")
         upgraded = self.pack(with_base=True)
-        target, _ = self.install(upgraded)
+        target = FakeDocker()
+        target.volumes = {"demo_app-files", "demo_redis-data"}
+        target, _ = self.install(upgraded, target)
         compose = [call[2:] for call in target.calls if call[0] == "compose"]
-        self.assertEqual(compose[0], ["down", "-v", "--remove-orphans"])  # 先用旧定义停服
+        self.assertEqual(compose[0], ["down", "--remove-orphans"])  # 先用旧定义停服；不带 -v
+        # 只删除载荷卷使其重新播种，服务的其他命名卷保留
+        self.assertIn(["volume-rm", "demo_app-files"], target.calls)
+        self.assertEqual(target.volumes, {"demo_redis-data"})
         self.assertFalse((self.install_dir / "models/m/deployment/config.txt").exists())
         self.assertTrue((self.install_dir / "models/m/deployment/new.txt").exists())
         self.assertTrue((self.install_dir / "notes.txt").exists())
+
+    def test_obsolete_file_removed_after_preflight_does_not_abort_the_upgrade(self):
+        package = self.pack(with_base=True)
+        self.install(package)
+        (self.root / "models/m/deployment/config.txt").unlink()
+        upgraded = self.pack(with_base=True)
+        target = FakeDocker()
+        with redirect_stdout(io.StringIO()):
+            plan = preflight.prepare(Options(upgraded, self.install_dir, interactive=False), target)
+            obsolete = self.install_dir / "models/m/deployment/config.txt"
+            self.assertEqual(plan.obsolete, [obsolete])
+            obsolete.unlink()  # 现场在预检与执行之间删除了它
+            apply(plan, target, 5)
+        self.assertEqual([call[2:] for call in target.calls if call[0] == "compose"][-1], ["up", "-d"])
 
     def test_modified_obsolete_file_blocks_the_upgrade_before_stopping(self):
         package = self.pack(with_base=True)

@@ -35,3 +35,8 @@ PACKAGE_EXCLUDED_NAMES = ("__pycache__", ".DS_Store")
 # 服务声明支持无副作用预检的标签。
 CONFIG_CHECK_LABEL = "io.deepstream.config-check"
 PAYLOAD_VOLUME = "app-files"
+
+
+def payload_volume(project_name: str) -> str:
+    """Compose 为载荷卷生成的全名（项目名来自 docker-compose.yaml 的 name: ${PROJECT_NAME}）。"""
+    return f"{project_name}_{PAYLOAD_VOLUME}"

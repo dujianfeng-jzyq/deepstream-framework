@@ -59,7 +59,7 @@ generated/network.compose.yaml    仅当 profile 设置 x-network-mode 时生成
 ```bash
 scripts/apply-profile.sh <profile>                   # 渲染；省略 profile 时沿用上次选择
 docker compose build deepstream-base deepstream-apps
-docker compose down -v && docker compose up -d        # 更换载荷：卷只在为空时播种
+docker compose down && docker volume rm <项目名>_app-files && docker compose up -d  # 更换载荷：卷只在为空时播种
 docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入口参数
 ```
 
@@ -114,7 +114,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 2. 检查安装目标：安装目录与包不重叠；控制文件、发布路径不能是符号链接，也不能与已有文件/目录类型冲突。之后才读取旧的选择与答案。
 3. 选择 profile（`--profile` > 已安装的选择 > 交互选择 > 包内建议），收集现场答案（升级沿用；`--ask`、`--clean-install` 重新收集；非交互时只保存已有答案；提问默认值含所选 profile 的 `x-build`，宿主没有 PyYAML 时为此提前加载包内的 base）。检查清洁安装范围与退役文件冲突。
 4. 加载镜像（不影响运行中的旧容器）；在临时目录渲染新配置（宿主没有 PyYAML 时用 base 镜像渲染）；按最终 Compose 检查并准备可写 bind 挂载；核对每个服务镜像的平台；从新 apps 镜像取出载荷，离线、只读地执行所有带预检标签服务的 `--check-config`。
-5. `--dry-run` 到此结束并打印计划。否则重验目标，用旧定义 `docker compose down -v --remove-orphans`（首次安装改为检查遗留卷）。
+5. `--dry-run` 到此结束并打印计划。否则重验目标，用旧定义 `docker compose down --remove-orphans`，再只删除载荷卷 `<项目名>_app-files` 使其重新播种（不用 `down -v`：它会删除项目的全部命名卷，包括服务的持久数据；首次安装改为检查遗留卷）。
 6. 按需清空安装目录；删除未被修改的退役受管理文件；复制发布文件；写入 `project.env`（由 `release.env` 派生）、`site.env`、`.managed-files.json` 与预检过的配置快照（不再重新渲染）。
 7. `docker compose config --quiet`、`up -d`，有界等待：常驻服务运行且健康，一次性服务成功退出。
 

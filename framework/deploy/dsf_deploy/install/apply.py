@@ -1,6 +1,6 @@
 """执行已预检的安装计划。从这里开始会停止旧服务；失败不自动回滚，可重新安装旧包恢复。
 
-顺序：重验目标 → 用旧定义停服（down -v 使载荷卷重新播种）→ 按需清空目录 → 删除退役文件 →
+顺序：重验目标 → 用旧定义停服并删除载荷卷（使其重新播种）→ 按需清空目录 → 删除退役文件 →
 复制发布文件 → 写入 project.env、site.env、受管理清单与预检过的配置快照 → 启动并等待就绪。
 """
 
@@ -20,21 +20,29 @@ def apply(plan: Plan, docker: Docker, ready_timeout: float) -> None:
     root, package = plan.install_dir, plan.package_root
     targets.check(package, root, plan.configuration)  # 预检可能耗时：停服前再确认一次
 
+    new_volume = layout.payload_volume(plan.release["PROJECT_NAME"])
+    stale_check = True
     if (root / layout.ENV).is_file():
         print("stopping the current services")
-        docker.compose(root, ["down", "-v", "--remove-orphans"])
-    else:
-        volume = f"{plan.release['PROJECT_NAME']}_{layout.PAYLOAD_VOLUME}"
-        if docker.volume_exists(volume):
-            print(f"WARNING: a stale payload volume exists and will not be refreshed: {volume}\n"
-                  f"         remove it with: docker volume rm {volume}", file=sys.stderr)
+        # 不用 down -v：它删除项目的全部命名卷，服务放在命名卷中的持久数据也会丢失。
+        # 只删载荷卷：卷只在为空时播种，不删就会继续运行旧载荷。
+        docker.compose(root, ["down", "--remove-orphans"])
+        old_volume = layout.payload_volume(envfile.read(root / layout.ENV).get("PROJECT_NAME")
+                                           or plan.release["PROJECT_NAME"])
+        if docker.volume_exists(old_volume):
+            print(f"removing the payload volume {old_volume}")
+            docker.volume_remove(old_volume)
+        stale_check = old_volume != new_volume
+    if stale_check and docker.volume_exists(new_volume):
+        print(f"WARNING: a stale payload volume exists and will not be refreshed: {new_volume}\n"
+              f"         remove it with: docker volume rm {new_volume}", file=sys.stderr)
 
     if plan.clean and root.exists():
         print(f"wiping {root}")
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
     for path in plan.obsolete:
-        path.unlink()
+        path.unlink(missing_ok=True)  # 预检之后可能已被现场删除；停服之后不能因此中断
         print(f"removed obsolete file {path.relative_to(root)}")
 
     managed = inventory.managed(plan.files)

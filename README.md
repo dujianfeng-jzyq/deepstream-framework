@@ -67,7 +67,7 @@ tools/push_sample_video.sh video.mp4           # 用本地视频模拟相机（�
 
 数据目录必须在首次 `docker compose up` 前以当前用户创建：缺失的 bind 源会被 Docker 以 root 创建，服务以 `HOST_UID:HOST_GID` 运行时无法写入（如 `Permission denied: '/data/engines'`），此时执行 `sudo chown -R $(id -u):$(id -g) <数据目录>` 修复。安装器会自动创建并检查该目录。
 
-更换程序时先构建成功，再 `docker compose down -v && docker compose up -d`：载荷卷只在为空时播种。
+更换程序时先构建成功，再 `docker compose down && docker volume rm <项目名>_app-files && docker compose up -d`：载荷卷只在为空时播种（不用 `down -v`，它会连同服务的其他命名卷一起删除）。
 
 ## 发布与安装
 

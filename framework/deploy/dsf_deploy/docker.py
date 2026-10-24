@@ -60,6 +60,9 @@ class Docker:
     def volume_exists(self, name: str) -> bool:
         return self._ok(["docker", "volume", "inspect", name])
 
+    def volume_remove(self, name: str) -> None:
+        self._run(["docker", "volume", "rm", name], capture=True)
+
     def export_directory(self, image: str, directory: str, target: Path) -> None:
         """把镜像中的目录复制出来（创建不运行的临时容器）。"""
         container = self._run(["docker", "create", image], capture=True).stdout.strip()

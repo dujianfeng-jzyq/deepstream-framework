@@ -76,6 +76,7 @@ class FakeDocker(Docker):
         self.platform = platform or naming.host_platform()
         self.ps_rows: list[dict] | None = None
         self.fail_on: str | None = None
+        self.env_files: list[tuple[int, str]] = []
 
     def available(self) -> bool:
         return True
@@ -108,12 +109,19 @@ class FakeDocker(Docker):
     def volume_exists(self, name):
         return name in self.volumes
 
+    def volume_remove(self, name):
+        self._record("volume-rm", name)
+        self.volumes.discard(name)
+
     def export_directory(self, image, directory, target):
         self._record("export", image, directory)
         (Path(target) / "bin").mkdir(parents=True, exist_ok=True)
 
     def run(self, args, capture=False):
         self._record("run", *args)
+        if "--env-file" in args:  # 文件在预检的临时目录中，调用返回后即被删除
+            env_file = Path(args[args.index("--env-file") + 1])
+            self.env_files.append((env_file.stat().st_mode & 0o777, env_file.read_text()))
 
     def compose(self, project_dir, args, capture=False, env_file=None, files=None):
         self._record("compose", str(project_dir), *args)
