@@ -231,7 +231,7 @@ def main(port, service: Service):
 sys.exit(Service("my-service", "说明").run(load, main))
 ```
 
-`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、SIGINT/SIGTERM 与就绪文件。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）。第三方依赖写进单元的 `requirements.txt`。
+`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、SIGINT/SIGTERM 与就绪文件。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
 
 ## 10. 新增应用
 

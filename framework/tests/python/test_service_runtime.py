@@ -2,7 +2,11 @@
 
 import io
 import os
+import signal
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -41,6 +45,29 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ids, [1, 2])
         with self.assertRaisesRegex(ConfigError, r"items\[1\].typo: unknown field"):
             root.finish()
+
+    def test_plain_scalars_follow_the_requested_type_like_cpp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "c.yaml")
+            path.write_text('password: 123456\nmode: on\nflag: Yes\nn: -3\nf: 1.5e3\n'
+                            'quoted: "7"\nbad_int: 1_000\nbad_float: .inf\nnone: ~\n')
+            root = Reader.load(str(path))
+            self.assertEqual(root.secret("password"), "123456")
+            self.assertIs(type(root.get("mode", "")), str)
+            self.assertEqual(root.get("mode", ""), "on")
+            self.assertIs(root.get("flag", False), True)
+            self.assertEqual(root.get("n", 0), -3)
+            self.assertEqual(root.get("f", 0.0), 1500.0)
+            self.assertEqual(root.get("quoted", ""), "7")
+            self.assertEqual(root.get("none", "default"), "default")
+            with self.assertRaisesRegex(ConfigError, "quoted: expected int, got '7'"):
+                root.get("quoted", 0)  # 加引号的标量只能读成字符串
+            with self.assertRaisesRegex(ConfigError, "bad_int: expected int"):
+                root.get("bad_int", 0)
+            with self.assertRaisesRegex(ConfigError, "bad_float: expected float"):
+                root.get("bad_float", 0.0)
+            with self.assertRaisesRegex(ConfigError, "mode: expected int"):
+                root.get("mode", 0)
 
     def test_duplicate_keys_and_secrets(self):
         with self.assertRaisesRegex(Exception, "duplicate key"):
@@ -81,6 +108,34 @@ class ServiceTest(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 self.assertEqual(Service("svc").run(load, main, ["--bogus"]), 2)
             del os.environ["DSF_READY_FILE"]
+
+
+def run_service(directory: str, config: str, body: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    """在子进程中运行服务：看门狗以 os._exit 结束进程，信号处理会替换进程级处理器。"""
+    Path(directory, "svc.yaml").write_text(config)
+    script = Path(directory, "svc.py")
+    script.write_text(textwrap.dedent("""
+        import os, signal, sys, time
+        from dsf.service import Service
+        def main(_, service):
+        """) + textwrap.indent(textwrap.dedent(body), "    ") +
+        '\nsys.exit(Service("svc").run(lambda root: None, main, ["--config", sys.argv[1]]))\n')
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path),
+                       DSF_READY_FILE=str(Path(directory, "ready")))
+    return subprocess.run([sys.executable, str(script), str(Path(directory, "svc.yaml"))], env=environment,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+class ServiceProcessTest(unittest.TestCase):
+    def test_signal_stops_the_main_loop_and_is_logged_by_the_main_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_service(directory, "", """
+                os.kill(os.getpid(), signal.SIGTERM)
+                while service.sleep(5):
+                    pass
+                """)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"stopped by signal {int(signal.SIGTERM)}", result.stdout)
 
 
 if __name__ == "__main__":

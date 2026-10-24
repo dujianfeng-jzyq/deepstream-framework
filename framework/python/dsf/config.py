@@ -4,17 +4,52 @@
     host = root.section("redis").get("host", "127.0.0.1")
     root.finish()          # 拒绝没有读取过的键
 
-类型由默认值（或 required 的 kind）决定：bool 不接受数字，int 不接受 bool，float 接受整数。
-null 视为缺失。错误抛 ConfigError，消息为 "<来源>: <完整路径>: <原因>"。
+类型由默认值（或 required 的 kind）决定，转换规则与 C++ 相同：未加引号的标量按所需类型解析
+（str 接受任何标量原文；bool 接受 true/false/yes/no/on/off，不区分大小写；int 只接受十进制整数；
+float 接受整数与小数），加引号的标量只能读成 str。null 视为缺失。
+错误抛 ConfigError，消息为 "<来源>: <完整路径>: <原因>"。
 """
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any, Callable, Optional
 
 from . import yamlio
 
 _MISSING = object()
+_INTEGER = re.compile(r"-?[0-9]+")
+_FLOAT = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+_BOOLEANS = {"true": True, "yes": True, "on": True, "false": False, "no": False, "off": False}
+
+
+def _parse_plain(text: str, kind: type) -> Any:
+    """未加引号的标量原文按 kind 解析；不合法返回 _MISSING。"""
+    if kind is bool:
+        return _BOOLEANS.get(text.lower(), _MISSING)
+    if kind is int:
+        return int(text) if _INTEGER.fullmatch(text) else _MISSING
+    if kind is float:
+        if not _FLOAT.fullmatch(text):
+            return _MISSING
+        value = float(text)
+        return value if math.isfinite(value) else _MISSING
+    return str(text)
+
+
+def _convert(value: Any, kind: type) -> Any:
+    """返回 kind 类型的值；不合法返回 _MISSING。value 可以是原文（yamlio.Plain）或已解析的值。"""
+    if isinstance(value, yamlio.Plain):
+        return _parse_plain(value, kind)
+    if kind is bool:
+        return value if isinstance(value, bool) else _MISSING
+    if kind is int:
+        return value if isinstance(value, int) and not isinstance(value, bool) else _MISSING
+    if kind is float:
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+        return float(value) if valid else _MISSING
+    return value if isinstance(value, str) else _MISSING
 
 
 class ConfigError(Exception):
@@ -55,7 +90,7 @@ class Reader:
     def load(cls, path: str) -> "Reader":
         try:
             with open(path, encoding="utf-8") as stream:
-                document = yamlio.load(stream)
+                document = yamlio.load_text(stream)
         except OSError as error:
             raise ConfigError(f"{path}: cannot open config file: {error.strerror}") from error
         except Exception as error:  # yaml.YAMLError 及其子类
@@ -89,17 +124,11 @@ class Reader:
         if value is None:
             result = fallback
         else:
-            if kind is bool:
-                valid = isinstance(value, bool)
-            elif kind is int:
-                valid = isinstance(value, int) and not isinstance(value, bool)
-            elif kind is float:
-                valid = isinstance(value, (int, float)) and not isinstance(value, bool)
-                value = float(value) if valid else value
-            else:
-                valid = isinstance(value, str)
-            if not valid:
-                self.fail(key, f"expected {kind.__name__}, got {value!r}")
+            converted = _convert(value, kind)
+            if converted is _MISSING:
+                shown = str(value) if isinstance(value, yamlio.Plain) else value
+                self.fail(key, f"expected {kind.__name__}, got {shown!r}")
+            value = converted
             if check is not None:
                 problem = check(value)
                 if problem:

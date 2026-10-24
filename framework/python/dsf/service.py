@@ -78,6 +78,7 @@ class Service:
         self.log = logging.getLogger(name)
         self._stop = threading.Event()
         self._ready = ready_file()
+        self._signal: int | None = None
 
     # ---- 主循环使用 ----
 
@@ -146,9 +147,14 @@ class Service:
             return EXIT_FAILURE
         finally:
             self._ready.unlink(missing_ok=True)
-        self.log.info("stopped")
+        if self._signal is not None:
+            self.log.info("stopped by signal %d", self._signal)
+        else:
+            self.log.info("stopped")
         return EXIT_OK
 
     def _on_signal(self, signum: int) -> None:
-        self.log.info("signal %d received, stopping", signum)
+        # 信号处理在主线程的任意字节码之间执行：这里写日志可能重入正在进行的 stdout 写入
+        # （RuntimeError: reentrant call），只记录信号并置位，日志由主线程在退出时输出。
+        self._signal = signum
         self._stop.set()

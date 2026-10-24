@@ -22,9 +22,38 @@ class StrictLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep=deep)
 
 
+class Plain(str):
+    """未加引号的标量原文。类型由读取方决定，与 C++ 配置库（yaml-cpp）一致：
+    password: 123456 读成字符串时是 "123456"，读成整数时是 123；加引号的 "123" 只能读成字符串。"""
+
+
+class TextLoader(StrictLoader):
+    """标量只解析 null（~、null、空值），其余保留原文：未加引号的为 Plain，加引号的为 str。
+    合并键（<<）照常生效。"""
+
+
+_KEPT_TAGS = ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")
+TextLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag in _KEPT_TAGS]
+    for first, resolvers in StrictLoader.yaml_implicit_resolvers.items()}
+
+
+def _construct_text(loader, node):
+    value = loader.construct_scalar(node)
+    return Plain(value) if node.style is None else value
+
+
+TextLoader.add_constructor("tag:yaml.org,2002:str", _construct_text)
+
+
 def load(source):
     """读取文本或文件对象；空文档返回 None。"""
     return yaml.load(source, Loader=StrictLoader)
+
+
+def load_text(source):
+    """同 load，但标量保持原文（见 TextLoader）；配置读取使用。"""
+    return yaml.load(source, Loader=TextLoader)
 
 
 def dump(document) -> str:
