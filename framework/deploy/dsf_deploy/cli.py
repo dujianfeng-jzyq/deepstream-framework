@@ -1,8 +1,9 @@
-"""命令行入口：render / pack / install / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
+"""命令行入口：render / profile-variables / pack / install / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--root")
     p.add_argument("--profile", help="省略时沿用 .env 中记录的选择")
     p.add_argument("--quiet", action="store_true")
+
+    p = commands.add_parser("profile-variables", help="以 JSON 打印 profile 的 x-build 变量（安装器使用）")
+    p.add_argument("--root")
+    p.add_argument("--profile", required=True)
 
     p = commands.add_parser("pack", help="渲染并生成发布包（镜像须已构建）")
     p.add_argument("--root")
@@ -53,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "render":
             render.render(_root(args.root), args.profile, quiet=args.quiet)
+        elif args.command == "profile-variables":
+            print(json.dumps(render.profile_variables(_root(args.root), args.profile)))
         elif args.command == "pack":
             pack.pack(_root(args.root), args.profile, args.with_base)
         elif args.command == "install":

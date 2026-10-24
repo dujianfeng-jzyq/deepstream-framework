@@ -341,6 +341,8 @@ site-fields.env 中的默认值 < project.env < profile 的 x-build < site.env
 
 渲染器先计算并校验完整计划，再替换 `.env` 与 `generated/`。`COMPOSE_FILE` 按根 Compose、名称排序的单元片段、profile 的顺序组装，使配置预检与实际启动使用相同定义。
 
+交互安装把继承值（`project.env` 与所选 profile 的 `x-build`）作为提问默认值。回车接受的值会作为答案写入 `site.env` 并获得最高优先级，所以它必须与渲染时的继承值一致。
+
 ### 8.4 模型与 engine
 
 模型目录包含 ONNX、标签、推理配置和元数据。engine 预构建工具扫描 nvinfer 配置，不依赖具体应用字段；输出路径遵循 `model-engine-file`。

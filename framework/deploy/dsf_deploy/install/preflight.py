@@ -3,7 +3,8 @@
 顺序不可调换：
   1. 读取 release.env，核对平台与包完整性
   2. 检查安装目标路径，之后才读取旧的 profile 与现场答案
-  3. 选择 profile、收集现场答案，检查清洁安装范围与退役文件冲突
+  3. 选择 profile、收集现场答案（提问默认值含该 profile 的 x-build；宿主没有 PyYAML 时
+     为此提前加载包内的 base），检查清洁安装范围与退役文件冲突
   4. 加载镜像（不影响正在运行的旧容器），在临时目录渲染新配置，按最终 Compose
      检查并准备可写挂载，核对镜像平台，用新载荷执行各服务的 --check-config
 预检中任何失败都不会停止旧服务或改动安装目录。
@@ -11,11 +12,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from .. import envfile, inventory, layout, naming, pack, render, site
 from ..docker import Docker
@@ -86,17 +89,20 @@ def _choose_profile(options: Options, release: dict[str, str], install_dir: Path
         print(f"  unknown profile {answer!r}")
 
 
-def _collect_answers(options: Options, install_dir: Path, package_root: Path):
+def _collect_answers(options: Options, install_dir: Path, package_root: Path,
+                     inherited: Callable[[], dict[str, str]]):
     """升级沿用已保存的答案（包括显式空答案）；--ask 与 --clean-install 重新收集。
-    非交互时只保存已有答案，缺失键留给渲染按 project.env/profile 继承。"""
+    非交互时只保存已有答案，缺失键留给渲染按 project.env/profile 继承。
+    交互提问的默认值与渲染的继承值一致：回车保存的答案不会遮住所选 profile 的设置。"""
     fields = site.parse_fields(package_root / layout.SITE_FIELDS)
     fresh = options.ask or options.clean
     answers = {} if fresh else site.read_answers(install_dir / layout.SITE_ENV, fields)
     answers = {k: v for k, v in answers.items() if k in {f.key for f in fields}}
-    if options.interactive:
-        for item in fields:
-            if item.key not in answers:
-                answers[item.key] = site.ask(item)
+    pending = [item for item in fields if item.key not in answers] if options.interactive else []
+    if pending:
+        suggested = site.defaults(fields, inherited())
+        for item in pending:
+            answers[item.key] = site.ask(item, suggested[item.key])
     site.validate(fields, answers)
     return fields, answers
 
@@ -112,19 +118,55 @@ def _check_clean_scope(install_dir: Path, package_root: Path) -> None:
         raise DeployError(f"{install_dir} does not look like an installation; remove it by hand if intended")
 
 
-def _render_in_stage(stage: Path, profile: str, base_image: str, docker: Docker) -> None:
-    """优先在宿主渲染；宿主没有 PyYAML 时用 base 镜像（自带 python3-yaml），不挂载荷卷。"""
+def _host_has_yaml() -> bool:
     import importlib.util
-    if importlib.util.find_spec("yaml") is not None:
-        render.write_plan(stage, render.build_plan(stage, profile))
-        return
+    return importlib.util.find_spec("yaml") is not None
+
+
+def _load_images(package_root: Path, docker: Docker, loaded: set[str], only: str | None = None) -> None:
+    """加载包内镜像（不影响正在运行的旧容器）；only 只加载该镜像，已加载的归档不重复加载。"""
+    archives = sorted((package_root / "images").glob("*.tar"))
+    if only is not None:
+        archives = [a for a in archives if a.name == naming.image_tar_name(only)]
+    for archive in archives:
+        if archive.name not in loaded:
+            print(f"loading {archive.name}")
+            docker.load(archive)
+            loaded.add(archive.name)
+
+
+def _run_deploy_tool(root: Path, args: list[str], base_image: str, docker: Docker, writable: bool,
+                     package_root: Path, loaded: set[str]) -> str:
+    """宿主没有 PyYAML 时用 base 镜像（自带 python3-yaml）运行部署工具，只挂载 root，不挂载荷卷。"""
+    if not docker.image_exists(base_image):
+        _load_images(package_root, docker, loaded, only=base_image)
     if not docker.image_exists(base_image):
         raise DeployError(f"this host has no PyYAML and the base image {base_image} is missing; "
                           "install python3-yaml or use a package built with --with-base")
-    docker.run(["--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
-                "-v", f"{stage}:{stage}", "-w", str(stage), "--entrypoint", "python3", base_image,
-                str(stage / "framework/deploy/dsf-deploy.py"), "render", "--root", str(stage),
-                "--profile", profile, "--quiet"])
+    result = docker.run(["--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+                         "-v", f"{root}:{root}{'' if writable else ':ro'}", "-w", str(root),
+                         "--entrypoint", "python3", base_image, str(root / "framework/deploy/dsf-deploy.py"),
+                         *args, "--root", str(root)], capture=True)
+    return result.stdout
+
+
+def _profile_variables(package_root: Path, profile: str, base_image: str, docker: Docker,
+                       loaded: set[str]) -> dict[str, str]:
+    if _host_has_yaml():
+        return render.profile_variables(package_root, profile)
+    output = _run_deploy_tool(package_root, ["profile-variables", "--profile", profile], base_image,
+                              docker, False, package_root, loaded)
+    return json.loads(output)
+
+
+def _render_in_stage(stage: Path, profile: str, base_image: str, docker: Docker, package_root: Path,
+                     loaded: set[str]) -> None:
+    """优先在宿主渲染；宿主没有 PyYAML 时在 base 镜像中渲染。"""
+    if _host_has_yaml():
+        render.write_plan(stage, render.build_plan(stage, profile))
+        return
+    _run_deploy_tool(stage, ["render", "--profile", profile, "--quiet"], base_image, docker, True,
+                     package_root, loaded)
 
 
 def _relocate(services: dict, stage: Path, install_dir: Path) -> None:
@@ -190,7 +232,9 @@ def prepare(options: Options, docker: Docker) -> Plan:
 
     # 3. 现场选择（读取旧值必须在任何删除之前）
     profile, source = _choose_profile(options, release, install_dir, package_root)
-    fields, answers = _collect_answers(options, install_dir, package_root)
+    loaded: set[str] = set()
+    fields, answers = _collect_answers(options, install_dir, package_root, lambda: {
+        **release, **_profile_variables(package_root, profile, release["BASE_IMAGE"], docker, loaded)})
     print(f"install to:  {install_dir}")
     print(f"profile:     {profile} ({source})")
     if answers:
@@ -201,16 +245,14 @@ def prepare(options: Options, docker: Docker) -> Plan:
     obsolete = [] if options.clean else inventory.obsolete(install_dir, inventory.managed(files))
 
     # 4. 镜像、配置与挂载
-    for archive in sorted((package_root / "images").glob("*.tar")):
-        print(f"loading {archive.name}")
-        docker.load(archive)
+    _load_images(package_root, docker, loaded)
     with tempfile.TemporaryDirectory(prefix="dsf-install-") as temporary:
         stage = Path(temporary).resolve()
         pack.stage_deployment_files(package_root, stage)
         # 在宿主展开 ~：容器渲染时 HOME 可能不是安装用户的家目录。
         envfile.write(stage / layout.PROJECT_ENV, envfile.read(package_root / layout.RELEASE_ENV))
         envfile.write(stage / layout.SITE_ENV, answers)
-        _render_in_stage(stage, profile, release["BASE_IMAGE"], docker)
+        _render_in_stage(stage, profile, release["BASE_IMAGE"], docker, package_root, loaded)
         compose_files = envfile.read(stage / layout.ENV)["COMPOSE_FILE"].split(":")
         services = docker.compose_config(stage, env_file=stage / layout.ENV,
                                          files=[stage / name for name in compose_files])["services"]

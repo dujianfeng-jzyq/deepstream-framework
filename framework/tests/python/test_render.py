@@ -150,9 +150,18 @@ class SiteFieldsTest(unittest.TestCase):
         self.assertEqual(site.ask(required, prompt=lambda _: next(answers)), "value")
         default = site.Field("B", "prompt", "d", False)
         self.assertEqual(site.ask(default, prompt=lambda _: ""), "d")
+        self.assertEqual(site.ask(default, "inherited", prompt=lambda _: ""), "inherited")  # 继承值优先于清单
+        prompts = []
+        self.assertEqual(site.ask(required, "inherited", prompt=lambda text: prompts.append(text) or ""),
+                         "inherited")  # 有继承值的必填项回车即可
+        self.assertIn("[inherited]", prompts[0])
         secret = site.Field("X_TOKEN", "p", "", True)
         self.assertEqual(site.ask(secret, prompt=lambda _: 1 / 0, prompt_secret=lambda _: ""), "")
         self.assertEqual(site.masked([secret], {"X_TOKEN": "s"}), "X_TOKEN=***")
+
+    def test_defaults_follow_inherited_values(self):
+        fields = [site.Field("A", "a", "manifest", False), site.Field("B", "b", "", True)]
+        self.assertEqual(site.defaults(fields, {"A": "profile", "OTHER": "x"}), {"A": "profile", "B": ""})
 
 
 class NamingTest(unittest.TestCase):

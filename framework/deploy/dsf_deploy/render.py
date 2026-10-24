@@ -130,6 +130,15 @@ def _load_profile(root: Path, name: str) -> dict:
     return profile
 
 
+def _build_variables(profile: dict) -> dict[str, str]:
+    return {k: str(v) for k, v in (profile.get("x-build") or {}).items() if k not in IDENTITY_KEYS}
+
+
+def profile_variables(root: Path, name: str) -> dict[str, str]:
+    """profile 的 x-build 变量，不含不可覆盖的身份键。安装器用它计算现场参数的提问默认值。"""
+    return _build_variables(_load_profile(root, name))
+
+
 def _templates(root: Path) -> dict[str, dict[str, Path]]:
     """type → {文件名: 模板路径}。不同单元产生同名输出文件时报错。"""
     result: dict[str, dict[str, Path]] = {}
@@ -156,7 +165,7 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
 
     profile_name = selected_profile(root, requested_profile)
     profile = _load_profile(root, profile_name)
-    overrides = {k: str(v) for k, v in (profile.get("x-build") or {}).items() if k not in IDENTITY_KEYS}
+    overrides = _build_variables(profile)
     if released:
         ignored = sorted(k for k in overrides if k in RELEASE_IMAGE_KEYS)
         if ignored:

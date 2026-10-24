@@ -94,8 +94,7 @@ def validate(fields: list[Field], values: dict[str, str]) -> None:
 
 def resolve(fields: list[Field], answers: dict[str, str], inherited: dict[str, str]) -> dict[str, str]:
     """优先级：清单默认值 < 继承值（project.env、profile）< 现场答案；显式空答案不回退。"""
-    values = {field.key: field.default for field in fields}
-    values.update({key: value for key, value in inherited.items() if key in values})
+    values = defaults(fields, inherited)
     values.update(answers)
     validate(fields, answers)
     missing = [field.key for field in fields if field.required and not values.get(field.key)]
@@ -104,16 +103,24 @@ def resolve(fields: list[Field], answers: dict[str, str], inherited: dict[str, s
     return values
 
 
-def ask(field: Field, prompt: Callable[[str], str] = input,
+def ask(field: Field, default: str | None = None, prompt: Callable[[str], str] = input,
         prompt_secret: Callable[[str], str] = getpass.getpass) -> str:
+    """default 是继承后的有效默认值（见 resolve）；回车接受的值会作为答案保存，
+    所以它必须与渲染时的继承值一致，否则会遮住 project.env 或 profile 的设置。"""
+    default = field.default if default is None else default
     reader = prompt_secret if field.secret else prompt
-    suffix = f" [{'***' if field.secret else field.default}]" if field.default else (
+    suffix = f" [{'***' if field.secret else default}]" if default else (
         "（可留空）" if field.nullable else "（必填）")
     while True:
         answer = reader(f"{field.prompt}{suffix}: ").strip()
-        if answer or not field.required:
-            return answer or field.default
+        if answer or default or field.nullable:
+            return answer or default
         print(f"  {field.key} 是必填项")
+
+
+def defaults(fields: list[Field], inherited: dict[str, str]) -> dict[str, str]:
+    """继承后的默认值：清单默认值 < 继承值（project.env、profile）；渲染与交互提问共用。"""
+    return {field.key: inherited.get(field.key, field.default) for field in fields}
 
 
 def masked(fields: list[Field], values: dict[str, str]) -> str:

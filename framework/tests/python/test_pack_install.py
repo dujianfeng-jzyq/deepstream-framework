@@ -7,9 +7,10 @@ import tarfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from deploy_support import FakeDocker, ProjectTestCase, docker_cli_available
-from dsf_deploy import inventory, layout, naming, pack, render
+from dsf_deploy import inventory, layout, naming, pack, render, site
 from dsf_deploy.envfile import DeployError, read
 from dsf_deploy.install import Options, install
 
@@ -164,6 +165,24 @@ class PackInstallTest(ProjectTestCase):
         self.assertIn("camera: site-cam", (self.install_dir / "generated/config/app.yaml").read_text())
         self.install(package, ask=True)  # 非交互 --ask：清空旧答案，回到默认值
         self.assertIn("camera: cam0", (self.install_dir / "generated/config/app.yaml").read_text())
+
+    def test_interactive_defaults_follow_the_profile(self):
+        # 回车保存的答案必须是 profile 的值，否则 site.env 会遮住 profile 的 x-build。
+        profile = self.root / "profiles/test.yaml"
+        profile.write_text(profile.read_text().replace("x-build:\n", "x-build:\n  CAMERA_ID: profile-cam\n"))
+        package = self.pack(with_base=True)
+        prompts = []
+        real_ask = site.ask
+
+        def ask(item, default=None):
+            record = lambda text: prompts.append(text) or ""  # noqa: E731
+            return real_ask(item, default, prompt=record, prompt_secret=record)
+
+        with mock.patch.object(site, "ask", ask):
+            self.install(package, interactive=True, profile="test")
+        self.assertTrue(any("[profile-cam]" in text for text in prompts), prompts)
+        self.assertEqual(read(self.install_dir / layout.SITE_ENV)["CAMERA_ID"], "profile-cam")
+        self.assertIn("camera: profile-cam", (self.install_dir / "generated/config/app.yaml").read_text())
 
     def test_integrity_and_platform_are_checked_first(self):
         package = self.pack(with_base=True)

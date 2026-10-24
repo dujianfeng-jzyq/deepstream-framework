@@ -71,7 +71,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 | `site.env` | 现场答案（0600，不提交，不打包） |
 | `services/*/templates/<type>/*.yaml` | 配置模板 → `generated/<type>/*.yaml` |
 
-- 变量优先级：清单默认值 < `project.env` < `x-build` < `site.env`。显式的空答案只在可空字段上接受，且不回退到默认值。
+- 变量优先级：清单默认值 < `project.env` < `x-build` < `site.env`。显式的空答案只在可空字段上接受，且不回退到默认值。交互安装的提问默认值同样含 `project.env` 与所选 profile 的 `x-build`，回车保存的答案不会遮住 profile 的设置。
 - 模板中的 `${VAR}` 必须有定义；`x-app-<type>: {<文件名>: {...}}` 在替换后深合并（映射递归，列表与标量整体替换）。
 - profile 顶层只接受 `services`、`x-build`、`x-app-*`；`PROJECT_NAME` 不能被覆盖；现场参数不能占用身份、版本、镜像、挂载点等保留键。
 - 渲染器派生 `DEEPSTREAM_VERSION`、`BASE_IMAGE`、`APPS_IMAGE`、挂载点、`HOST_UID/HOST_GID`、`CONFIG_PROFILE`、`COMPOSE_FILE`；`project.env` 中带有镜像名时（发布包安装）沿用包中的镜像名。
@@ -109,7 +109,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 
 1. 读取 `release.env`，核对本机平台与包完整性（缺失、改动、多余文件或符号链接都拒绝）。
 2. 检查安装目标：安装目录与包不重叠；控制文件、发布路径不能是符号链接，也不能与已有文件/目录类型冲突。之后才读取旧的选择与答案。
-3. 选择 profile（`--profile` > 已安装的选择 > 交互选择 > 包内建议），收集现场答案（升级沿用；`--ask`、`--clean-install` 重新收集；非交互时只保存已有答案）。检查清洁安装范围与退役文件冲突。
+3. 选择 profile（`--profile` > 已安装的选择 > 交互选择 > 包内建议），收集现场答案（升级沿用；`--ask`、`--clean-install` 重新收集；非交互时只保存已有答案；提问默认值含所选 profile 的 `x-build`，宿主没有 PyYAML 时为此提前加载包内的 base）。检查清洁安装范围与退役文件冲突。
 4. 加载镜像（不影响运行中的旧容器）；在临时目录渲染新配置（宿主没有 PyYAML 时用 base 镜像渲染）；按最终 Compose 检查并准备可写 bind 挂载；核对每个服务镜像的平台；从新 apps 镜像取出载荷，离线、只读地执行所有带预检标签服务的 `--check-config`。
 5. `--dry-run` 到此结束并打印计划。否则重验目标，用旧定义 `docker compose down -v --remove-orphans`（首次安装改为检查遗留卷）。
 6. 按需清空安装目录；删除未被修改的退役受管理文件；复制发布文件；写入 `project.env`（由 `release.env` 派生）、`site.env`、`.managed-files.json` 与预检过的配置快照（不再重新渲染）。
