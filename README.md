@@ -52,6 +52,8 @@ sudo systemctl restart docker                        # 会重启正在运行的�
 
 验证：`docker info --format '{{json .Runtimes}}'` 中包含 `nvidia`，且 `docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi` 能列出 GPU。其他发行版见 [NVIDIA 安装文档](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
 
+内核不支持 Docker bridge 的 Jetson 使用 `jetson-ds71-host` profile（全部服务走 host 网络），宿主配置见[构建与部署](docs/deployment.md#不支持-bridge-的-jetsonhost-网络)。
+
 ### 启动
 
 ```bash

@@ -4,8 +4,10 @@ import os
 import unittest
 from pathlib import Path
 
-from deploy_support import ProjectTestCase
+from deploy_support import PROFILE, ProjectTestCase, docker_cli_available
+from dsf import yamlio
 from dsf_deploy import layout, naming, render, site
+from dsf_deploy.docker import Docker
 from dsf_deploy.envfile import DeployError, parse
 
 
@@ -55,6 +57,39 @@ class RenderTest(ProjectTestCase):
             self.plan()
         profile.write_text("x-build:\n  PROJECT_NAME: other\n")
         self.assertEqual(self.plan().variables["PROJECT_NAME"], "demo")  # 身份不可覆盖
+
+    def test_network_mode_covers_every_service(self):
+        profile = self.root / "profiles/test.yaml"
+        profile.write_text(PROFILE + "x-network-mode: host\nservices:\n  redis:\n    network_mode: \"service:app\"\n")
+        plan = self.plan()
+        self.assertTrue(plan.variables["COMPOSE_FILE"].endswith(":profiles/test.yaml:" + layout.NETWORK_COMPOSE))
+        overrides = yamlio.load(plan.files[layout.NETWORK_COMPOSE])["services"]
+        # deepstream-apps 显式为 none，redis 在 profile 中显式声明：二者保持不变。
+        self.assertEqual(overrides, {name: {"network_mode": "host"}
+                                     for name in ("app", "deepstream-base", "model-engine-builder")})
+        profile.write_text(PROFILE)
+        self.assertNotIn(layout.NETWORK_COMPOSE, self.plan().files)  # 未设置时行为不变
+
+    @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
+    def test_network_mode_leaves_no_service_on_the_default_network(self):
+        (self.root / "profiles/test.yaml").write_text(PROFILE + "x-network-mode: host\n")
+        render.render(self.root, "test", quiet=True)
+        config = Docker().compose_config(self.root)
+        self.assertNotIn("networks", config)  # 没有服务使用默认网络，Compose 不会创建 bridge
+        modes = {name: service.get("network_mode") for name, service in config["services"].items()}
+        self.assertEqual(modes.pop("deepstream-apps"), "none")
+        self.assertEqual(set(modes.values()), {"host"})
+
+    def test_network_mode_is_validated(self):
+        profile = self.root / "profiles/test.yaml"
+        profile.write_text("x-network-mode: ''\n")
+        with self.assertRaisesRegex(DeployError, "x-network-mode must be"):
+            self.plan()
+        profile.write_text("x-network-mode: host\n")
+        compose = self.root / "services/app/compose.yaml"
+        compose.write_text(compose.read_text() + "    networks: [default]\n")
+        with self.assertRaisesRegex(DeployError, "service redis declares networks"):
+            self.plan()
 
     def test_undefined_placeholders_fail(self):
         (self.root / "services/app/templates/config/app.yaml").write_text("x: ${NOPE}\n")

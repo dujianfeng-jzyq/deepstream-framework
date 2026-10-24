@@ -11,6 +11,8 @@ COMPOSE_ROOT = "docker-compose.yaml"
 PROFILES = "profiles"
 SERVICES = "services"
 GENERATED = "generated"
+# profile 设置 x-network-mode 时生成的 Compose 覆盖文件，排在 COMPOSE_FILE 最后。
+NETWORK_COMPOSE = "generated/network.compose.yaml"
 MODELS = "models"
 UNIT_COMPOSE = "compose.yaml"
 UNIT_TEMPLATES = "templates"

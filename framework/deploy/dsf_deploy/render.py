@@ -3,6 +3,8 @@
 变量优先级：现场清单默认值 < project.env < profile 的 x-build < site.env。
 模板中的 ${VAR} 必须有定义；profile 的 x-app-<type> 在替换后按文件名深合并
 （映射递归合并，列表与标量整体替换）。
+profile 的 x-network-mode 给所有未显式声明 network_mode 的服务设置该值（例如内核不支持
+bridge 的设备用 host），新增的服务单元自动生效。
 先计算完整的渲染计划，再整体替换 .env 与 generated/；校验失败时旧文件保持不变。
 """
 
@@ -120,13 +122,17 @@ def _load_profile(root: Path, name: str) -> dict:
         raise DeployError(f"{path}: {error}") from error
     if not isinstance(profile, dict):
         raise DeployError(f"{path}: a profile must be a mapping")
-    unknown = sorted(k for k in profile if k not in ("services", "x-build") and not k.startswith("x-app-"))
+    unknown = sorted(k for k in profile
+                     if k not in ("services", "x-build", "x-network-mode") and not k.startswith("x-app-"))
     if unknown:
         raise DeployError(f"{path}: unknown top-level keys {unknown}; use services (Compose overrides), "
-                          "x-build (variables) or x-app-<type> (configuration overrides)")
+                          "x-build (variables), x-network-mode or x-app-<type> (configuration overrides)")
     build = profile.get("x-build") or {}
     if not isinstance(build, dict) or any(isinstance(v, (dict, list)) for v in build.values()):
         raise DeployError(f"{path}: x-build must map names to scalar values")
+    mode = profile.get("x-network-mode")
+    if mode is not None and (not isinstance(mode, str) or not mode.strip()):
+        raise DeployError(f"{path}: x-network-mode must be a Compose network_mode such as host")
     return profile
 
 
@@ -154,6 +160,39 @@ def _templates(root: Path) -> dict[str, dict[str, Path]]:
                                       f"{layout.GENERATED}/{type_dir.name}/{template.name}")
                 result[type_dir.name][template.name] = template
     return result
+
+
+def _network_overrides(root: Path, compose_files: list[str], mode: str, yamlio) -> dict:
+    """给未显式声明 network_mode 的服务设置 mode。只要有一个服务留在默认网络，Compose 就会
+    创建 bridge 网络，所以必须覆盖全部服务；显式的 network_mode（如 none）保持不变。
+    extends 来源中的声明同样算显式（相对路径以项目根为基准，与 Compose 一致）。"""
+    documents: dict[Path, dict] = {}
+
+    def services_of(path: Path) -> dict:
+        if path not in documents:
+            try:
+                document = yamlio.load(path.read_text(encoding="utf-8")) if path.is_file() else None
+            except Exception as error:
+                raise DeployError(f"{path.relative_to(root)}: {error}") from error
+            documents[path] = (document or {}).get("services") or {}
+        return documents[path]
+
+    explicit: dict[str, bool] = {}
+    for relative in compose_files:
+        for name, service in services_of(root / relative).items():
+            sources = [service or {}]
+            extends = sources[0].get("extends")
+            if isinstance(extends, str):
+                extends = {"service": extends}
+            if isinstance(extends, dict):
+                origin = root / extends["file"] if "file" in extends else root / relative
+                sources.append(services_of(origin).get(extends.get("service")) or {})
+            if any("networks" in source for source in sources):
+                raise DeployError(f"{relative}: service {name} declares networks, "
+                                  "which cannot be combined with x-network-mode")
+            explicit[name] = explicit.get(name, False) or any("network_mode" in s for s in sources)
+    return {"services": {name: {"network_mode": mode} for name, declared in sorted(explicit.items())
+                         if not declared}}
 
 
 def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
@@ -223,6 +262,12 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
     compose_files = [layout.COMPOSE_ROOT]
     compose_files += [str(unit.relative_to(root) / layout.UNIT_COMPOSE) for unit in units(root)]
     compose_files.append(f"{layout.PROFILES}/{profile_name}.yaml")
+    mode = profile.get("x-network-mode")
+    if mode is not None:
+        files[layout.NETWORK_COMPOSE] = (
+            f"# GENERATED from x-network-mode of profile {profile_name} — DO NOT EDIT\n"
+            + yamlio.dump(_network_overrides(root, compose_files, mode.strip(), yamlio)))
+        compose_files.append(layout.NETWORK_COMPOSE)
     variables["CONFIG_PROFILE"] = profile_name
     variables["COMPOSE_FILE"] = ":".join(compose_files)
     files[layout.ENV] = envfile.render(

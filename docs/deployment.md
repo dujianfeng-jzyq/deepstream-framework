@@ -31,6 +31,7 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 docker-compose.yaml               框架级：deepstream-base、deepstream-apps（播种）、model-engine-builder
 services/<unit>/compose.yaml      各服务单元（按名称排序）
 profiles/<profile>.yaml           平台差异（runtime: nvidia、设备、用户）
+generated/network.compose.yaml    仅当 profile 设置 x-network-mode 时生成，排在最后
 ```
 
 | 服务 | 行为 |
@@ -66,15 +67,16 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 | 输入 | 职责 |
 |---|---|
 | `project.env` | 项目身份、版本、上游镜像、公共默认值、依赖镜像（`*_IMAGE`） |
-| `profiles/<name>.yaml` | `x-build`（变量覆盖）、`services`（Compose 覆盖）、`x-app-<type>`（配置覆盖） |
+| `profiles/<name>.yaml` | `x-build`（变量覆盖）、`services`（Compose 覆盖）、`x-network-mode`（全部服务的网络模式）、`x-app-<type>`（配置覆盖） |
 | `site-fields.env` | 现场参数清单：`KEY=` 必填，`KEY=""` 可空，`KEY=值` 默认值；紧邻注释为提示 |
 | `site.env` | 现场答案（0600，不提交，不打包） |
 | `services/*/templates/<type>/*.yaml` | 配置模板 → `generated/<type>/*.yaml` |
 
 - 变量优先级：清单默认值 < `project.env` < `x-build` < `site.env`。显式的空答案只在可空字段上接受，且不回退到默认值。交互安装的提问默认值同样含 `project.env` 与所选 profile 的 `x-build`，回车保存的答案不会遮住 profile 的设置。
 - 模板中的 `${VAR}` 必须有定义；`x-app-<type>: {<文件名>: {...}}` 在替换后深合并（映射递归，列表与标量整体替换）。
-- profile 顶层只接受 `services`、`x-build`、`x-app-*`；`PROJECT_NAME` 不能被覆盖；现场参数不能占用身份、版本、镜像、挂载点等保留键。
+- profile 顶层只接受 `services`、`x-build`、`x-network-mode`、`x-app-*`；`PROJECT_NAME` 不能被覆盖；现场参数不能占用身份、版本、镜像、挂载点等保留键。
 - 渲染器派生 `DEEPSTREAM_VERSION`、`BASE_IMAGE`、`APPS_IMAGE`、挂载点、`HOST_UID/HOST_GID`、`CONFIG_PROFILE`、`COMPOSE_FILE`；`project.env` 中带有镜像名时（发布包安装）沿用包中的镜像名。
+- `x-network-mode: <mode>` 给所有未显式声明 `network_mode` 的服务（包括框架服务与以后新增的单元）设置该值，写入 `generated/network.compose.yaml`；显式声明的（如 `deepstream-apps` 的 `none`）保持不变，声明了 `networks` 的服务报错。只要有一个服务留在默认网络，Compose 就会创建 bridge 网络，所以不要在 `services` 中逐个设置。
 - 先计算完整计划，再整体替换 `.env` 与 `generated/`；校验失败时旧文件保持不变。`project.env` 等 env 文件中开头的 `~` 在运行机器上展开；env 文件不执行 shell、不剥引号。
 
 ## 4. engine 预构建
@@ -125,6 +127,27 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 
 ## 7. 平台与现场验证
 
-profile 中写平台差异：`dgpu-ds71`、`dgpu-ds80` 为 x86_64 独立显卡，`arm64-ds71`、`arm64-ds80` 用于 Apple Silicon 上的构建与无 GPU 自检（不运行推理）。Jetson 部署时选择与 JetPack 匹配的上游镜像，在 `services` 中加入 `runtime: nvidia`、所需设备与 `group_add`，编码器差异写在应用配置的 `encoder.properties`。
+profile 中写平台差异：`dgpu-ds71`、`dgpu-ds80` 为 x86_64 独立显卡，`arm64-ds71`、`arm64-ds80` 用于 Apple Silicon 上的构建与无 GPU 自检（不运行推理），`jetson-ds71-host` 为使用 host 网络的 Jetson。Jetson 部署时选择与 JetPack 匹配的上游镜像，在 `services` 中加入 `runtime: nvidia`、所需设备与 `group_add`，编码器差异写在应用配置的 `encoder.properties`。
+
+### 不支持 bridge 的 Jetson（host 网络）
+
+部分 Jetson 内核缺少 Docker bridge 所需的模块。先确认是否只是缺模块（`lsmod | grep -E 'br_netfilter|iptable_nat'`、`docker network create` 能否成功），能补模块时优先保持 bridge。否则 dockerd 需要关闭 bridge 与 iptables 才能启动：
+
+```json
+{
+  "bridge": "none",
+  "iptables": false,
+  "runtimes": {"nvidia": {"path": "nvidia-container-runtime", "args": []}}
+}
+```
+
+写入 `/etc/docker/daemon.json` 后 `sudo systemctl restart docker`；`runtimes` 一段保持 JetPack 原有内容。`docker build` 的 `RUN` 默认也走 bridge，因此镜像在编译服务器上构建，用 `scripts/build-release.sh --with-base --profile jetson-ds71-host` 打包，Jetson 上只安装。
+
+`jetson-ds71-host` 用 `x-network-mode: host` 让全部服务使用宿主网络，并处理随之而来的差异：
+
+- 服务名不再解析：`REDIS_HOST`、`RTSP_URL` 与 `rtsp_out.url` 改为 `127.0.0.1`。改成远端 Redis 或真实相机时照常填写现场参数。
+- 监听直接暴露到现场网络：Redis 没有口令，只绑定 `127.0.0.1`；MediaMTX 只保留 RTSP（8554/tcp、8000-8001/udp）。`ports` 映射在 host 网络下不生效，也不再受 Docker 端口发布绕过 ufw 的影响，改由宿主防火墙控制。
+- 端口与宿主共享：同一台机器不能再运行第二套实例，宿主上已有的 6379、8554 会冲突。
+- RTSP over UDP、组播与 ONVIF 发现在 host 网络下可用。
 
 镜像构建与自检不证明 GPU 推理可用。目标机仍需核对：真实 RTSP 输入、推理与跟踪结果、Redis 消息、完整 MP4 与停止时最后一段、RTSP 输出、engine 再次启动时复用、Linux 下的属主与设备权限。Docker Desktop 上的结果不能替代 Linux 验证。
