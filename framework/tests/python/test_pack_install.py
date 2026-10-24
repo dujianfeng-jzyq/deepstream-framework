@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import subprocess
 import tarfile
 import unittest
 from contextlib import redirect_stdout
@@ -10,9 +11,25 @@ from pathlib import Path
 from unittest import mock
 
 from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
-from dsf_deploy import inventory, layout, naming, pack, render, site
+from dsf_deploy import cli, inventory, layout, naming, pack, render, site
 from dsf_deploy.envfile import DeployError, read
-from dsf_deploy.install import Options, install
+from dsf_deploy.install import Options, install, preflight
+
+
+class ToolDocker(FakeDocker):
+    """在进程内执行本应在 base 镜像中运行的部署工具，模拟宿主没有 PyYAML 的安装。"""
+
+    def run(self, args, capture=False):
+        script = next((i for i, arg in enumerate(args) if arg.endswith("dsf-deploy.py")), None)
+        if script is None:
+            return super().run(args, capture)
+        self._record("run", *args)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.main(args[script + 1:])
+        if code != 0:
+            raise DeployError(f"deploy tool failed: {args[script + 1:]}")
+        return subprocess.CompletedProcess(args, 0, output.getvalue(), "")
 
 
 @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
@@ -207,6 +224,25 @@ class PackInstallTest(ProjectTestCase):
         self.assertIn("site: custom", config)
         self.install(package, profile="other")  # profile 不变时答案原样沿用
         self.assertEqual(read(self.install_dir / layout.SITE_ENV), {"SITE_NAME": "custom"})
+
+    def test_host_without_pyyaml_uses_the_base_image(self):
+        self.set_profile_build("test", {"CAMERA_ID": "profile-cam"})
+        package = self.pack(with_base=True)
+        prompts = []
+        with self.press_enter(prompts), mock.patch.object(preflight, "_host_has_yaml", lambda: False):
+            target, _ = self.install(package, target=ToolDocker(), interactive=True, profile="test")
+        self.assertTrue(any("[profile-cam]" in text for text in prompts), prompts)
+        self.assertIn("camera: profile-cam", (self.install_dir / "generated/config/app.yaml").read_text())
+        # 提问前只提前加载 base，之后统一加载时不重复
+        loads = [i for i, call in enumerate(target.calls) if call[0] == "load"]
+        base = [i for i in loads if target.calls[i][1] == naming.image_tar_name(self.base)]
+        tools = {i: next(call[j + 1] for j, arg in enumerate(call) if arg.endswith("dsf-deploy.py"))
+                 for i, call in enumerate(target.calls)
+                 if call[0] == "run" and any(arg.endswith("dsf-deploy.py") for arg in call)}
+        self.assertEqual(list(tools.values()), ["profile-variables", "render"])
+        self.assertEqual(len(base), 1)
+        self.assertLess(base[0], min(tools))
+        self.assertEqual(len(loads), len(list((package / "images").glob("*.tar"))))
 
     def test_integrity_and_platform_are_checked_first(self):
         package = self.pack(with_base=True)
