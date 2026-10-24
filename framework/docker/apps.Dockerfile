@@ -7,18 +7,17 @@ ARG BASE_IMAGE
 
 # ---------------- builder ----------------
 FROM ${BASE_IMAGE} AS builder
-ARG PIP_INDEX_URL=""
-ARG APPS_VERSION=dev
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 编译工具与测试依赖只在 builder：Redis 服务端与软件编解码插件让集成测试真正执行而不是 SKIP。
+# 编译工具与测试依赖只在 builder：Redis 服务端、软件编解码插件与 Docker/Compose CLI 让集成测试
+# 真正执行而不是 SKIP。部署测试只用 `docker compose config` 解析文件，不需要（也不启动）守护进程。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update || true; \
     apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config python3-pyflakes \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-      redis-server python3-redis gstreamer1.0-tools \
+      redis-server python3-redis gstreamer1.0-tools docker.io docker-compose-v2 \
       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
 
 # 上游镜像裁掉了软件编解码库的文件却保留了包记录，普通 apt install 不会恢复；
@@ -41,6 +40,9 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
     cmake --install build
 
 # 各 Python 单元的依赖（CMake 汇总）装进载荷，服务通过 PYTHONPATH 使用。
+# ARG 之后的每个 RUN 都隐式依赖它：只在这里声明，改版本号或 pip 源不会重跑 apt 与编译。
+ARG PIP_INDEX_URL=""
+ARG APPS_VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eu; \
     if grep -qv '^#' build/python-requirements.txt; then \

@@ -1,17 +1,14 @@
-# 构建上下文只需要源码与测试；渲染产物、现场答案、模型主体与发布物不进入镜像。
-.git
-build/
-dist/
-generated/
-.env
-site.env
-release.env
-models/
-docs/
-*.md
-!plugins/*/README.md
-!plugins/*/LICENSE.md
-.planning/
+# 构建上下文用白名单：builder 只需要源码、测试，以及测试读取的部署文件（docker-compose.yaml、
+# scripts/、tools/）。渲染产物、现场答案、profile、模型与发布物都不进入上下文，改动它们不会让编译缓存失效。
+# 新增需要参与镜像构建的顶层路径时在这里加一行。
+*
+!CMakeLists.txt
+!framework/
+!services/
+!plugins/
+!scripts/
+!tools/
+!docker-compose.yaml
 **/__pycache__/
-*.py[cod]
-.DS_Store
+**/*.py[cod]
+**/.DS_Store
