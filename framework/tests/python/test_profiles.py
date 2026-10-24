@@ -22,9 +22,9 @@ class ProfilesTest(unittest.TestCase):
         profiles = [name for name, _ in render.list_profiles(ROOT)]
         self.assertTrue(profiles, "no profiles/*.yaml")
         with tempfile.TemporaryDirectory(prefix="dsf-profiles-") as temporary:
-            # 与安装器相同的部署文件集合；不写项目根下的 .env 与 generated/。
+            # 与安装器相同的部署文件集合（不含模型）；不写项目根下的 .env 与 generated/。
             stage = Path(temporary)
-            pack.stage_deployment_files(ROOT, stage)
+            pack.stage_deployment_files(ROOT, stage, models=False)
             shutil.copy2(ROOT / layout.PROJECT_ENV, stage / layout.PROJECT_ENV)
             (stage / render.BASE_DOCKERFILE).parent.mkdir(parents=True)
             shutil.copy2(ROOT / render.BASE_DOCKERFILE, stage / render.BASE_DOCKERFILE)

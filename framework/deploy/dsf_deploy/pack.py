@@ -42,8 +42,9 @@ def _copy_tree(source: Path, target: Path) -> None:
             shutil.copy2(path, destination)
 
 
-def stage_deployment_files(root: Path, target: Path) -> None:
-    """复制部署需要的文件（也被安装器用来在临时目录里重建一份可渲染的项目）。"""
+def stage_deployment_files(root: Path, target: Path, *, models: bool = True) -> None:
+    """复制部署需要的文件（也被安装器用来在临时目录里重建一份可渲染的项目）。
+    models=False 时不复制 models/：渲染与 Compose 解析不读取模型，只做校验时省去复制模型主体。"""
     for name in layout.PACKAGE_FILES:
         source = root / name
         if not source.is_file():
@@ -52,6 +53,8 @@ def stage_deployment_files(root: Path, target: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
     for name in layout.PACKAGE_TREES:
+        if name == layout.MODELS and not models:
+            continue
         if (root / name).is_dir():
             _copy_tree(root / name, target / name)
     for unit in render.units(root):
