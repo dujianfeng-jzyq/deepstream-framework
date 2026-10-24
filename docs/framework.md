@@ -239,7 +239,7 @@ sys.exit(Service("my-service", "说明").run(load, main))
 2. 在 `src/app.cpp`（或 `main.py`）中读取配置、组图、写业务逻辑；配置模板放 `templates/config/<name>.yaml`，现场参数加到 `site-fields.env`。
 3. 平台差异（`runtime: nvidia`、设备、`group_add`）写在 `profiles/*.yaml` 的 `services.<name>`。
 4. 需要自定义推理解析库时在 `plugins/` 下用 `dsf_add_plugin`；模型放 `models/<id>/`，`model-engine-builder` 会自动构建其 engine。
-5. `cmake --build build && ctest`，再 `scripts/apply-profile.sh && docker compose config` 检查部署定义。
+5. `scripts/apply-profile.sh && docker compose config` 检查部署定义，`docker compose build deepstream-apps` 完成编译、CTest 与自检（宿主 `cmake --build build && ctest` 可用于更快的迭代）。
 
 ## 11. 测试分层
 
@@ -249,7 +249,7 @@ sys.exit(Service("my-service", "说明").run(load, main))
 | 应用核心 | 模板与读取代码一致、拓扑结构、跨字段规则 | 开发机 |
 | SDK 层 | 应用与插件编译链接、CLI 冒烟测试 | builder 镜像 |
 | 部署 | 渲染、打包、安装（假 Docker）、engine 工具（假 trtexec）、仓库约定 | 开发机（docker CLI 可选） |
-| 镜像 | builder 中的 CTest，原始 base 中的非 root 无网络自检 | 编译服务器 |
+| 镜像 | builder 中的 CTest（以上各层全部执行，不 SKIP），原始 base 中的非 root 无网络自检 | 有 Docker 的开发机或编译服务器 |
 | 目标机 | 真实视频、推理与跟踪、Redis 消息、MP4 收尾、RTSP 输出、engine 复用、Linux 权限 | 目标设备 |
 
-缺少 redis-server、软件编码插件或 docker CLI 时相关用例显示 SKIP 并成功退出，查看详细输出确认实际覆盖范围。
+宿主缺少 redis-server、软件编码插件或 docker CLI 时相关用例显示 SKIP 并成功退出，查看详细输出确认实际覆盖范围；镜像构建是必须通过的完整验证。

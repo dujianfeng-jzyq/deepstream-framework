@@ -13,19 +13,46 @@
 
 ## 本地开发
 
-需要 C++17 编译器、CMake 3.22+、pkg-config，以及 GStreamer 1.20+、yaml-cpp、hiredis、spdlog/fmt、nlohmann-json 开发包；Python 测试需要 Python 3.9+ 与 PyYAML（可选 pyflakes、redis-py、redis-server）。
+程序在 builder 镜像中编译、测试并打进载荷，宿主不需要编译环境：`docker compose build deepstream-apps` 就是完整验证（全部 CTest 与原始 base 中的自检，见[构建与运行](#构建与运行)）。
+
+宿主 CMake 是可选的，用于 IDE（`compile_commands.json`）和 C++ 的增量快速迭代。需要 C++17 编译器、CMake 3.22+、pkg-config，以及 GStreamer 1.20+、yaml-cpp、hiredis、spdlog/fmt、nlohmann-json 开发包：
 
 ```bash
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build
 (cd build && ctest --output-on-failure)
 ```
 
-DeepStream SDK 自动探测（默认 `/opt/nvidia/deepstream/deepstream`，可用 `-DDEEPSTREAM_ROOT=` 指定）。SDK 不可用时只跳过需要它的应用与插件，框架、应用的配置与拓扑测试照常构建——在 macOS 上也能开发。
+DeepStream SDK 自动探测（默认 `/opt/nvidia/deepstream/deepstream`，可用 `-DDEEPSTREAM_ROOT=` 指定）。SDK 不可用时只跳过需要它的应用与插件，框架、应用的配置与拓扑测试照常构建——在 macOS 上也能开发。pyflakes、redis-py、redis-server 缺失时相应用例 SKIP，builder 中都会执行。
+
+只改 Python（部署工具、Python 服务）时不需要 CMake，Python 3.9+ 与 PyYAML 即可：
+
+```bash
+PYTHONPATH=framework/python:framework/deploy:framework/tests/python python3 -m unittest discover -s framework/tests/python
+```
 
 ## 构建与运行
 
-需要 Docker Compose 2.22+；完整推理需要 NVIDIA 容器运行环境与 GPU。
+需要 Docker Compose 2.22+；完整推理需要 GPU、NVIDIA 驱动（宿主机 `nvidia-smi` 可用）与 NVIDIA Container Toolkit。
+
+### NVIDIA Container Toolkit
+
+GPU profile 的服务使用 `runtime: nvidia`，Docker 未注册该运行时会在启动时报 `unknown or invalid runtime name: nvidia`。构建机和目标机都要安装，Jetson 的 JetPack 已自带。x86_64 Ubuntu 上：
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker   # 写入 /etc/docker/daemon.json
+sudo systemctl restart docker                        # 会重启正在运行的容器
+```
+
+验证：`docker info --format '{{json .Runtimes}}'` 中包含 `nvidia`，且 `docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi` 能列出 GPU。其他发行版见 [NVIDIA 安装文档](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
+
+### 启动
 
 ```bash
 scripts/apply-profile.sh dgpu-ds80             # 选择部署方案，渲染 .env 与 generated/
@@ -35,6 +62,8 @@ docker compose up -d
 docker compose logs -f example-app
 tools/push_sample_video.sh video.mp4           # 用本地视频模拟相机（推到 MediaMTX）
 ```
+
+数据目录必须在首次 `docker compose up` 前以当前用户创建：缺失的 bind 源会被 Docker 以 root 创建，服务以 `HOST_UID:HOST_GID` 运行时无法写入（如 `Permission denied: '/data/engines'`），此时执行 `sudo chown -R $(id -u):$(id -g) <数据目录>` 修复。安装器会自动创建并检查该目录。
 
 更换程序时先构建成功，再 `docker compose down -v && docker compose up -d`：载荷卷只在为空时播种。
 
