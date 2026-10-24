@@ -33,7 +33,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # 编译与测试以非 root 运行：业务容器也是非 root，root 会掩盖权限相关的失败（并让对应用例 SKIP）。
 RUN useradd --create-home dsf-builder && install -d -o dsf-builder /build/build
 WORKDIR /build
-# 先复制源码与测试读取的文件；profiles/ 与项目输入在编译之后复制，改动它们只重跑 profile 校验。
+# 进入构建的路径只由这些 COPY 决定（.dockerignore 只排除目录内的杂项）。先复制源码与测试读取的文件；
+# profiles/ 与项目输入在编译之后复制，改动它们只重跑 profile 校验。
 COPY CMakeLists.txt docker-compose.yaml ./
 COPY framework/ framework/
 COPY services/ services/

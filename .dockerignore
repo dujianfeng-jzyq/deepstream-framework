@@ -1,17 +1,14 @@
-# 构建上下文用白名单：builder 只需要源码、测试，以及测试读取的部署文件。渲染产物、现场答案、
-# 模型与发布物都不进入上下文。profiles/ 与项目输入由 apps.Dockerfile 在编译之后单独复制，
-# 改动它们不会让编译缓存失效。新增需要参与镜像构建的顶层路径时，在这里和 apps.Dockerfile 各加一处。
-*
-!CMakeLists.txt
-!framework/
-!services/
-!plugins/
-!scripts/
-!tools/
-!docker-compose.yaml
-!profiles/
-!project.env
-!site-fields.env
+# 进入构建的路径由 apps.Dockerfile 的 COPY 决定（BuildKit 只传输被引用的路径），新增顶层路径只改那里。
+# 这里只排除被复制目录内部的杂项，以及即使误用 COPY . . 也不得进入镜像的内容（现场答案、渲染产物、模型）。
 **/__pycache__/
 **/*.py[cod]
 **/.DS_Store
+**/*.swp
+.git
+.env
+site.env
+release.env
+generated/
+build/
+dist/
+models/
