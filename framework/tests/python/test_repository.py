@@ -66,6 +66,14 @@ class RepositoryTest(unittest.TestCase):
             result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, f"{script}: {result.stderr}")
 
+    def test_deploy_tool_rejects_old_python_with_a_clear_message(self):
+        code = ("import runpy, sys; sys.version_info = (3, 8, 10, 'final', 0); sys.argv = ['dsf-deploy', '--help']; "
+                "runpy.run_path(sys.argv_path, run_name='__main__')").replace("sys.argv_path", repr(
+                    str(FRAMEWORK / "deploy/dsf-deploy.py")))
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Python 3.9+ is required", result.stderr)
+
     def test_python_passes_pyflakes(self):
         if importlib.util.find_spec("pyflakes") is None:
             self.skipTest("pyflakes not installed")

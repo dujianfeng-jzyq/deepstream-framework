@@ -337,7 +337,7 @@ base tag 包含 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES` 的输入�
 site-fields.env 中的默认值 < project.env < profile 的 x-build < site.env
 ```
 
-`site-fields.env` 声明现场字段、默认值、必填与可空规则；`site.env` 保存实际答案，不提交、不打包。身份、版本、镜像和固定挂载点等保留键不能被现场字段占用。
+`site-fields.env` 声明现场字段、默认值、必填与可空规则；`site.env` 保存实际答案（`KEY="值"`，外层一对引号在读取时去掉），不提交、不打包。渲染出的 `.env` 由 Compose 解析，值一律加引号，现场值中的 `$`、`#` 与引号不会被插值或截断。身份、版本、镜像和固定挂载点等保留键不能被现场字段占用。
 
 模板来自 `services/*/templates/<type>/`，渲染到 `generated/<type>/`。未定义的占位符和跨单元同名输出均报错；profile 的 `x-app-<type>` 进行深合并，映射递归合并，列表与标量整体替换。
 

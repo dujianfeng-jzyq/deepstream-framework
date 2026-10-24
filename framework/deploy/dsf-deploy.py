@@ -4,6 +4,10 @@
 import sys
 from pathlib import Path
 
+# 在导入部署工具之前检查：旧解释器会在深处以 AttributeError 之类的堆栈失败（例如 functools.cache）。
+if sys.version_info < (3, 9):
+    sys.exit(f"dsf-deploy: Python 3.9+ is required; {sys.executable} is {sys.version.split()[0]}")
+
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parent / "python")]
 

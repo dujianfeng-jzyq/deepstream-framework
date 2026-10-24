@@ -6,6 +6,7 @@
     KEY=""        可以为空
     KEY=默认值    可选，回车即用默认值
 键名含 PASSWORD/PASSWD/TOKEN/SECRET 的输入不回显、日志与回显中打码。
+答案文件中的值可以加一对引号（KEY="值"），读取时去掉；引号之内按字面。
 现场键不能占用项目身份、版本、镜像与挂载点等由项目或渲染器决定的键。
 """
 
@@ -78,11 +79,17 @@ def read_answers(path: Path, fields: list[Field]) -> dict[str, str]:
     """读取现场答案；只能包含清单声明的键。"""
     if not path.is_file():
         return {}
-    answers = envfile.read(path)
+    answers = envfile.read(path, unquote=envfile.unquote_answer)
     unknown = sorted(set(answers) - {field.key for field in fields})
     if unknown:
         raise DeployError(f"{path}: undeclared site fields {unknown}; declare them in site-fields.env")
     return answers
+
+
+def write_answers(path: Path, answers: dict[str, str], header: tuple[str, ...] = (),
+                  mode: int | None = None) -> None:
+    """写成 KEY="值"：现场照此格式手工编辑时，KEY="" 表示空值（与清单语法一致）。"""
+    envfile.write(path, answers, header, mode, envfile.quote_answer)
 
 
 def validate(fields: list[Field], values: dict[str, str]) -> None:

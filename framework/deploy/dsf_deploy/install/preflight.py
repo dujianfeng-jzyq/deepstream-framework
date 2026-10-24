@@ -65,7 +65,7 @@ def _choose_profile(options: Options, release: dict[str, str], install_dir: Path
         return options.profile, "from --profile"
     previous = install_dir / layout.ENV
     if previous.is_file() and not options.clean:
-        chosen = envfile.read(previous).get("CONFIG_PROFILE", "")
+        chosen = envfile.read_compose(previous).get("CONFIG_PROFILE", "")
         if chosen:
             return chosen, "kept from the current installation"
     suggested = envfile.require(release, "CONFIG_PROFILE", layout.RELEASE_ENV)
@@ -177,7 +177,7 @@ def _previous_inherited(options: Options, install_dir: Path, profile: str, base_
     """升级时改换了 profile：返回旧安装的继承值（旧 project.env 与旧 profile）；否则 None。"""
     if options.ask or options.clean or not (install_dir / layout.ENV).is_file():
         return None
-    old = envfile.read(install_dir / layout.ENV).get("CONFIG_PROFILE", "")
+    old = envfile.read_compose(install_dir / layout.ENV).get("CONFIG_PROFILE", "")
     if not old or old == profile or not (install_dir / layout.PROFILES / f"{old}.yaml").is_file():
         return None
     project = envfile.read(install_dir / layout.PROJECT_ENV, expand_home=False)
@@ -296,9 +296,9 @@ def prepare(options: Options, docker: Docker) -> Plan:
         pack.stage_deployment_files(package_root, stage)
         # 在宿主展开 ~：容器渲染时 HOME 可能不是安装用户的家目录。
         envfile.write(stage / layout.PROJECT_ENV, envfile.read(package_root / layout.RELEASE_ENV))
-        envfile.write(stage / layout.SITE_ENV, answers)
+        site.write_answers(stage / layout.SITE_ENV, answers)
         _render_in_stage(stage, profile, release["BASE_IMAGE"], docker, package_root, loaded)
-        compose_files = envfile.read(stage / layout.ENV)["COMPOSE_FILE"].split(":")
+        compose_files = envfile.read_compose(stage / layout.ENV)["COMPOSE_FILE"].split(":")
         services = docker.compose_config(stage, env_file=stage / layout.ENV,
                                          files=[stage / name for name in compose_files])["services"]
         _relocate(services, stage, install_dir)

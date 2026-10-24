@@ -8,7 +8,7 @@ from deploy_support import PROFILE, ProjectTestCase, docker_cli_available
 from dsf import yamlio
 from dsf_deploy import layout, naming, render, site
 from dsf_deploy.docker import Docker
-from dsf_deploy.envfile import DeployError, parse
+from dsf_deploy.envfile import DeployError, parse, quote_compose, read_compose, unquote_compose
 
 
 class RenderTest(ProjectTestCase):
@@ -124,6 +124,30 @@ class RenderTest(ProjectTestCase):
                                                     + "SITE_NAME=from-project\n")
         self.assertEqual(self.plan().variables["SITE_NAME"], "from-project")  # 继承低优先级值
 
+    def test_site_answers_may_be_quoted(self):
+        (self.root / layout.SITE_ENV).write_text('SITE_NAME="a"b"\nRTSP_PASSWORD=""\nCAMERA_ID=\'c\'\n')
+        values = self.plan().variables
+        # 与清单相同的写法：KEY="" 是空值而不是两个引号；外层一对引号去掉，内部按字面
+        self.assertEqual((values["SITE_NAME"], values["RTSP_PASSWORD"], values["CAMERA_ID"]), ('a"b', "", "c"))
+
+    @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
+    def test_special_characters_reach_compose_and_configs_unchanged(self):
+        # 未加引号时 Compose 会把 $w 插值为空、" #" 之后当作注释、${ 与开头的引号直接报错。
+        for secret in ["p$w #x ${y \\b", "'it's $x \"q\" \\b"]:
+            answers = {"SITE_NAME": "lab", "RTSP_PASSWORD": secret}
+            site.write_answers(self.root / layout.SITE_ENV, answers)
+            render.render(self.root, "test", quiet=True)
+            self.assertEqual(site.read_answers(self.root / layout.SITE_ENV, site.parse_fields(
+                self.root / layout.SITE_FIELDS)), answers)
+            self.assertEqual(read_compose(self.root / layout.ENV)["RTSP_PASSWORD"], secret)
+            config = yamlio.load((self.root / "generated/config/app.yaml").read_text())
+            self.assertEqual(config["password"], secret)
+            probe = self.root / "probe.yaml"
+            probe.write_text('services:\n  probe:\n    image: busybox\n    command: ["echo", "${RTSP_PASSWORD}"]\n')
+            services = Docker().compose_config(self.root, env_file=self.root / layout.ENV, files=[probe])["services"]
+            # compose config 的输出把字面的 $ 写成 $$
+            self.assertEqual(services["probe"]["command"][1], secret.replace("$", "$$"))
+
     def test_base_tag_follows_its_build_inputs(self):
         before = self.plan().variables["BASE_IMAGE"]
         env = self.root / layout.PROJECT_ENV
@@ -210,6 +234,16 @@ class NamingTest(unittest.TestCase):
         self.assertEqual(naming.docker_arch("aarch64"), "arm64")
         with self.assertRaises(DeployError):
             naming.docker_arch("mips")
+
+    def test_compose_quoting_round_trips(self):
+        for value in ["", "plain", "p$w #x ${y", "it's", "'", '"', "a\\b", "~/x", "$$"]:
+            self.assertEqual(unquote_compose(quote_compose(value)), value)
+            self.assertEqual(parse(f"K={quote_compose(value)}\n", expand_home=False, unquote=unquote_compose)["K"], value)
+        self.assertEqual(quote_compose("p$w"), "'p$w'")
+        self.assertEqual(quote_compose("it's $x"), '"it\'s \\$x"')
+        self.assertEqual(unquote_compose("legacy"), "legacy")  # 旧版本渲染的未加引号的值
+        with self.assertRaises(DeployError):
+            quote_compose("a\nb")
 
     def test_env_files_are_literal(self):
         values = parse("A='q'\nB=${X}\nC=~/x\n# c\n", expand_home=False)

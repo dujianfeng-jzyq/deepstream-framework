@@ -70,7 +70,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 | `project.env` | 项目身份、版本、上游镜像、公共默认值、依赖镜像（`*_IMAGE`） |
 | `profiles/<name>.yaml` | `x-build`（变量覆盖）、`services`（Compose 覆盖）、`x-network-mode`（全部服务的网络模式）、`x-app-<type>`（配置覆盖） |
 | `site-fields.env` | 现场参数清单：`KEY=` 必填，`KEY=""` 可空，`KEY=值` 默认值；紧邻注释为提示 |
-| `site.env` | 现场答案（0600，不提交，不打包） |
+| `site.env` | 现场答案（0600，不提交，不打包）；写成 `KEY="值"`，手工编辑时 `KEY=""` 表示空值 |
 | `services/*/templates/<type>/*.yaml` | 配置模板 → `generated/<type>/*.yaml` |
 
 - 变量优先级：清单默认值 < `project.env` < `x-build` < `site.env`。显式的空答案只在可空字段上接受，且不回退到默认值。交互安装的提问默认值同样含 `project.env` 与所选 profile 的 `x-build`，回车保存的答案不会遮住 profile 的设置。
@@ -78,7 +78,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 - profile 顶层只接受 `services`、`x-build`、`x-network-mode`、`x-app-*`；`PROJECT_NAME` 不能被覆盖；现场参数不能占用身份、版本、镜像、挂载点等保留键。
 - 渲染器派生 `DEEPSTREAM_VERSION`、`BASE_IMAGE`、`APPS_IMAGE`、挂载点、`HOST_UID/HOST_GID`、`CONFIG_PROFILE`、`COMPOSE_FILE`；`project.env` 中带有镜像名时（发布包安装）沿用包中的镜像名。
 - `x-network-mode: <mode>` 给所有未显式声明 `network_mode` 的服务（包括框架服务与以后新增的单元）设置该值，写入 `generated/network.compose.yaml`；显式声明的（如 `deepstream-apps` 的 `none`）保持不变，声明了 `networks` 的服务报错。只要有一个服务留在默认网络，Compose 就会创建 bridge 网络，所以不要在 `services` 中逐个设置。
-- 先计算完整计划，再整体替换 `.env` 与 `generated/`；校验失败时旧文件保持不变。`project.env` 等 env 文件中开头的 `~` 在运行机器上展开；env 文件不执行 shell、不剥引号。
+- 先计算完整计划，再整体替换 `.env` 与 `generated/`；校验失败时旧文件保持不变。`project.env` 等 env 文件中开头的 `~` 在运行机器上展开；env 文件不执行 shell、不剥引号。例外：`site.env` 的值去掉一对外层引号（与 `site-fields.env` 中 `KEY=""` 的含义一致）；`.env` 由 Compose 按它自己的 dotenv 规则读取（未加引号时 `$` 会被插值、` #` 之后被当作注释、开头的引号必须闭合），渲染器写入时一律加引号，现场口令中的这些字符原样到达 Compose 与配置。
 
 ## 4. engine 预构建
 
@@ -124,7 +124,8 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 - 普通升级保留现场新增的、与发布路径不冲突的文件；退役受管理文件被现场修改过时在停服前失败。
 - 清洁安装拒绝根目录、家目录、与包重叠的目录及不像安装目录的目录；数据目录与镜像保留。
 - 调用 shell 中的 `COMPOSE_FILE` 等选择变量被忽略，预检与执行看到同一份定义。
-- 安装不是事务：停服后的失败不自动回滚，重新安装旧包即可恢复；旧镜像与外部数据保留。
+- 安装不是事务：停服后的失败不自动回滚，重新安装旧包即可恢复；旧镜像与外部数据保留。停服之后、启动之前的失败或中断（包括 Ctrl-C）会说明旧服务已停止、安装目录可能写了一半，以及如何完成（用同一个包重新安装）或退回（安装旧包）。
+- 部署工具需要 Python 3.9+；版本过低时在启动时报错。
 
 ## 7. 平台与现场验证
 

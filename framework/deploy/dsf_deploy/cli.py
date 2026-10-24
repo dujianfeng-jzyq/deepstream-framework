@@ -76,5 +76,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)  # 安装器在停服之后被中断时已另行说明现场状态
         return 130
     return 0

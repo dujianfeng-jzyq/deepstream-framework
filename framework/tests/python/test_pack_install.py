@@ -1,20 +1,26 @@
 """打包与安装：用假 Docker 走完整流程，验证顺序、内容与安全规则。"""
 
+import contextlib
 import io
 import json
 import os
 import subprocess
 import tarfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
 from dsf_deploy import cli, inventory, layout, naming, pack, render, site
-from dsf_deploy.envfile import DeployError, read
+from dsf_deploy.envfile import DeployError, read, unquote_answer
 from dsf_deploy.install import Options, install, preflight
 from dsf_deploy.install.apply import apply
+
+
+def answers(install_dir: Path) -> dict:
+    """安装器写入的现场答案（KEY="值"）。"""
+    return read(install_dir / layout.SITE_ENV, unquote=unquote_answer)
 
 
 class ToolDocker(FakeDocker):
@@ -123,7 +129,7 @@ class PackInstallTest(ProjectTestCase):
         package = self.pack(with_base=True)
         target, output = self.install(package)
         root = self.install_dir
-        self.assertEqual(read(root / layout.SITE_ENV), {})  # 非交互安装只保存已有答案
+        self.assertEqual(answers(root), {})  # 非交互安装只保存已有答案
         self.assertTrue((root / "generated/config/app.yaml").is_file())
         self.assertEqual((root / layout.SITE_ENV).stat().st_mode & 0o777, 0o600)
         project = read(root / layout.PROJECT_ENV, expand_home=False)
@@ -233,7 +239,7 @@ class PackInstallTest(ProjectTestCase):
         with self.press_enter(prompts):
             self.install(package, interactive=True, profile="test")
         self.assertTrue(any("[profile-cam]" in text for text in prompts), prompts)
-        self.assertEqual(read(self.install_dir / layout.SITE_ENV)["CAMERA_ID"], "profile-cam")
+        self.assertEqual(answers(self.install_dir)["CAMERA_ID"], "profile-cam")
         self.assertIn("camera: profile-cam", (self.install_dir / "generated/config/app.yaml").read_text())
 
     def test_changing_profile_drops_answers_that_were_old_defaults(self):
@@ -244,12 +250,12 @@ class PackInstallTest(ProjectTestCase):
         (self.install_dir / layout.SITE_ENV).write_text("CAMERA_ID=cam0\nSITE_NAME=custom\n")
         _, output = self.install(package, profile="other")
         self.assertIn("profile changed: CAMERA_ID follow the new profile", output)
-        self.assertEqual(read(self.install_dir / layout.SITE_ENV), {"SITE_NAME": "custom"})
+        self.assertEqual(answers(self.install_dir), {"SITE_NAME": "custom"})
         config = (self.install_dir / "generated/config/app.yaml").read_text()
         self.assertIn("camera: other-cam", config)
         self.assertIn("site: custom", config)
         self.install(package, profile="other")  # profile 不变时答案原样沿用
-        self.assertEqual(read(self.install_dir / layout.SITE_ENV), {"SITE_NAME": "custom"})
+        self.assertEqual(answers(self.install_dir), {"SITE_NAME": "custom"})
 
     def test_host_without_pyyaml_uses_the_base_image(self):
         self.set_profile_build("test", {"CAMERA_ID": "profile-cam"})
@@ -318,6 +324,30 @@ class PackInstallTest(ProjectTestCase):
             install(Options(package, self.install_dir, interactive=False), target)
         self.assertFalse([c for c in target.calls if c[0] == "compose" and "down" in c])
         self.assertEqual((self.install_dir / layout.ENV).read_text(), before)
+
+    def test_failure_after_stopping_explains_the_state(self):
+        package = self.pack(with_base=True)
+        self.install(package)
+        for failure in ("up -d", KeyboardInterrupt):
+            target = FakeDocker()
+            errors = io.StringIO()
+            if failure == KeyboardInterrupt:
+                # Ctrl-C 落在停服之后（查找载荷卷只发生在 down 之后）
+                patch = mock.patch.object(target, "volume_exists", side_effect=KeyboardInterrupt)
+            else:
+                target.fail_on = failure
+                patch = contextlib.nullcontext()
+            with patch, redirect_stdout(io.StringIO()), redirect_stderr(errors), \
+                    self.assertRaises((DeployError, KeyboardInterrupt)):
+                install(Options(package, self.install_dir, interactive=False), target)
+            self.assertIn("installation incomplete: the previous services are stopped", errors.getvalue())
+            self.assertIn("run the installer again", errors.getvalue())
+
+    def test_interrupt_is_reported_by_the_command_line(self):
+        errors = io.StringIO()
+        with mock.patch.object(cli, "install", side_effect=KeyboardInterrupt), redirect_stderr(errors):
+            code = cli.main(["install", "--package", str(self.tmp)])
+        self.assertEqual((code, errors.getvalue().strip()), (130, "interrupted"))
 
     def test_failed_readiness_is_reported(self):
         package = self.pack(with_base=True)
