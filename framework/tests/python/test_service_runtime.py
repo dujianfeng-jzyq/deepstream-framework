@@ -137,6 +137,24 @@ class ServiceProcessTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(f"stopped by signal {int(signal.SIGTERM)}", result.stdout)
 
+    def test_watchdog_exits_when_the_main_loop_stalls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_service(directory, "watchdog:\n  stall_timeout_s: 1\n", """
+                service.sleep(0)
+                time.sleep(20)  # 卡住：不再调用 sleep/alive
+                """)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("made no progress", result.stdout)
+            self.assertFalse(Path(directory, "ready").exists())
+
+    def test_watchdog_stays_quiet_while_the_loop_advances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_service(directory, "watchdog:\n  stall_timeout_s: 1\n", """
+                for _ in range(10):
+                    service.sleep(0.3)
+                """)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

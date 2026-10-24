@@ -238,6 +238,47 @@ TEST(counted_readiness_only_updates_when_progress_changes) {
   }
 }
 
+TEST(stalled_progress_stops_the_pipeline_and_reports_unhealthy) {
+  if (!dsf::gst::HasFactory("appsrc")) SKIP("GStreamer element missing: appsrc");
+  TempConfig config("frames: 1\n");
+  ReadinessHeartbeat readiness("", [] { return std::uint64_t{0}; }, (config.dir / "ready").string(),
+                               std::chrono::milliseconds(50), std::chrono::milliseconds(300));
+  dsf::gst::Pipeline pipeline("stalled", IdleLiveGraph());
+  pipeline.Add(readiness);
+  dsf::gst::Timer guard;
+  pipeline.Post([&] {
+    guard = pipeline.Every(std::chrono::seconds(5),
+                           [&] { pipeline.RequestStop(dsf::gst::StopMode::kImmediate); });
+  });
+  dsf::gst::Options options;
+  options.handle_signals = false;
+  options.startup_timeout = std::chrono::milliseconds(0);
+  const auto begin = std::chrono::steady_clock::now();
+  const dsf::gst::Result result = pipeline.Run(options);
+  CHECK(result.success);  // 排空停止，不是 guard 的强制停止
+  CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds(4));
+  CHECK(!readiness.Healthy());
+
+  // 计数增长或没有设置时限时不触发。
+  ReadinessHeartbeat disabled("", [] { return std::uint64_t{0}; }, (config.dir / "ready2").string(),
+                              std::chrono::milliseconds(50));
+  dsf::gst::Pipeline idle("idle", IdleLiveGraph());
+  idle.Add(disabled);
+  dsf::gst::Timer stop;
+  idle.Post([&] { stop = idle.Every(std::chrono::milliseconds(500), [&] { idle.RequestStop(); }); });
+  CHECK(idle.Run(options).success);
+  CHECK(disabled.Healthy());
+}
+
+TEST(watchdog_section_is_read_by_the_framework) {
+  {
+    TempConfig valid("frames: 1\nwatchdog:\n  stall_timeout_s: 120\n");
+    CHECK_EQ(RunApp({"--check-config", "--config", valid.path.string()}), 0);
+  }
+  TempConfig negative("frames: 1\nwatchdog:\n  stall_timeout_s: -1\n");
+  CHECK_EQ(RunApp({"--check-config", "--config", negative.path.string()}), 1);
+}
+
 TEST(entry_point_runs_and_cleans_readiness_file) {
   TempConfig config("frames: 20\nlogging:\n  level: warn\n  stats_interval_s: 0\n");
   const fs::path ready = config.dir / "ready";

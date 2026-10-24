@@ -85,6 +85,12 @@ LogOptions LogOptions::Read(config::Reader reader) {
   return options;
 }
 
+WatchdogOptions WatchdogOptions::Read(config::Reader reader) {
+  WatchdogOptions options;
+  options.stall_timeout_s = reader.Get("stall_timeout_s", 0, config::AtLeast(0));
+  return options;
+}
+
 void ValidateLogging(const LogOptions& options) {
   bool known = false;
   for (const auto& [name, level] : Levels()) known = known || name == options.level;
@@ -245,12 +251,14 @@ int Run(int argc, char** argv, const Definition& definition) {
   const std::string config_path =
       line.config_path.empty() ? paths.config + "/" + info.name + ".yaml" : line.config_path;
   LogOptions logging;
+  WatchdogOptions watchdog;
   std::string summary;
   Assembly assembly(paths);
   try {
     const config::Document document = config::Document::LoadFile(config_path);
     config::Reader root = document.Root();
     logging = LogOptions::Read(root.Section("logging"));
+    watchdog = WatchdogOptions::Read(root.Section("watchdog"));
     definition.load(root);
     root.Finish();
     summary = root.Describe();
@@ -301,7 +309,8 @@ int Run(int argc, char** argv, const Definition& definition) {
   for (const auto& publisher : assembly.publishers()) {
     for (const publish::Channel* channel : publisher->Channels()) channels.push_back(channel);
   }
-  ReadinessHeartbeat readiness(assembly.ready_element(), assembly.ready_progress(), ReadyFilePath());
+  ReadinessHeartbeat readiness(assembly.ready_element(), assembly.ready_progress(), ReadyFilePath(),
+                               std::chrono::seconds(1), std::chrono::seconds(watchdog.stall_timeout_s));
   reported.push_back(&readiness);
   StatsReporter stats(std::chrono::seconds(logging.stats_interval_s), reported, channels);
 
@@ -326,6 +335,7 @@ int Run(int argc, char** argv, const Definition& definition) {
       healthy = false;
     }
   }
+  if (!readiness.Healthy()) healthy = false;  // 看门狗已在触发时记录原因
   return result.success && healthy ? kExitOk : kExitFailure;
 }
 

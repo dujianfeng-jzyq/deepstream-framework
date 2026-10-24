@@ -13,6 +13,8 @@
 框架负责：命令行（--config、--check-config、--version）、路径（CONTAINER_* 环境变量）、
 logging 段与日志格式、SIGINT/SIGTERM、就绪文件（DSF_READY_FILE，默认 /tmp/dsf.ready）。
 就绪文件只在 service.sleep()/service.alive() 中更新：主循环停止推进时健康检查随之失败。
+watchdog.stall_timeout_s 为正时，主循环超过时限没有推进则进程以失败退出，交给容器的重启策略：
+Docker 只在进程退出时重启，不会重启 unhealthy 的容器。
 """
 
 from __future__ import annotations
@@ -23,11 +25,12 @@ import os
 import signal
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import ConfigError, Reader, one_of
+from .config import ConfigError, Reader, at_least, one_of
 
 EXIT_OK, EXIT_FAILURE, EXIT_USAGE = 0, 1, 2
 
@@ -79,6 +82,7 @@ class Service:
         self._stop = threading.Event()
         self._ready = ready_file()
         self._signal: int | None = None
+        self._last_alive = time.monotonic()
 
     # ---- 主循环使用 ----
 
@@ -88,6 +92,7 @@ class Service:
 
     def alive(self) -> None:
         """声明主循环仍在推进：更新就绪文件。"""
+        self._last_alive = time.monotonic()
         try:
             self._ready.touch()
         except OSError as error:
@@ -122,6 +127,7 @@ class Service:
             root = Reader.load(config_path)
             logging_section = root.section("logging")
             level = logging_section.get("level", "info", one_of(*LEVELS))
+            stall_timeout = root.section("watchdog").get("stall_timeout_s", 0, at_least(0))
             config = load(root)
             root.finish()
         except ConfigError as error:
@@ -140,6 +146,9 @@ class Service:
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, lambda number, _frame: self._on_signal(number))
         self._ready.unlink(missing_ok=True)
+        self._last_alive = time.monotonic()
+        if stall_timeout > 0:
+            threading.Thread(target=self._watch, args=(stall_timeout,), name="watchdog", daemon=True).start()
         try:
             main(config, self)
         except Exception:  # 服务异常退出：记录完整堆栈，交给容器重启策略
@@ -158,3 +167,13 @@ class Service:
         # （RuntimeError: reentrant call），只记录信号并置位，日志由主线程在退出时输出。
         self._signal = signum
         self._stop.set()
+
+    def _watch(self, timeout: float) -> None:
+        # 主循环卡住时无法自行退出（例如阻塞在没有超时的 IO 上），只能直接结束进程。
+        while not self._stop.wait(min(timeout, 1.0)):
+            idle = time.monotonic() - self._last_alive
+            if idle >= timeout:
+                self.log.error("main loop made no progress for %.0f s; exiting so the container restarts", idle)
+                logging.shutdown()
+                self._ready.unlink(missing_ok=True)
+                os._exit(EXIT_FAILURE)

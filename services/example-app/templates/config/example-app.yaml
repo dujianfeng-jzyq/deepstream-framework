@@ -9,6 +9,11 @@ logging:
   directory: ${CONTAINER_DATA_PATH}/logs
   stats_interval_s: 60
 
+# 帧计数 5 分钟不增长时退出，由容器重启恢复（Docker 不会重启 unhealthy 的容器）。
+# 应明显长于 RTSP 的正常重连时间；0 关闭。
+watchdog:
+  stall_timeout_s: 300
+
 # 视频源列表；序号即 mux 的输入编号。增加一项即成为多路应用。
 sources:
   - id: ${CAMERA_ID}

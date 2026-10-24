@@ -51,6 +51,8 @@ int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
 
 配置中的 `logging` 段由框架读取：`level`（trace/debug/info/warn/error/critical/off）、`console`、`file`、`directory`、`stats_interval_s`（组件统计日志周期，0 关闭）。
 
+`watchdog` 段也由框架读取：`stall_timeout_s`（默认 0 关闭）。为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器会一直停在 unhealthy。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。
+
 ## 3. 配置读取
 
 读取代码本身就是 schema：每次读取登记一个路径，`Finish()` 拒绝没有被读取的键。
@@ -231,7 +233,7 @@ def main(port, service: Service):
 sys.exit(Service("my-service", "说明").run(load, main))
 ```
 
-`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、SIGINT/SIGTERM 与就绪文件。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
+`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、`watchdog.stall_timeout_s`、SIGINT/SIGTERM 与就绪文件。看门狗为正时，主循环超过时限没有调用 `sleep()` / `alive()`，进程记录原因后直接以 1 退出（卡住的主循环无法自行排空）。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
 
 ## 10. 新增应用
 

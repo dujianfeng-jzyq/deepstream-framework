@@ -17,9 +17,10 @@ std::string ReadyFilePath() {
 }
 
 ReadinessHeartbeat::ReadinessHeartbeat(std::string element, std::function<std::uint64_t()> progress,
-                                       std::string path, std::chrono::milliseconds interval)
+                                       std::string path, std::chrono::milliseconds interval,
+                                       std::chrono::milliseconds stall_timeout)
     : element_(std::move(element)), progress_(std::move(progress)), path_(std::move(path)),
-      interval_(interval) {}
+      interval_(interval), stall_timeout_(stall_timeout) {}
 
 std::uint64_t ReadinessHeartbeat::Count() const {
   return progress_ ? progress_() : buffers_.load(std::memory_order_relaxed);
@@ -30,11 +31,20 @@ void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   std::filesystem::remove(path_, ignored);  // 上次运行留下的文件不能代表本次就绪
   // 定时器由主循环驱动，不等 PLAYING：按需产帧的管线可能等待首帧才能完成状态切换。
   const bool counting = progress_ || !element_.empty();
-  timer_ = pipeline.Every(interval_, [this, counting] {
+  last_progress_ = std::chrono::steady_clock::now();
+  timer_ = pipeline.Every(interval_, [this, counting, &pipeline] {
     const std::uint64_t count = Count();
+    const auto now = std::chrono::steady_clock::now();
     if (!counting || count != last_) {
       last_ = count;
+      last_progress_ = now;
       Touch(count);
+    } else if (stall_timeout_.count() > 0 && !stalled_ && now - last_progress_ >= stall_timeout_) {
+      // 排空而不是立即结束：录像等组件仍能收尾；排空超时由管线的 stop_timeout 兜底。
+      stalled_ = true;
+      spdlog::error("no progress for {} s (count={}); stopping so the container restarts",
+                    std::chrono::duration_cast<std::chrono::seconds>(stall_timeout_).count(), count);
+      pipeline.RequestStop();
     }
   });
   if (element_.empty() || progress_) return;

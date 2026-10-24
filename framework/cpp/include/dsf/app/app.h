@@ -9,7 +9,7 @@
 //   int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
 //
 // CLI：--config PATH、--check-config [--plugins]、--dump-pipeline、--selftest、--version、--help。
-// 退出码：0 成功，1 失败，2 用法错误。配置中的 logging 段由框架读取，所有应用一致。
+// 退出码：0 成功，1 失败，2 用法错误。配置中的 logging 与 watchdog 段由框架读取，所有应用一致。
 
 #ifndef DSF_APP_APP_H
 #define DSF_APP_APP_H
@@ -55,6 +55,15 @@ struct LogOptions {
   int stats_interval_s = 60;  // 组件统计的输出周期，0 表示不输出
 
   static LogOptions Read(config::Reader reader);
+};
+
+// 停滞看门狗：就绪计数（ReadyWhen / ReadyWhenFramesReach）超过时限不增长时排空并以失败退出，
+// 交给容器的重启策略恢复。Docker 只在进程退出时重启，不会重启 unhealthy 的容器。
+// 没有登记计数来源时主循环运行即算推进，看门狗不会触发。
+struct WatchdogOptions {
+  int stall_timeout_s = 0;  // 0 表示关闭
+
+  static WatchdogOptions Read(config::Reader reader);
 };
 
 // 装配：应用在 Build 中向这里添加图、组件与发布器。
