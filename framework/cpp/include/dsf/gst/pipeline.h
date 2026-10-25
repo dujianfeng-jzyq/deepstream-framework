@@ -10,6 +10,11 @@
 // 否则发给整条管线），排空超时或 kImmediate 强制结束；
 // 排空期间再收到 SIGINT/SIGTERM 升级为强制结束。
 //
+// 运行期错误：默认立即结束。Options::drain_on_error 开启时，PLAYING 或排空中的总线错误先排空再结束，
+// 结果仍是 run-error（带第一条错误），让其余分支收尾（例如 rtspclientsink 断线时录像器封装当前分段）。
+// 只在出错元件不向上游返回流错误时排空才能自然完成（rtspclientsink 断线属于这种）；否则共用 tee 的
+// 其他分支也会停住，只能靠组件自己的兜底（录像器的 eos_fallback）或在 stop_timeout 后强制结束。
+//
 // 启动：startup_timeout 为正数时必须在时限内真正进入 PLAYING。异步切换状态的 sink 可能等待首帧，
 // 按需产帧的源可设为 0 禁用启动超时。状态切换返回失败或总线报告错误时仍以 start-error / run-error
 // 结束，等待期间的停止请求照常排空；OnPlaying 仍只在真正进入 PLAYING 后调用。
@@ -73,6 +78,8 @@ struct Options {
   bool handle_signals = true;
   // 使用私有 GMainContext（见文件头说明）。同一时刻只能有一条管线使用默认 context。
   bool private_context = false;
+  // 运行期错误先排空再以 run-error 结束（见文件头说明）；启动阶段的错误仍立即结束。
+  bool drain_on_error = false;
 };
 
 // 周期任务句柄：析构或 Cancel() 后不再触发；可以晚于 Pipeline 析构。
@@ -166,6 +173,7 @@ class Pipeline {
   GSource* startup_timer_ = nullptr;
   std::atomic<State> state_{State::kReady};
   std::optional<Result> result_;
+  std::optional<Result> run_error_;  // 触发排空的第一条运行期错误（drain_on_error）
   Options options_;
   struct SinkWatch {
     GstPad* pad;

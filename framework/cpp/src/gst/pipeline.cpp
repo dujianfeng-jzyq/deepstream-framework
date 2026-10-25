@@ -246,7 +246,17 @@ std::string Pipeline::ForEach(const char* stage, const std::function<void(Compon
 }
 
 void Pipeline::Finish(Result result) {
-  if (!result_) result_ = std::move(result);
+  if (!result_) {
+    // 由运行期错误触发的排空：无论排空是否完成都以该错误结束，排空未完成的原因附在后面。
+    if (run_error_) {
+      Result failure = *run_error_;
+      if (!result.success) {
+        failure.error += " (then " + std::string(ToString(result.reason)) + ": " + result.error + ")";
+      }
+      result = std::move(failure);
+    }
+    result_ = std::move(result);
+  }
   g_main_loop_quit(loop_);
 }
 
@@ -447,9 +457,21 @@ void Pipeline::HandleMessage(GstMessage* message) {
       if (new_state == GST_STATE_PLAYING) NotifyPlaying();
       return;
     }
-    case GST_MESSAGE_ERROR:
-      Finish({false, FinishReason::kRunError, ErrorText(message, false)});
+    case GST_MESSAGE_ERROR: {
+      const std::string text = ErrorText(message, false);
+      if (!options_.drain_on_error || (state_ != State::kPlaying && state_ != State::kDraining)) {
+        Finish({false, FinishReason::kRunError, text});
+        return;
+      }
+      if (run_error_) {
+        spdlog::error("pipeline {}: {}", name_, text);  // 出错元件常连续报告；已在排空，不重复处理
+        return;
+      }
+      run_error_ = Result{false, FinishReason::kRunError, text};
+      spdlog::error("pipeline {}: {}; draining before exit", name_, text);
+      StopOnControlThread(StopMode::kDrain);
       return;
+    }
     case GST_MESSAGE_WARNING:
       spdlog::warn("pipeline {}: {}", name_, ErrorText(message, true));
       return;

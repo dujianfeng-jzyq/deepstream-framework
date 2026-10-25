@@ -248,6 +248,115 @@ TEST(drain_completes_when_eos_reaches_every_sink_and_components_are_done) {
   CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
 }
 
+// 两路 tee 分支：bad 分支的 sink 运行中报告错误但不阻塞数据流（rtspclientsink 断线时如此），
+// good 分支等 EOS 到达才算收尾（模拟录像器封装最后一个分段）。
+class FailingBranch : public Component {
+ public:
+  std::string_view Name() const override { return "failing-branch"; }
+  void OnPlaying(Pipeline& pipeline) override {
+    GstPad* pad = gst_element_get_static_pad(pipeline.Element("good"), "sink");
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                      +[](GstPad*, GstPadProbeInfo* info, gpointer self) {
+                        if (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) == GST_EVENT_EOS) {
+                          static_cast<FailingBranch*>(self)->good_eos = true;
+                        }
+                        return GST_PAD_PROBE_OK;
+                      },
+                      this, nullptr);
+    gst_object_unref(pad);
+    fail_ = pipeline.Every(std::chrono::milliseconds(200), [&pipeline, this] {
+      if (failed_) return;
+      failed_ = true;
+      // 出错元件常连续报告多条错误。
+      for (int i = 0; i < 2; ++i) {
+        GST_ELEMENT_ERROR(pipeline.Element("bad"), RESOURCE, WRITE, ("connection lost"), (nullptr));
+      }
+    });
+  }
+  void OnStopping() override { stopping = true; }
+  bool Drained() const override { return good_eos; }
+  std::atomic<bool> good_eos{false};
+  bool stopping = false;
+
+ private:
+  Timer fail_;
+  bool failed_ = false;
+};
+
+Graph TwoBranchGraph() {
+  Graph graph;
+  Element source = graph.Add("videotestsrc", "src").Set("is-live", true);
+  Element caps = graph.Caps("video/x-raw,width=64,height=48,framerate=30/1");
+  graph.Link(source, caps);
+  Element tee = graph.Tee(caps, "t");
+  graph.Link(graph.Branch(tee, "qbad"), graph.Add("fakesink", "bad").Set("sync", true));
+  graph.Link(graph.Branch(tee, "qgood"), graph.Add("fakesink", "good").Set("sync", true));
+  return graph;
+}
+
+TEST(runtime_error_drains_first_when_drain_on_error_is_set) {
+  FailingBranch branch;
+  Pipeline pipeline("drain-on-error", TwoBranchGraph());
+  pipeline.Add(branch);
+  Options options;
+  options.handle_signals = false;
+  options.stop_timeout = std::chrono::seconds(3);
+  options.drain_on_error = true;
+  const auto started = std::chrono::steady_clock::now();
+  const Result result = pipeline.Run(options);
+  CHECK(!result.success);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("run-error"));
+  CHECK(result.error.find("connection lost") != std::string::npos);
+  CHECK(result.error.find("(then") == std::string::npos);  // 排空完成，没有附加原因
+  CHECK(branch.stopping);
+  CHECK(branch.good_eos);
+  CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
+}
+
+TEST(runtime_error_finishes_immediately_by_default) {
+  FailingBranch branch;
+  Pipeline pipeline("error", TwoBranchGraph());
+  pipeline.Add(branch);
+  Options options;
+  options.handle_signals = false;
+  const Result result = pipeline.Run(options);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("run-error"));
+  CHECK(result.error.find("connection lost") != std::string::npos);
+  CHECK(!branch.stopping);
+  CHECK(!branch.good_eos);
+}
+
+TEST(drain_on_error_reports_an_unfinished_drain) {
+  // 吞掉 good 分支 sink 的 EOS（管线不会 EOS）且从不报告收尾：排空只能超时。
+  struct NeverDrained : Component {
+    std::string_view Name() const override { return "never-drained"; }
+    void OnPlaying(Pipeline& pipeline) override {
+      GstPad* pad = gst_element_get_static_pad(pipeline.Element("good"), "sink");
+      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                        +[](GstPad*, GstPadProbeInfo* info, gpointer) {
+                          return GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) == GST_EVENT_EOS
+                                     ? GST_PAD_PROBE_DROP : GST_PAD_PROBE_OK;
+                        },
+                        nullptr, nullptr);
+      gst_object_unref(pad);
+    }
+    bool Drained() const override { return false; }
+  };
+  FailingBranch branch;
+  NeverDrained stuck;
+  Pipeline pipeline("drain-on-error-timeout", TwoBranchGraph());
+  pipeline.Add(branch);
+  pipeline.Add(stuck);
+  Options options;
+  options.handle_signals = false;
+  options.stop_timeout = std::chrono::milliseconds(500);
+  options.drain_on_error = true;
+  const Result result = pipeline.Run(options);
+  CHECK_EQ(std::string(ToString(result.reason)), std::string("run-error"));
+  CHECK(result.error.find("connection lost") != std::string::npos);
+  CHECK(result.error.find(" (then forced: draining did not finish") != std::string::npos);
+}
+
 TEST(plugin_timers_on_the_default_context_fire) {
   // 插件用 g_timeout_add 在默认 context 上注册的定时器必须在 Run 期间触发：
   // 这里由这样的定时器触发 5 次后请求停止，管线只有在定时器真的运行时才会结束。

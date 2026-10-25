@@ -141,6 +141,7 @@ class Component {
 - 主循环默认运行在 GLib 默认 context 上：插件的内部定时器（例如 nvurisrcbin 的断流重连）依赖它。在多个线程中并行运行多条管线时，次要管线设置 `Options::private_context`。
 - `Pipeline::Post` 把任务排队到控制线程；`Every` 返回 `Timer`（析构即取消）；`RequestStop` 可在任意线程调用。
 - 停止：首次请求通知 OnStopping 后发送 EOS 排空（默认 5 秒）。排空完成的判据是管线 EOS，或者 EOS 已到达每个 sink 的输入且所有组件 `Drained()`——网络 sink（如 rtspclientsink）收到 EOS 后不一定结束，不会因此拖住停止，而录像器会等最后一个分段封装完成。超时或 `kImmediate` 强制结束；排空中再收到 SIGINT/SIGTERM 立即结束。排空时限可在 `assembly.options()` 调整，须小于容器的停止宽限期。
+- 运行期错误：默认立即以 `run-error` 结束。`assembly.options().drain_on_error = true` 时，PLAYING 或排空中的总线错误先排空再结束，结果仍是 `run-error`（第一条错误，排空未完成时附上原因），让其余分支收尾——例如 rtspclientsink 断线（它报错且不重连）时录像器仍封装当前分段，进程退出后由重启策略恢复推流。出错元件若向上游返回流错误，共用 tee 的其他分支也会停住，只能依靠组件自己的兜底（录像器的 `eos_fallback`）或在 `stop_timeout` 后强制结束。启动阶段的错误仍立即结束。
 - 启动：`assembly.options().startup_timeout` 默认 30 秒，设为 0 禁用启动超时，负数视为启动失败。异步切换状态的 sink 可能等待首帧，使按需产帧的管线长期无法进入 PLAYING；是否等待取决于元件及其配置。状态切换返回失败或总线报告错误时仍以 `start-error` / `run-error` 结束，`OnPlaying` 只在真正进入 PLAYING 后调用。计时在 `set_state(PLAYING)` 返回异步状态切换结果后开始，不覆盖同步初始化和阻塞调用；定时任务须等主循环运行才能执行。
 - 结果原因：`eos`、`stopped`（成功）；`forced`、`build-error`、`start-error`、`run-error`、`startup-timeout`（失败）。
 
