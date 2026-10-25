@@ -58,8 +58,16 @@ TEST(source_validation) {
   CHECK_THROWS(Sources("sources: []\n"), "at least 1");
   CHECK_THROWS(Sources("sources:\n  - id: a\n    type: test\n    output: {width: 10}\n"), "set together");
   CHECK_EQ(InjectPassword("rtsp://h/s", ""), std::string("rtsp://h/s"));
+  CHECK_EQ(InjectPassword("rtsp://u@h:554/s", "abc123"), std::string("rtsp://u:abc123@h:554/s"));
+  // 任意字符都可以：编码后地址只有一个分隔用的 @，GStreamer 解析时解码回原口令。
+  CHECK_EQ(InjectPassword("rtsp://u@h/s", "a@b/c#d?e%f g:h"),
+           std::string("rtsp://u:a%40b%2Fc%23d%3Fe%25f%20g%3Ah@h/s"));
+  CHECK_EQ(InjectPassword("rtsp://u@h/s", "\xE5\x8F\xA3"), std::string("rtsp://u:%E5%8F%A3@h/s"));
+  CHECK_EQ(InjectPassword("rtsp://u@h/s", ""), std::string("rtsp://u@h/s"));
+  CHECK_EQ(InjectPassword("rtsp://u@h/s", "", true), std::string("rtsp://u:@h/s"));
+  CHECK_EQ(InjectPassword("rtsp://h/s", "", true), std::string("rtsp://h/s"));
   CHECK_THROWS(InjectPassword("rtsp://u:x@h/s", "p"), "already contains");
-  CHECK_THROWS(InjectPassword("rtsp://u@h/s", "a@b"), "must not contain");
+  CHECK_THROWS(InjectPassword("rtsp://h/a@b", "p"), "no user name");  // 路径中的 @ 不是用户名分隔符
 }
 
 TEST(file_and_test_sources) {

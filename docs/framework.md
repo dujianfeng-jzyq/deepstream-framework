@@ -117,6 +117,8 @@ sources:
     properties: {drop-on-latency: true}   # 可选，透传给 nvurisrcbin / v4l2src / videotestsrc
 ```
 
+`rtsp.password` 单独配置，摘要与诊断中打码，实例化时按百分号编码注入到 `uri` 的用户名之后（`InjectPassword`），可以含 `@`、`/`、`#`、`%` 等任意字符；`uri` 中不要再写口令。
+
 `rtsp`/`file`/`uri` 源默认设置 nvurisrcbin 的 `num-extra-surfaces: 8`：解码器的输出 surface 池很小，源侧转换走零拷贝直通时，下游硬件编码器持有的就是解码器的 surface，池耗尽后管线静默卡住。加 queue 解决不了（queue 只会多持有 surface）。下游持有帧更多的拓扑（多路编码、深队列）可在 `properties` 中调大。
 
 新版 nvstreammux（`USE_NEW_NVSTREAMMUX=yes`）没有 width/height 属性，`MuxSpec` 的尺寸会在能力检查时报错；使用新版时请用 `properties` 设置 `config-file-path` 并自行处理尺寸。

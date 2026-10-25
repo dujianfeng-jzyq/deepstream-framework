@@ -31,7 +31,7 @@ struct SourceSpec {
   std::string uri;     // uri/rtsp/file：nvurisrcbin 的 uri；file 也可写绝对路径
   bool live = true;    // 由 type 推导：file 与 uri(file://) 为 false
   // rtsp
-  std::string password;  // 单独配置，注入到 uri 的用户名之后，不出现在日志与诊断中
+  std::string password;  // 单独配置，编码后注入到 uri 的用户名之后，不出现在日志与诊断中
   int latency_ms = 200;
   bool tcp = true;
   int reconnect_interval_s = 5;
@@ -54,9 +54,11 @@ struct SourceSpec {
 // 读取 sources 列表，检查 id 唯一。
 std::vector<SourceSpec> ReadSources(Reader& reader, const std::string& key = "sources");
 
-// 返回 rtsp://user:password@host/... 形式的地址；password 为空时原样返回。
-// 地址没有用户名或口令含 '@'、'/' 时抛 std::invalid_argument。
-std::string InjectPassword(const std::string& uri, const std::string& password);
+// 返回 rtsp://user:password@host/... 形式的地址。口令按百分号编码（GStreamer 解析地址时解码），
+// 可以含任意字符；字母、数字与 -._~ 保持原样。password 为空时原样返回；write_empty 为 true 时
+// 空口令也写出 "user:"（向要求带凭据、但不校验口令的服务端推流时需要）。
+// 口令非空而地址没有用户名或已含口令时抛 std::invalid_argument。
+std::string InjectPassword(const std::string& uri, const std::string& password, bool write_empty = false);
 
 // 添加一路源并规范为 NVMM NV12（可选缩放）。prefix 用于元件命名（例如 "src0"）。
 Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& prefix);

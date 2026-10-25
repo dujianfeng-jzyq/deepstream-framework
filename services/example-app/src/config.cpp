@@ -16,38 +16,10 @@ namespace {
 constexpr const char* kMediaMtxCredential =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!$()*+.;<=>[]^_-@#&";
 
-bool Unreserved(char c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
-         c == '.' || c == '_' || c == '~';
-}
-
 }  // namespace
 
 std::string PublishUrl(const std::string& url, const std::string& password) {
-  const std::size_t scheme = url.find("://");
-  const std::size_t start = scheme == std::string::npos ? 0 : scheme + 3;
-  const std::size_t end = url.find_first_of("/?#", start);
-  const std::string authority = url.substr(start, end == std::string::npos ? end : end - start);
-  const std::size_t at = authority.rfind('@');
-  if (scheme == std::string::npos || at == std::string::npos) {
-    if (password.empty()) return url;
-    throw std::invalid_argument("is set but the url has no user name (expected rtsp://user@host/...)");
-  }
-  if (authority.find(':') < at) {
-    if (password.empty()) return url;
-    throw std::invalid_argument("is set but the url already contains a password");
-  }
-  std::string encoded;
-  static const char kHex[] = "0123456789ABCDEF";
-  for (const char c : password) {
-    if (Unreserved(c)) {
-      encoded += c;
-    } else {
-      const auto byte = static_cast<unsigned char>(c);
-      encoded += {'%', kHex[byte >> 4], kHex[byte & 0x0F]};
-    }
-  }
-  return url.substr(0, start + at) + ":" + encoded + url.substr(start + at);
+  return dsf::ds::InjectPassword(url, password, true);
 }
 
 bool Config::live() const {

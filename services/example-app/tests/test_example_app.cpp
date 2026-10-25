@@ -141,7 +141,7 @@ TEST(rtsp_output_password_is_checked_and_hidden) {
   CHECK_THROWS(Load(Replace(base, "  password: x\n  tiler:", "  password: \"a,b\"\n  tiler:")),
                "rtsp_out.password: MediaMTX accepts only");
   CHECK_THROWS(Load(Replace(base, "url: rtsp://publisher@mediamtx", "url: rtsp://mediamtx")),
-               "rtsp_out.password: is set but the url has no user name");
+               "rtsp_out.password: is set but the uri has no user name");
 }
 
 TEST(cross_field_rules) {

@@ -98,21 +98,35 @@ std::vector<SourceSpec> ReadSources(Reader& reader, const std::string& key) {
   return sources;
 }
 
-std::string InjectPassword(const std::string& uri, const std::string& password) {
-  if (password.empty()) return uri;
-  if (password.find_first_of("@/") != std::string::npos) {
-    throw std::invalid_argument("must not contain '@' or '/'");
-  }
+std::string InjectPassword(const std::string& uri, const std::string& password, bool write_empty) {
+  if (password.empty() && !write_empty) return uri;
+  // 用户信息只在 "://" 与第一个 /、?、# 之间；路径中的 @ 不算。
   const std::size_t scheme = uri.find("://");
-  const std::size_t at = scheme == std::string::npos ? scheme : uri.find('@', scheme + 3);
-  const std::size_t slash = scheme == std::string::npos ? scheme : uri.find('/', scheme + 3);
-  if (at == std::string::npos || (slash != std::string::npos && slash < at)) {
+  const std::size_t start = scheme == std::string::npos ? 0 : scheme + 3;
+  const std::size_t end = uri.find_first_of("/?#", start);
+  const std::string authority = uri.substr(start, end == std::string::npos ? end : end - start);
+  const std::size_t at = authority.rfind('@');
+  if (scheme == std::string::npos || at == std::string::npos) {
+    if (password.empty()) return uri;
     throw std::invalid_argument("is set but the uri has no user name (expected rtsp://user@host/...)");
   }
-  if (uri.substr(scheme + 3, at - scheme - 3).find(':') != std::string::npos) {
+  if (authority.find(':') < at) {
+    if (password.empty()) return uri;
     throw std::invalid_argument("is set but the uri already contains a password");
   }
-  return uri.substr(0, at) + ":" + password + uri.substr(at);
+  static const char kHex[] = "0123456789ABCDEF";
+  std::string encoded;
+  for (const char c : password) {
+    const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                            c == '-' || c == '.' || c == '_' || c == '~';
+    if (unreserved) {
+      encoded += c;
+    } else {
+      const auto byte = static_cast<unsigned char>(c);
+      encoded += {'%', kHex[byte >> 4], kHex[byte & 0x0F]};
+    }
+  }
+  return uri.substr(0, start + at) + ":" + encoded + uri.substr(start + at);
 }
 
 Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& prefix) {
