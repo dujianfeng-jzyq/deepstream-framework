@@ -3,15 +3,9 @@
 # 镜像在编译服务器上构建，用 build-release.sh --with-base 打包，不在 Jetson 上构建。
 x-build:
   DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:7.1-samples-multiarch
-  # host 网络下服务名不能解析，本机服务用回环地址；这些也是交互安装的提问默认值。
-  REDIS_HOST: 127.0.0.1
-  RTSP_URL: rtsp://127.0.0.1:8554/camera0
 # 所有服务（包括以后新增的单元）都不连 bridge；显式 network_mode 的服务保持不变。
+# 渲染器同时把每个服务名指向 127.0.0.1（extra_hosts），配置照常用 redis、mediamtx 等服务名。
 x-network-mode: host
-x-app-config:
-  example-app:
-    rtsp_out:
-      url: rtsp://publisher@127.0.0.1:8554/${CAMERA_ID}-out
 services:
   example-app:
     runtime: nvidia

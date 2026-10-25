@@ -100,8 +100,10 @@ def _collect_answers(options: Options, install_dir: Path, package_root: Path,
     新 profile 的默认值不同时丢弃，改为重新提问或继承；现场输入的其他值保留。"""
     fields = site.parse_fields(package_root / layout.SITE_FIELDS)
     fresh = options.ask or options.clean
-    answers = {} if fresh else site.read_answers(install_dir / layout.SITE_ENV, fields)
-    answers = {k: v for k, v in answers.items() if k in {f.key for f in fields}}
+    retired: list[str] = []
+    answers = {} if fresh else site.read_answers(install_dir / layout.SITE_ENV, fields, retired)
+    if retired:
+        print(f"dropped site fields no longer used by this release: {', '.join(retired)}")
     if answers and previous is not None:
         old, new = site.defaults(fields, previous()), site.defaults(fields, inherited())
         stale = sorted(key for key, value in answers.items() if value == old[key] != new[key])

@@ -87,7 +87,7 @@ rtsp_out:
 
 redis:
   enabled: true
-  host: ${REDIS_HOST}
+  host: redis
   port: 6379
   password: ${REDIS_PASSWORD}
   detection_stream: ${PROJECT_NAME}:detections

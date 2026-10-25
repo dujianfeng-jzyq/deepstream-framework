@@ -256,6 +256,16 @@ class PackInstallTest(ProjectTestCase):
         self.install(package, ask=True)  # 非交互 --ask：清空旧答案，回到默认值
         self.assertIn("camera: cam0", (self.install_dir / "generated/config/app.yaml").read_text())
 
+    def test_upgrade_drops_answers_for_retired_fields(self):
+        # 新版本删除了现场字段：升级不能因旧 site.env 中的键失败，丢弃它并重写 site.env。
+        package = self.pack(with_base=True)
+        self.install(package)
+        (self.install_dir / layout.SITE_ENV).write_text('CAMERA_ID="site-cam"\nREDIS_HOST="redis"\n')
+        _, output = self.install(package)
+        self.assertIn("dropped site fields no longer used by this release: REDIS_HOST", output)
+        self.assertEqual(answers(self.install_dir), {"CAMERA_ID": "site-cam"})
+        self.assertIn("camera: site-cam", (self.install_dir / "generated/config/app.yaml").read_text())
+
     def test_interactive_defaults_follow_the_profile(self):
         # 回车保存的答案必须是 profile 的值，否则 site.env 会遮住 profile 的 x-build。
         self.set_profile_build("test", {"CAMERA_ID": "profile-cam"})

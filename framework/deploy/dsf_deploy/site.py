@@ -75,15 +75,18 @@ def parse_fields(path: Path) -> list[Field]:
     return fields
 
 
-def read_answers(path: Path, fields: list[Field]) -> dict[str, str]:
-    """读取现场答案；只能包含清单声明的键。"""
+def read_answers(path: Path, fields: list[Field], retired: list[str] | None = None) -> dict[str, str]:
+    """读取现场答案；只能包含清单声明的键。传入 retired 时（升级：新版本可能删除了字段）
+    未声明的键不报错，从答案中去掉并记入 retired。"""
     if not path.is_file():
         return {}
     answers = envfile.read(path, unquote=envfile.unquote_answer)
     unknown = sorted(set(answers) - {field.key for field in fields})
-    if unknown:
+    if unknown and retired is None:
         raise DeployError(f"{path}: undeclared site fields {unknown}; declare them in site-fields.env")
-    return answers
+    if unknown:
+        retired.extend(unknown)
+    return {key: value for key, value in answers.items() if key not in unknown}
 
 
 def write_answers(path: Path, answers: dict[str, str], header: tuple[str, ...] = (),

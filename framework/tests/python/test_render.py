@@ -65,7 +65,10 @@ class RenderTest(ProjectTestCase):
         self.assertTrue(plan.variables["COMPOSE_FILE"].endswith(":profiles/test.yaml:" + layout.NETWORK_COMPOSE))
         overrides = yamlio.load(plan.files[layout.NETWORK_COMPOSE])["services"]
         # deepstream-apps 显式为 none，redis 在 profile 中显式声明：二者保持不变。
-        self.assertEqual(overrides, {name: {"network_mode": "host"}
+        # 其余服务的 /etc/hosts 把每个服务名（包括未覆盖的）指向回环地址，服务名照常可用。
+        hosts = [f"{name}:127.0.0.1" for name in ("app", "deepstream-apps", "deepstream-base",
+                                                     "model-engine-builder", "redis")]
+        self.assertEqual(overrides, {name: {"network_mode": "host", "extra_hosts": hosts}
                                      for name in ("app", "deepstream-base", "model-engine-builder")})
         profile.write_text(PROFILE)
         self.assertNotIn(layout.NETWORK_COMPOSE, self.plan().files)  # 未设置时行为不变

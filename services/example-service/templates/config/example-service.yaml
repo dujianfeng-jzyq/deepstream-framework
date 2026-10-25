@@ -3,7 +3,7 @@ logging:
   level: info
 
 redis:
-  host: ${REDIS_HOST}
+  host: redis
   port: 6379
   password: ${REDIS_PASSWORD}
   # 与 example-app 的 redis.recording_stream 一致。

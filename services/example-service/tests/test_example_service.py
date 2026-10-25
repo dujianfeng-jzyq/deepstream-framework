@@ -44,7 +44,7 @@ class ExampleServiceTest(unittest.TestCase):
                               capture_output=True, text=True, timeout=30)
 
     def test_template_passes_check_config_without_side_effects(self):
-        self.write_config(render({"REDIS_HOST": "redis", "PROJECT_NAME": "p"}))
+        self.write_config(render({"PROJECT_NAME": "p"}))
         result = self.run_service("--check-config")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("configuration is valid", result.stdout)
@@ -80,7 +80,7 @@ class ExampleServiceTest(unittest.TestCase):
                     break
                 except redis.ConnectionError:
                     time.sleep(0.05)
-            self.write_config(render({"REDIS_HOST": "127.0.0.1", "PROJECT_NAME": "p"})
+            self.write_config(render({"PROJECT_NAME": "p"}).replace("host: redis", "host: 127.0.0.1")
                               .replace("port: 6379", f"port: {port}").replace("password: x", "password: \"\""))
             service = subprocess.Popen([sys.executable, str(SERVICE)], env=self.env,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
