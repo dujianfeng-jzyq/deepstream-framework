@@ -88,7 +88,7 @@ class ExampleServiceTest(unittest.TestCase):
             while not (self.dir / "ready").exists() and time.time() < deadline:
                 time.sleep(0.1)
             self.assertTrue((self.dir / "ready").exists(), "service never became ready")
-            time.sleep(0.5)  # 服务从 "$" 开始读，确保 XREAD 已经在等待
+            time.sleep(0.5)  # 服务先记下各 Stream 当前最后一条的 ID，此后写入的记录才会处理
             client.xadd("p:recordings", {"payload": '{"event_type":"recording_finished","source_id":"cam",'
                                                     '"branch":"osd","path":"/data/a.mp4","duration_ms":5}'})
             client.xadd("p:detections", {"payload": '{"event_type":"detection","source_id":"cam",'

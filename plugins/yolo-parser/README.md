@@ -4,7 +4,7 @@
 
 ## 输入约定
 
-唯一输出层为 FP32 张量 `[候选数, 6]`，每行 `x1, y1, x2, y2, confidence, class_id`，坐标是网络输入尺寸下的像素（Ultralytics 导出时 `nms=False`、输出布局 `xyxy-confidence-class_id`）。不支持其他 YOLO 输出布局。
+唯一输出层为 FP32 张量 `[候选数, 6]`，每行 `x1, y1, x2, y2, confidence, class_id`，坐标是网络输入尺寸下的像素。Ultralytics 的标准导出不是这个布局：模型导出时（`nms=False`）需在输出端追加转换，`export.json` 的 `output_layout: xyxy-confidence-class_id` 记录这一约定。不支持其他 YOLO 输出布局。
 
 ## 行为
 
