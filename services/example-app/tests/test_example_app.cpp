@@ -144,6 +144,13 @@ TEST(rtsp_output_password_is_checked_and_hidden) {
                "rtsp_out.password: is set but the uri has no user name");
 }
 
+TEST(h265_rtsp_output_warns_about_browser_playback) {
+  CHECK(example_app::Warnings(Load(Template())).empty());
+  const auto warnings = example_app::Warnings(Load(Replace(Template(), "  codec: h264", "  codec: h265")));
+  CHECK_EQ(warnings.size(), 1u);
+  CHECK(warnings[0].find("WebRTC") != std::string::npos);
+}
+
 TEST(cross_field_rules) {
   const std::string base = Template();
   CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",

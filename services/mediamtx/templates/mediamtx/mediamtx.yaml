@@ -22,7 +22,8 @@ authInternalUsers:
       - action: metrics
       - action: pprof
 
-# 浏览器经这个地址连接 WebRTC 媒体端口（8189/udp）；容器内的网卡地址在宿主之外不可达。
+# 浏览器经这个地址连接 WebRTC 媒体端口（8189/udp）。MediaMTX 自己只通告容器内的地址与 127.0.0.1，
+# 本机查看不需要它；其他机器查看必须是宿主的局域网 IP。不能为空：空地址让 WebRTC 请求一律失败。
 webrtcAdditionalHosts: ["${MEDIAMTX_HOST}"]
 
 # 接受任意路径（相机与应用输出按名称推流）。

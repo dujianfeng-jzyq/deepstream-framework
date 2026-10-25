@@ -46,7 +46,22 @@ generated/network.compose.yaml    仅当 profile 设置 x-network-mode 时生成
 基础设施单元的访问控制：
 
 - `redis` 只在 Compose 网络内访问。现场参数 `REDIS_PASSWORD` 非空时设为它的口令（经标准输入传给 `redis-server`，不出现在进程参数中），各服务用同一个口令连接；为空时不设口令。profile 可用 `REDIS_EXTRA_ARGS` 追加 `redis-server` 参数。
-- `mediamtx` 的配置由 `services/mediamtx/templates/mediamtx/mediamtx.yaml` 渲染到 `generated/mediamtx/`。观看对现场网络开放、不需要口令：RTSP `rtsp://<主机>:8554/<路径>`，浏览器 `http://<主机>:8889/<路径>`（WebRTC，媒体走 8189/udp）。`MEDIAMTX_HOST` 是浏览器连接媒体端口用的宿主地址或主机名，默认 `127.0.0.1` 只能在本机查看。推流必须以 `publisher` 与 `MEDIAMTX_PUBLISH_PASSWORD` 登录，防止网络中任何人替换相机画面或应用输出；口令只能由字母、数字与 `!$()*+.;<=>[]^_-@#&` 组成（MediaMTX 的限制，example-app 的 `--check-config` 在预检中检查），为空时 `publisher` 用任意口令都能推流，只适合开发环境。模拟相机推流用 `MEDIAMTX_PUBLISH_PASSWORD=<口令> tools/push_sample_video.sh <视频>`。
+- `mediamtx` 的配置由 `services/mediamtx/templates/mediamtx/mediamtx.yaml` 渲染到 `generated/mediamtx/`。观看对现场网络开放、不需要口令：RTSP `rtsp://<主机>:8554/<路径>`，浏览器 `http://<主机>:8889/<路径>`（WebRTC，媒体走 8189/udp）。`MEDIAMTX_HOST` 是浏览器连接媒体端口用的宿主地址，见下文“浏览器查看（WebRTC）”。推流必须以 `publisher` 与 `MEDIAMTX_PUBLISH_PASSWORD` 登录，防止网络中任何人替换相机画面或应用输出；口令只能由字母、数字与 `!$()*+.;<=>[]^_-@#&` 组成（MediaMTX 的限制，example-app 的 `--check-config` 在预检中检查），为空时 `publisher` 用任意口令都能推流，只适合开发环境。模拟相机推流用 `MEDIAMTX_PUBLISH_PASSWORD=<口令> tools/push_sample_video.sh <视频>`。
+
+### 浏览器查看（WebRTC）
+
+WebRTC 的媒体不走页面所在的 HTTP 连接：MediaMTX 在应答中告诉浏览器去连哪些地址的 8189/udp。bridge 网络中 MediaMTX 只知道容器内的地址与 `127.0.0.1`，所以：
+
+| 查看位置 | 需要的设置 |
+|---|---|
+| 本机浏览器 | 无（`MEDIAMTX_HOST` 保持默认 `127.0.0.1`） |
+| 局域网其他机器 | `MEDIAMTX_HOST` 填本机的局域网 IP，且该 IP 固定（静态或 DHCP 保留）；否则页面能打开但没有画面 |
+
+`MEDIAMTX_HOST` 不能留空：空地址会让 MediaMTX 拒绝所有 WebRTC 请求，本机也看不了。不要自动探测这个地址：多网卡或代理隧道下默认路由的源地址往往不是局域网地址。bridge 网络下端口由 Docker 发布，不受宿主防火墙（ufw）影响。
+
+不想逐台填写 IP 时，可以用 `x-network-mode: host` 的 profile：MediaMTX 直接看到宿主网卡，自动通告局域网地址，`MEDIAMTX_HOST` 保持默认即可。代价见下文“不支持 bridge 的 Jetson”：不能关闭 `MTX_WEBRTC`，Redis 须用 `REDIS_EXTRA_ARGS: --bind 127.0.0.1` 只绑定回环地址，宿主防火墙须放行 8554/tcp、8889/tcp、8189/udp，同一台机器只能运行一套实例。不要只把 MediaMTX 单独放到 host 网络：应用经宿主网关推流，启用 ufw 的宿主通常会拦截容器到宿主的连接，RTSP 输出因此完全失效。
+
+浏览器的 WebRTC 多数只能播放 H.264，`encoder.codec: h265` 的输出只能用 RTSP 播放器查看（example-app 在 `--check-config` 与启动时给出警告）。
 
 公共定义 `dsf-service`：`image: ${BASE_IMAGE}`、渲染用户的 UID/GID、`restart: unless-stopped`、预检标签 `io.deepstream.config-check: "true"`、挂载点环境变量、`PYTHONPATH`、`DSF_READY_FILE`、只读载荷卷与配置目录、可写数据目录、`/etc/localtime`、就绪健康检查（就绪文件 30 秒内更新过）、等待播种完成、日志轮转。注意 `extends` 文件中的相对路径以该文件所在目录为基准，单元 compose.yaml 中的相对路径以项目根为基准。
 

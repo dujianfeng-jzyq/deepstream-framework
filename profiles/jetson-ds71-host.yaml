@@ -18,6 +18,8 @@ services:
     environment:
       REDIS_EXTRA_ARGS: --bind 127.0.0.1
   # 只保留 RTSP（8554/tcp 与 8000-8001/udp）；ports 映射在 host 网络下不再生效。推流仍需口令。
+  # 要在其他机器用浏览器（WebRTC）查看时删除 MTX_WEBRTC 一行，并在宿主防火墙放行 8889/tcp、8189/udp；
+  # host 网络下 MediaMTX 自动通告宿主网卡地址，不必设置 MEDIAMTX_HOST。
   mediamtx:
     environment:
       MTX_RTMP: "no"

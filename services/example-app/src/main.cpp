@@ -3,6 +3,8 @@
 
 #include <memory>
 
+#include <spdlog/spdlog.h>
+
 #include "config.h"
 #include "dsf/app/app.h"
 #include "dsf/ds/message.h"
@@ -29,6 +31,7 @@ struct ExampleApp {
     // RTSP 输出断线（例如 MediaMTX 重启）会报错且不会重连：先排空再退出，录像器封装当前分段，
     // 再由容器重启恢复推流；不排空时每路的当前分段都会丢失。
     assembly.options().drain_on_error = true;
+    for (const auto& warning : example_app::Warnings(config)) spdlog::warn("{}", warning);
 
     dsf::ds::SourceRegistry sources;
     for (const auto& source : config.sources) sources.Add(source.id);

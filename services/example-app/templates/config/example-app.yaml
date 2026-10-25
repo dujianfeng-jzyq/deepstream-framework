@@ -57,6 +57,7 @@ osd:
   enabled: true
 
 # 录像与 RTSP 输出共用的编码参数；Jetson 与 dGPU 的编码器属性差异写在 properties。
+# 经 MediaMTX 在浏览器中用 WebRTC 查看时保持 h264：多数浏览器的 WebRTC 不能播放 h265。
 encoder:
   codec: h264
   bitrate: 8000000
