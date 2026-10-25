@@ -1,9 +1,14 @@
 # RTSP 汇聚：模拟相机推流进来，应用的 RTSP 输出推到这里供查看。现场可直连相机而不用它。
+# 观看对现场网络开放：RTSP rtsp://<主机>:8554/<路径>，浏览器 http://<主机>:8889/<路径>（WebRTC）；
+# 推流需要 publisher 与 MEDIAMTX_PUBLISH_PASSWORD，见 templates/mediamtx/mediamtx.yaml。
 services:
   mediamtx:
     image: ${MEDIAMTX_IMAGE}
     restart: unless-stopped
     ports:
       - "8554:8554"
+      - "8889:8889"      # WebRTC 页面与信令
+      - "8189:8189/udp"  # WebRTC 媒体（ICE），地址由 MEDIAMTX_HOST 告知浏览器
     volumes:
+      - ./generated/mediamtx/mediamtx.yaml:/mediamtx.yml:ro
       - /etc/localtime:/etc/localtime:ro

@@ -62,7 +62,7 @@ mkdir -p ~/deepstream-example/data             # 数据目录（project.env 的 
 docker compose build deepstream-base deepstream-apps
 docker compose up -d
 docker compose logs -f example-app
-tools/push_sample_video.sh video.mp4           # 用本地视频模拟相机（推到 MediaMTX）
+MEDIAMTX_PUBLISH_PASSWORD=<口令> tools/push_sample_video.sh video.mp4  # 用本地视频模拟相机（推到 MediaMTX）
 ```
 
 数据目录必须在首次 `docker compose up` 前以当前用户创建：缺失的 bind 源会被 Docker 以 root 创建，服务以 `HOST_UID:HOST_GID` 运行时无法写入（如 `Permission denied: '/data/engines'`），此时执行 `sudo chown -R $(id -u):$(id -g) <数据目录>` 修复。安装器会自动创建并检查该目录。

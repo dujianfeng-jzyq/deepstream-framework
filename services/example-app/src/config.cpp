@@ -2,11 +2,53 @@
 
 #include "config.h"
 
+#include <stdexcept>
+
 namespace example_app {
 
 using dsf::config::AtLeast;
 using dsf::config::NonEmpty;
 using dsf::config::Reader;
+
+namespace {
+
+// MediaMTX 只接受这些字符组成的口令，其他字符会让它拒绝启动。
+constexpr const char* kMediaMtxCredential =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!$()*+.;<=>[]^_-@#&";
+
+bool Unreserved(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+         c == '.' || c == '_' || c == '~';
+}
+
+}  // namespace
+
+std::string PublishUrl(const std::string& url, const std::string& password) {
+  const std::size_t scheme = url.find("://");
+  const std::size_t start = scheme == std::string::npos ? 0 : scheme + 3;
+  const std::size_t end = url.find_first_of("/?#", start);
+  const std::string authority = url.substr(start, end == std::string::npos ? end : end - start);
+  const std::size_t at = authority.rfind('@');
+  if (scheme == std::string::npos || at == std::string::npos) {
+    if (password.empty()) return url;
+    throw std::invalid_argument("is set but the url has no user name (expected rtsp://user@host/...)");
+  }
+  if (authority.find(':') < at) {
+    if (password.empty()) return url;
+    throw std::invalid_argument("is set but the url already contains a password");
+  }
+  std::string encoded;
+  static const char kHex[] = "0123456789ABCDEF";
+  for (const char c : password) {
+    if (Unreserved(c)) {
+      encoded += c;
+    } else {
+      const auto byte = static_cast<unsigned char>(c);
+      encoded += {'%', kHex[byte >> 4], kHex[byte & 0x0F]};
+    }
+  }
+  return url.substr(0, start + at) + ":" + encoded + url.substr(start + at);
+}
 
 bool Config::live() const {
   for (const auto& source : sources) {
@@ -42,6 +84,7 @@ Config Load(Reader& root) {
   Reader rtsp = root.Section("rtsp_out");
   config.rtsp_out.enabled = rtsp.Get("enabled", false);
   config.rtsp_out.url = rtsp.Get<std::string>("url", "");
+  config.rtsp_out.password = rtsp.Secret("password");
   config.rtsp_out.tiler = dsf::ds::TilerSpec::Read(rtsp.Section("tiler"));
   config.rtsp_out.properties = rtsp.Props("properties");
 
@@ -80,9 +123,24 @@ Config Load(Reader& root) {
   if (config.rtsp_out.enabled && config.rtsp_out.url.empty()) {
     root.Fail("rtsp_out.url", "is required when rtsp_out is enabled");
   }
-  // 只进不出的管线占用相机与 GPU 却没有任何产出。
-  if (!config.records() && !config.rtsp_out.enabled && !config.redis.enabled) {
-    root.Fail("", "enable at least one output: recording.raw, recording.osd, rtsp_out or redis");
+  // 口令来自现场参数 MEDIAMTX_PUBLISH_PASSWORD，与 MediaMTX 共用：在预检中拦下它不接受的字符，
+  // 而不是停服之后 MediaMTX 无法启动。
+  if (config.rtsp_out.password.find_first_not_of(kMediaMtxCredential) != std::string::npos) {
+    root.Fail("rtsp_out.password", "MediaMTX accepts only letters, digits and !$()*+.;<=>[]^_-@#&");
+  }
+  if (config.rtsp_out.enabled) {
+    try {
+      (void)PublishUrl(config.rtsp_out.url, config.rtsp_out.password);
+    } catch (const std::invalid_argument& error) {
+      root.Fail("rtsp_out.password", error.what());
+    }
+  }
+  // 只进不出的管线占用相机与 GPU 却没有任何产出。没有推理时 Redis 不会收到检测消息，
+  // 录像事件又只在录像开启时产生，所以 Redis 只有配合推理才算输出。
+  const bool publishes = config.redis.enabled && !config.inference.empty();
+  if (!config.records() && !config.rtsp_out.enabled && !publishes) {
+    root.Fail("", "enable at least one output: recording.raw, recording.osd, rtsp_out, "
+                  "or redis with at least one inference entry");
   }
   return config;
 }

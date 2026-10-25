@@ -26,6 +26,9 @@ struct ExampleApp {
 
   static void Build(const Config& config, dsf::app::Assembly& assembly) {
     const example_app::Plan plan = example_app::BuildGraph(config, assembly.graph());
+    // RTSP 输出断线（例如 MediaMTX 重启）会报错且不会重连：先排空再退出，录像器封装当前分段，
+    // 再由容器重启恢复推流；不排空时每路的当前分段都会丢失。
+    assembly.options().drain_on_error = true;
 
     dsf::ds::SourceRegistry sources;
     for (const auto& source : config.sources) sources.Add(source.id);

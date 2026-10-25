@@ -43,6 +43,11 @@ generated/network.compose.yaml    仅当 profile 设置 x-network-mode 时生成
 | 业务服务 | `extends: {file: framework/compose/defaults.yaml, service: dsf-service}` |
 | `redis`、`mediamtx` | 基础设施单元，可删除；依赖它们的服务使用 `required: false` |
 
+基础设施单元的访问控制：
+
+- `redis` 只在 Compose 网络内访问。现场参数 `REDIS_PASSWORD` 非空时设为它的口令（经标准输入传给 `redis-server`，不出现在进程参数中），各服务用同一个口令连接；为空时不设口令。profile 可用 `REDIS_EXTRA_ARGS` 追加 `redis-server` 参数。
+- `mediamtx` 的配置由 `services/mediamtx/templates/mediamtx/mediamtx.yaml` 渲染到 `generated/mediamtx/`。观看对现场网络开放、不需要口令：RTSP `rtsp://<主机>:8554/<路径>`，浏览器 `http://<主机>:8889/<路径>`（WebRTC，媒体走 8189/udp）。`MEDIAMTX_HOST` 是浏览器连接媒体端口用的宿主地址或主机名，默认 `127.0.0.1` 只能在本机查看。推流必须以 `publisher` 与 `MEDIAMTX_PUBLISH_PASSWORD` 登录，防止网络中任何人替换相机画面或应用输出；口令只能由字母、数字与 `!$()*+.;<=>[]^_-@#&` 组成（MediaMTX 的限制，example-app 的 `--check-config` 在预检中检查），为空时 `publisher` 用任意口令都能推流，只适合开发环境。模拟相机推流用 `MEDIAMTX_PUBLISH_PASSWORD=<口令> tools/push_sample_video.sh <视频>`。
+
 公共定义 `dsf-service`：`image: ${BASE_IMAGE}`、渲染用户的 UID/GID、`restart: unless-stopped`、预检标签 `io.deepstream.config-check: "true"`、挂载点环境变量、`PYTHONPATH`、`DSF_READY_FILE`、只读载荷卷与配置目录、可写数据目录、`/etc/localtime`、就绪健康检查（就绪文件 30 秒内更新过）、等待播种完成、日志轮转。注意 `extends` 文件中的相对路径以该文件所在目录为基准，单元 compose.yaml 中的相对路径以项目根为基准。
 
 固定挂载点：
@@ -149,8 +154,8 @@ profile 中写平台差异：`dgpu-ds71`、`dgpu-ds80` 为 x86_64 独立显卡�
 
 `jetson-ds71-host` 用 `x-network-mode: host` 让全部服务使用宿主网络，并处理随之而来的差异：
 
-- 服务名不再解析：`REDIS_HOST`、`RTSP_URL` 与 `rtsp_out.url` 改为 `127.0.0.1`。改成远端 Redis 或真实相机时照常填写现场参数。
-- 监听直接暴露到现场网络：Redis 没有口令，只绑定 `127.0.0.1`；MediaMTX 只保留 RTSP（8554/tcp、8000-8001/udp）。`ports` 映射在 host 网络下不生效，也不再受 Docker 端口发布绕过 ufw 的影响，改由宿主防火墙控制。
+- 服务名不再解析：`REDIS_HOST`、`RTSP_URL` 与 `rtsp_out.url` 改为 `127.0.0.1`（输出地址仍带用户名 `publisher@`）。改成远端 Redis 或真实相机时照常填写现场参数。
+- 监听直接暴露到现场网络：Redis 默认没有口令，只绑定 `127.0.0.1`（`REDIS_EXTRA_ARGS`）；MediaMTX 只保留 RTSP（8554/tcp、8000-8001/udp），推流仍需口令。`ports` 映射在 host 网络下不生效，也不再受 Docker 端口发布绕过 ufw 的影响，改由宿主防火墙控制。
 - 端口与宿主共享：同一台机器不能再运行第二套实例，宿主上已有的 6379、8554 会冲突。
 - RTSP over UDP、组播与 ONVIF 发现在 host 网络下可用。
 

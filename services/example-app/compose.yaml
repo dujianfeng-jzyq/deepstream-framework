@@ -10,7 +10,8 @@ services:
     depends_on:  # 与公共定义中的依赖合并
       model-engine-builder:
         condition: service_completed_successfully
-      # 消息与 RTSP 输出都会自行重连；删除对应单元时依赖自动失效。
+      # Redis 断开时发布器自行重连；RTSP 输出断开时应用排空后退出，由重启策略恢复推流。
+      # 删除对应单元时依赖自动失效。
       redis:
         condition: service_started
         required: false

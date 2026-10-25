@@ -27,6 +27,7 @@ struct RecordingConfig {
 struct RtspOutConfig {
   bool enabled = false;
   std::string url;
+  std::string password;  // 单独配置，推流时写进 url 的用户名之后（见 PublishUrl），日志中打码
   dsf::ds::TilerSpec tiler;  // 多路时拼接成一路输出
   dsf::config::Properties properties;  // 透传给 rtspclientsink
 };
@@ -61,6 +62,11 @@ struct Config {
 
 // 读取并校验跨字段规则；失败抛 dsf::config::Error。
 Config Load(dsf::config::Reader& root);
+
+// 推流地址：口令按百分号编码写在用户名之后（GStreamer 解析地址时解码，口令可含 @、# 等字符）。
+// 口令为空时也写出 "user:"：MediaMTX 的推流用户口令为空时接受任意口令，但只认带凭据的客户端。
+// 地址没有用户名或已含口令时，口令为空原样返回，否则抛 std::invalid_argument。
+std::string PublishUrl(const std::string& url, const std::string& password);
 
 }  // namespace example_app
 

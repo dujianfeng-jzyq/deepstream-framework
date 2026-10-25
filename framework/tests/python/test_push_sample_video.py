@@ -13,6 +13,7 @@ SCRIPT = ROOT / "tools/push_sample_video.sh"
 
 FAKE_FFMPEG = """#!/usr/bin/env bash
 echo "$$" >> "$FAKE_LOG"
+printf '%s\n' "$@" > "$FAKE_LOG.args"
 if [[ -n "${FAKE_EXIT_QUICKLY:-}" ]]; then exit 1; fi
 trap '' INT  # 模拟忽略 SIGINT 的编码器，必须由脚本 TERM/KILL 回收
 while true; do sleep 0.1; done
@@ -66,6 +67,16 @@ class PushSampleVideoTest(unittest.TestCase):
             process.send_signal(signum)
             self.assertEqual(process.wait(timeout=10), code)
             self.wait_for(lambda: not self.alive(self.pids()[0]))
+
+    def test_default_url_carries_the_encoded_publish_password(self):
+        process = self.start(MEDIAMTX_PUBLISH_PASSWORD="p$w#x@&")
+        args = Path(f"{self.log}.args")
+        self.wait_for(args.exists)
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=10)
+        self.assertIn("rtsp://publisher:p%24w%23x%40%26@127.0.0.1:8554/camera0", args.read_text().split())
+        self.assertIn("rtsp://publisher:***@127.0.0.1:8554/camera0", output)
+        self.assertNotIn("p%24w", output)
 
     def test_reconnects_after_the_stream_ends(self):
         process = self.start(FAKE_EXIT_QUICKLY="1")

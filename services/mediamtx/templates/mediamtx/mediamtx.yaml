@@ -1,0 +1,30 @@
+# MediaMTX 配置模板，渲染到 generated/mediamtx/mediamtx.yaml 并挂载为 /mediamtx.yml；
+# 未写出的键取 MediaMTX 的默认值，profile 仍可用 MTX_* 环境变量覆盖单个键。
+#
+# 观看（RTSP、WebRTC）对现场网络开放、不需要口令；推流必须以 publisher 登录，
+# 防止网络中任何人替换相机画面或应用输出。口令为空时 publisher 用任意口令都能推流（开发环境）。
+authInternalUsers:
+  - user: any
+    ips: []
+    permissions:
+      - action: read
+      - action: playback
+  - user: publisher
+    pass: ${MEDIAMTX_PUBLISH_PASSWORD}
+    ips: []
+    permissions:
+      - action: publish
+  # API、指标与 pprof 只允许容器内本机访问（MediaMTX 默认）。
+  - user: any
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+      - action: metrics
+      - action: pprof
+
+# 浏览器经这个地址连接 WebRTC 媒体端口（8189/udp）；容器内的网卡地址在宿主之外不可达。
+webrtcAdditionalHosts: ["${MEDIAMTX_HOST}"]
+
+# 接受任意路径（相机与应用输出按名称推流）。
+paths:
+  all_others: {}

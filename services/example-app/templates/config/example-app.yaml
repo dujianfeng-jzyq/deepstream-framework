@@ -78,7 +78,9 @@ recording:
 
 rtsp_out:
   enabled: true
-  url: rtsp://mediamtx:8554/${CAMERA_ID}-out
+  # 推到本工程的 MediaMTX：用户名 publisher，口令单独填写（运行时编码进地址，日志中打码）。
+  url: rtsp://publisher@mediamtx:8554/${CAMERA_ID}-out
+  password: ${MEDIAMTX_PUBLISH_PASSWORD}
   tiler:
     width: 1920
     height: 1080

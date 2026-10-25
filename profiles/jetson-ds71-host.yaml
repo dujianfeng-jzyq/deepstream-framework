@@ -11,7 +11,7 @@ x-network-mode: host
 x-app-config:
   example-app:
     rtsp_out:
-      url: rtsp://127.0.0.1:8554/${CAMERA_ID}-out
+      url: rtsp://publisher@127.0.0.1:8554/${CAMERA_ID}-out
 services:
   example-app:
     runtime: nvidia
@@ -19,10 +19,11 @@ services:
   model-engine-builder:
     runtime: nvidia
     group_add: [video]
-  # host 网络下监听会直接暴露到现场网络：Redis 没有口令，只绑定回环地址。
+  # host 网络下监听会直接暴露到现场网络：Redis 默认没有口令，只绑定回环地址。
   redis:
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--bind", "127.0.0.1"]
-  # 只保留 RTSP（8554/tcp 与 8000-8001/udp）；ports 映射在 host 网络下不再生效。
+    environment:
+      REDIS_EXTRA_ARGS: --bind 127.0.0.1
+  # 只保留 RTSP（8554/tcp 与 8000-8001/udp）；ports 映射在 host 网络下不再生效。推流仍需口令。
   mediamtx:
     environment:
       MTX_RTMP: "no"

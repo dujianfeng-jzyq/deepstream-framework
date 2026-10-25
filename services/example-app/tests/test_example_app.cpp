@@ -121,6 +121,29 @@ TEST(image_encoding_adds_a_queue_before_the_tap) {
   CHECK(graph.find("meta_queue -> meta") != std::string::npos);
 }
 
+TEST(publish_url_encodes_the_password_after_the_user) {
+  using example_app::PublishUrl;
+  CHECK_EQ(PublishUrl("rtsp://publisher@m:8554/a", "p$w#x@&"),
+           std::string("rtsp://publisher:p%24w%23x%40%26@m:8554/a"));
+  // 口令为空时也带上 "user:"：MediaMTX 只认带凭据的推流客户端。
+  CHECK_EQ(PublishUrl("rtsp://publisher@m:8554/a", ""), std::string("rtsp://publisher:@m:8554/a"));
+  CHECK_EQ(PublishUrl("rtsp://m:8554/a", ""), std::string("rtsp://m:8554/a"));
+  CHECK_EQ(PublishUrl("rtsp://u:p@m/a", ""), std::string("rtsp://u:p@m/a"));
+  CHECK_THROWS(PublishUrl("rtsp://m:8554/a@b", "x"), "has no user name");
+  CHECK_THROWS(PublishUrl("rtsp://u:p@m/a", "x"), "already contains a password");
+}
+
+TEST(rtsp_output_password_is_checked_and_hidden) {
+  const std::string base = Template();
+  const auto config = Load(Replace(base, "  password: x\n  tiler:", "  password: \"a$b\"\n  tiler:"));
+  CHECK_EQ(config.rtsp_out.password, std::string("a$b"));
+  CHECK(Describe(config).find("a%24b") == std::string::npos);  // location 整体打码
+  CHECK_THROWS(Load(Replace(base, "  password: x\n  tiler:", "  password: \"a,b\"\n  tiler:")),
+               "rtsp_out.password: MediaMTX accepts only");
+  CHECK_THROWS(Load(Replace(base, "url: rtsp://publisher@mediamtx", "url: rtsp://mediamtx")),
+               "rtsp_out.password: is set but the url has no user name");
+}
+
 TEST(cross_field_rules) {
   const std::string base = Template();
   CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",
@@ -130,6 +153,14 @@ TEST(cross_field_rules) {
                                   "  osd: false\n\nrtsp_out:\n  enabled: false");
   no_output = Replace(no_output, "redis:\n  enabled: true", "redis:\n  enabled: false");
   CHECK_THROWS(Load(no_output), "enable at least one output");
+  // 没有推理时 Redis 收不到检测消息，不算输出。
+  std::string redis_only = Replace(base, "  osd: true\n\nrtsp_out:\n  enabled: true",
+                                   "  osd: false\n\nrtsp_out:\n  enabled: false");
+  redis_only = Replace(redis_only, "tracker:\n  enabled: true", "tracker:\n  enabled: false");
+  CHECK(Load(redis_only).redis.enabled);
+  CHECK_THROWS(Load(Replace(redis_only, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",
+                            "inference: []")),
+               "or redis with at least one inference entry");
   CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");
   // 只替换保留策略的数值，不依赖模板中的具体值（现场可能为验证而调小）。
   const std::regex retention(R"(    max_files: \d+\n    keep_files: \d+\n    min_free_mb: \d+)");

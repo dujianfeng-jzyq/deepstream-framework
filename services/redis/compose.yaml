@@ -1,8 +1,23 @@
 # 消息总线。Stream 是传输而不是存储：关闭 RDB/AOF 持久化。只在 Compose 网络内访问。
+# 口令来自现场参数 REDIS_PASSWORD（为空不设口令），经标准输入作为配置传给 redis-server，
+# 不出现在进程参数中；docker-entrypoint.sh 照常切换到 redis 用户。
+# REDIS_EXTRA_ARGS 是追加的 redis-server 参数（按空白拆分），供 profile 使用。
 services:
   redis:
     image: ${REDIS_IMAGE}
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_EXTRA_ARGS: ""
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        password=$$(printf '%s' "$$REDIS_PASSWORD" | sed 's/[\\"]/\\&/g')
+        unset REDIS_PASSWORD
+        exec docker-entrypoint.sh redis-server - --save '' --appendonly no $$REDIS_EXTRA_ARGS <<EOF
+        requirepass "$$password"
+        EOF
     volumes:
       - /etc/localtime:/etc/localtime:ro

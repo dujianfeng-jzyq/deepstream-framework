@@ -41,6 +41,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
   tail = ds::AddMetaTap(graph, tail, kMetaTap, config.redis.image);
 
   const bool rtsp = config.rtsp_out.enabled;
+  const std::string rtsp_url = rtsp ? PublishUrl(config.rtsp_out.url, config.rtsp_out.password) : "";
   const bool osd_recording = config.recording.osd;
   if (!rtsp && !osd_recording) {
     ds::AddFakeSink(graph, tail, "sink");  // 只发消息时不编码
@@ -52,11 +53,11 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
     Element encoded = ds::AddEncoder(graph, tail, config.encoder, "enc");
     if (rtsp && osd_recording) {
       Element tee = graph.Tee(encoded, "enc_tee");
-      ds::AddRtspOut(graph, graph.Branch(tee), codec, config.rtsp_out.url, "rtsp_out",
+      ds::AddRtspOut(graph, graph.Branch(tee), codec, rtsp_url, "rtsp_out",
                      config.rtsp_out.properties);
       record(graph.Branch(tee), 0, "osd");
     } else if (rtsp) {
-      ds::AddRtspOut(graph, encoded, codec, config.rtsp_out.url, "rtsp_out", config.rtsp_out.properties);
+      ds::AddRtspOut(graph, encoded, codec, rtsp_url, "rtsp_out", config.rtsp_out.properties);
     } else {
       record(encoded, 0, "osd");
     }
@@ -73,7 +74,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
   if (rtsp) {
     Element tiled = ds::AddTiler(graph, rtsp_input, config.rtsp_out.tiler, count);
     ds::AddRtspOut(graph, ds::AddEncoder(graph, tiled, config.encoder, "rtsp_enc"), codec,
-                   config.rtsp_out.url, "rtsp_out", config.rtsp_out.properties);
+                   rtsp_url, "rtsp_out", config.rtsp_out.properties);
   }
   if (osd_recording) {
     Element demux = ds::AddDemux(graph, record_input);
