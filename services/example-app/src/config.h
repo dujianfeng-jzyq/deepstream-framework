@@ -20,6 +20,7 @@ struct RecordingConfig {
   int segment_seconds = 60;
   bool raw = false;  // 每路源在推理前的画面
   bool osd = true;   // 推理、跟踪、画框之后的画面
+  int split_on_gap_ms = 2000;  // 输入断流超过该时长后恢复时开始新分段，0 关闭（RecorderOptions::split_on_gap）
   dsf::config::Properties properties;  // 透传给 splitmuxsink
   dsf::record::Retention retention;    // 每个录像器（每路源的每个分支）独立计数
 };

@@ -226,6 +226,9 @@ void SegmentRecorder::MarkDetected() {
 
 void SegmentRecorder::Require(gst::Requirements& requirements) const {
   requirements.Signal("splitmuxsink", "format-location", options_.element);
+  if (options_.split_on_gap.count() > 0) {
+    requirements.Signal("splitmuxsink", "split-at-running-time", options_.element);
+  }
 }
 
 void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
@@ -241,11 +244,73 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   Prune();
   handler_ = g_signal_connect(sink_, "format-location", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
                               this);
+  if (options_.split_on_gap.count() > 0) {
+    input_ = gst_element_get_static_pad(sink_, "video");  // AddSegmentSink 请求的 pad
+    if (input_ == nullptr) {
+      throw std::runtime_error("recording element '" + options_.element + "' has no video pad");
+    }
+    probe_ = gst_pad_add_probe(input_, GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput, this, nullptr);
+  }
+}
+
+GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self) {
+  auto* recorder = static_cast<SegmentRecorder*>(self);
+  GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+  const GstClockTime pts = GST_BUFFER_PTS_IS_VALID(buffer) ? GST_BUFFER_PTS(buffer) : GST_BUFFER_DTS(buffer);
+  if (!GST_CLOCK_TIME_IS_VALID(pts)) return GST_PAD_PROBE_OK;
+  const GstClockTime last = recorder->last_input_;
+  const GstClockTime last_duration = recorder->last_duration_;
+  recorder->last_input_ = pts;
+  recorder->last_duration_ = GST_BUFFER_DURATION(buffer);
+  const bool keyframe = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+  const auto gap =
+      static_cast<GstClockTime>(std::chrono::nanoseconds(recorder->options_.split_on_gap).count());
+  if (!GST_CLOCK_TIME_IS_VALID(last) || pts <= last || pts - last <= gap) {
+    if (!recorder->awaiting_keyframe_) return GST_PAD_PROBE_OK;
+    // 断流后、第一个关键帧之前的帧：留在旧分段会把断流带进去，新分段又不能从它们开始。
+    if (!keyframe) {
+      ++recorder->skipped_;
+      return GST_PAD_PROBE_DROP;
+    }
+    spdlog::info("{}: dropped {} frame(s) before the first keyframe after the gap",
+                 recorder->options_.element, recorder->skipped_);
+    recorder->awaiting_keyframe_ = false;
+    return GST_PAD_PROBE_OK;
+  }
+  GstClockTime running = pts;
+  GstClockTime last_end = last + (GST_CLOCK_TIME_IS_VALID(last_duration) ? last_duration : 0);
+  if (GstEvent* event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0)) {
+    const GstSegment* segment = nullptr;
+    gst_event_parse_segment(event, &segment);
+    running = gst_segment_to_running_time(segment, GST_FORMAT_TIME, pts);
+    last_end = gst_segment_to_running_time(segment, GST_FORMAT_TIME, last_end);
+    gst_event_unref(event);
+  }
+  // 这一帧还没有进入 splitmuxsink：新分段从 running-time 不早于它的第一个关键帧开始，
+  // 断流前的帧（包括正在收集的 GOP）全部留在当前分段。
+  g_signal_emit_by_name(recorder->sink_, "split-at-running-time", static_cast<guint64>(running));
+  {
+    std::lock_guard<std::mutex> lock(recorder->mutex_);
+    ++recorder->gap_splits_;
+    if (GST_CLOCK_TIME_IS_VALID(last_end)) recorder->gap_ends_.push_back(last_end);
+  }
+  spdlog::info("{}: input resumed after {:.1f} s; starting a new segment", recorder->options_.element,
+               static_cast<double>(pts - last) / GST_SECOND);
+  if (keyframe) return GST_PAD_PROBE_OK;
+  recorder->awaiting_keyframe_ = true;
+  recorder->skipped_ = 1;
+  return GST_PAD_PROBE_DROP;
 }
 
 void SegmentRecorder::OnReleased() {
   fallback_.Cancel();
   pipeline_ = nullptr;
+  if (input_ != nullptr) {
+    if (probe_ != 0) gst_pad_remove_probe(input_, probe_);
+    probe_ = 0;
+    gst_object_unref(input_);
+    input_ = nullptr;
+  }
   if (sink_ == nullptr) return;
   if (handler_ != 0) g_signal_handler_disconnect(sink_, handler_);
   handler_ = 0;
@@ -280,11 +345,34 @@ void SegmentRecorder::OnMessage(GstMessage* message) {
     return;
   }
   const GstStructure* structure = gst_message_get_structure(message);
-  if (structure == nullptr || !gst_structure_has_name(structure, "splitmuxsink-fragment-closed")) {
-    return;
-  }
+  if (structure == nullptr) return;
   const gchar* location = gst_structure_get_string(structure, "location");
   if (location == nullptr) return;
+  GstClockTime running = GST_CLOCK_TIME_NONE;
+  gst_structure_get_clock_time(structure, "running-time", &running);
+  if (gst_structure_has_name(structure, "splitmuxsink-fragment-opened")) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    opened_at_[location] = running;
+    return;
+  }
+  if (!gst_structure_has_name(structure, "splitmuxsink-fragment-closed")) return;
+  GstClockTime opened = GST_CLOCK_TIME_NONE;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (const auto it = opened_at_.find(location); it != opened_at_.end()) {
+      opened = it->second;
+      opened_at_.erase(it);
+    }
+    // 在本分段之内断流：分段的画面到断流前最后一帧为止。更早的记录属于已经收尾的分段，一并丢弃。
+    if (GST_CLOCK_TIME_IS_VALID(running)) {
+      for (const GstClockTime end : gap_ends_) {
+        if (GST_CLOCK_TIME_IS_VALID(opened) && end >= opened && end < running) running = end;
+      }
+      gap_ends_.erase(std::remove_if(gap_ends_.begin(), gap_ends_.end(),
+                                     [&](GstClockTime end) { return end <= running; }),
+                      gap_ends_.end());
+    }
+  }
 
   Segment segment;
   {
@@ -302,7 +390,11 @@ void SegmentRecorder::OnMessage(GstMessage* message) {
     return;
   }
   spdlog::info("recording finished: {} detected={}", segment.final_path, segment.detected);
-  if (events_.finished) events_.finished(segment, ds::WallMilliseconds());
+  std::uint64_t end_ms = ds::WallMilliseconds();
+  if (GST_CLOCK_TIME_IS_VALID(opened) && GST_CLOCK_TIME_IS_VALID(running) && running >= opened) {
+    end_ms = segment.start_ms + (running - opened) / GST_MSECOND;
+  }
+  if (events_.finished) events_.finished(segment, end_ms);
   Prune();
 }
 
@@ -355,6 +447,7 @@ void SegmentRecorder::Report(gst::Stats& stats) const {
   std::lock_guard<std::mutex> lock(mutex_);
   stats.Add(options_.element + "_segments", tracker_.closed_count());
   stats.Add(options_.element + "_pruned", pruned_);
+  if (gap_splits_ > 0) stats.Add(options_.element + "_gap_splits", gap_splits_);
   if (failures_ > 0) stats.Add(options_.element + "_failures", failures_);
 }
 

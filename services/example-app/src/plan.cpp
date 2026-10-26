@@ -19,6 +19,10 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
                                 config.recording.properties);
     plan.recorders.push_back({source, branch, name});
   };
+  const auto encode = [&](const dsf::gst::Endpoint& input, const std::string& name) {
+    plan.encoders.push_back(name);
+    return ds::AddEncoder(graph, input, config.encoder, name);
+  };
 
   Element mux = ds::AddMux(graph, config.mux, count, config.live());
   for (int i = 0; i < count; ++i) {
@@ -30,7 +34,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
     }
     // raw 录像在规范化之后、推理之前分出，与推理链互不影响。
     Element tee = graph.Tee(source, prefix + "_tee");
-    record(ds::AddEncoder(graph, graph.Branch(tee), config.encoder, prefix + "_raw_enc"), i, "raw");
+    record(encode(graph.Branch(tee), prefix + "_raw_enc"), i, "raw");
     ds::LinkToMux(graph, graph.Branch(tee), mux, i);
   }
 
@@ -50,7 +54,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
   if (config.osd.enabled) tail = ds::AddOsd(graph, tail, config.osd);
 
   if (count == 1) {
-    Element encoded = ds::AddEncoder(graph, tail, config.encoder, "enc");
+    Element encoded = encode(tail, "enc");
     if (rtsp && osd_recording) {
       Element tee = graph.Tee(encoded, "enc_tee");
       ds::AddRtspOut(graph, graph.Branch(tee), codec, rtsp_url, "rtsp_out",
@@ -73,7 +77,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
   }
   if (rtsp) {
     Element tiled = ds::AddTiler(graph, rtsp_input, config.rtsp_out.tiler, count);
-    ds::AddRtspOut(graph, ds::AddEncoder(graph, tiled, config.encoder, "rtsp_enc"), codec,
+    ds::AddRtspOut(graph, encode(tiled, "rtsp_enc"), codec,
                    rtsp_url, "rtsp_out", config.rtsp_out.properties);
   }
   if (osd_recording) {
@@ -82,7 +86,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
       const std::string prefix = "out" + std::to_string(i);
       Element queue = graph.Add("queue", prefix + "_queue");
       graph.Link(demux.Pad("src_" + std::to_string(i)), queue);
-      record(ds::AddEncoder(graph, queue, config.encoder, prefix + "_enc"), i, "osd");
+      record(encode(queue, prefix + "_enc"), i, "osd");
     }
   }
   return plan;

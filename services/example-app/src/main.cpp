@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "dsf/app/app.h"
+#include "dsf/app/components.h"
 #include "dsf/ds/message.h"
 #include "dsf/ds/meta_tap.h"
 #include "dsf/record/segment_recorder.h"
@@ -32,6 +33,11 @@ struct ExampleApp {
     // 再由容器重启恢复推流；不排空时每路的当前分段都会丢失。
     assembly.options().drain_on_error = true;
     for (const auto& warning : example_app::Warnings(config)) spdlog::warn("{}", warning);
+    // 断流恢复后的第一帧编成关键帧：录像在断流处干净地切分，RTSP 观看端立即恢复画面。
+    if (config.encoder.keyframe_on_gap_ms > 0) {
+      const std::chrono::milliseconds gap(config.encoder.keyframe_on_gap_ms);
+      for (const auto& encoder : plan.encoders) assembly.Add<dsf::app::KeyframeOnGap>(encoder, gap);
+    }
 
     dsf::ds::SourceRegistry sources;
     for (const auto& source : config.sources) sources.Add(source.id);
@@ -77,6 +83,7 @@ struct ExampleApp {
       };
       dsf::record::RecorderOptions options{config.recording.root, source_id, branch, slot.element};
       options.retention = config.recording.retention;
+      options.split_on_gap = std::chrono::milliseconds(config.recording.split_on_gap_ms);
       auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(options, std::move(events));
       by_source[static_cast<std::size_t>(slot.source)].push_back(&recorder);
     }

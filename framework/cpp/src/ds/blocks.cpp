@@ -363,6 +363,7 @@ EncoderSpec EncoderSpec::Read(Reader reader) {
   spec.codec = reader.Get<std::string>("codec", "h264", config::OneOf({"h264", "h265"}));
   spec.bitrate = reader.Get("bitrate", 4000000, config::AtLeast(1));
   spec.iframe_interval = reader.Get("iframe_interval", 30, config::AtLeast(1));
+  spec.keyframe_on_gap_ms = reader.Get("keyframe_on_gap_ms", 1000, config::AtLeast(0));
   spec.properties = reader.Props("properties");
   return spec;
 }

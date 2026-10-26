@@ -95,13 +95,20 @@ struct RecorderOptions {
   // 必须小于管线的 stop_timeout，否则兜底来不及生效。0 表示不兜底。
   std::chrono::milliseconds eos_fallback{3000};
   Retention retention{};  // 默认不清理
+  // 录像入口相邻两帧的时间戳相差超过这个值（直播源断流后恢复）时，从恢复后的第一个关键帧开始
+  // 新分段：断流前的分段只含断流前的画面，不把断流时长计入分段，也不在文件中留下长时间的静止。
+  // 恢复后、第一个关键帧之前的帧不写入录像。编码器在断流处给出关键帧（app::KeyframeOnGap）时
+  // 不丢或只丢一帧（NVIDIA 编码器晚一帧生效），否则最多丢一个关键帧间隔。0 表示不切分。
+  std::chrono::milliseconds split_on_gap{2000};
 };
 
 class SegmentRecorder : public gst::Component {
  public:
   struct Events {
-    std::function<void(const Segment&)> started;                       // 媒体线程
-    std::function<void(const Segment&, std::uint64_t end_ms)> finished;  // 控制线程
+    std::function<void(const Segment&)> started;  // 媒体线程
+    // end_ms = start_ms + 分段内画面的时长（splitmuxsink 报告的起止 running-time 之差），
+    // 不是收尾时的墙钟：分段可能在断流恢复后才收尾。得不到时长时退回收尾时的墙钟。控制线程。
+    std::function<void(const Segment&, std::uint64_t end_ms)> finished;
   };
 
   // retention.max_files 非 0 且小于 keep_files 时抛 std::invalid_argument。
@@ -126,6 +133,7 @@ class SegmentRecorder : public gst::Component {
 
  private:
   static gchar* OnFormatLocation(GstElement* sink, guint fragment, gpointer self);
+  static GstPadProbeReturn OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   void Prune();  // 控制线程
 
   RecorderOptions options_;
@@ -135,8 +143,19 @@ class SegmentRecorder : public gst::Component {
   SegmentTracker tracker_;
   std::uint64_t failures_ = 0;
   std::uint64_t pruned_ = 0;
+  std::uint64_t gap_splits_ = 0;
+  std::map<std::string, GstClockTime> opened_at_;  // 临时路径 → 分段起点的 running-time
+  // 断流前最后一帧结束时的 running-time。fragment-closed 报告的是下一分段的起点（含断流），
+  // 落在分段起止之间的断流以这里为分段的结束。
+  std::vector<GstClockTime> gap_ends_;
   GstElement* sink_ = nullptr;
   gulong handler_ = 0;
+  GstPad* input_ = nullptr;
+  gulong probe_ = 0;
+  GstClockTime last_input_ = GST_CLOCK_TIME_NONE;  // 以下四项只在流线程访问
+  GstClockTime last_duration_ = GST_CLOCK_TIME_NONE;
+  bool awaiting_keyframe_ = false;  // 断流后丢弃关键帧之前的帧
+  std::uint64_t skipped_ = 0;
   gst::Pipeline* pipeline_ = nullptr;  // OnCreated 到 OnReleased 之间有效
   gst::Timer fallback_;
 };

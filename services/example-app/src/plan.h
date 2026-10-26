@@ -28,6 +28,7 @@ struct RecorderSlot {
 
 struct Plan {
   std::vector<RecorderSlot> recorders;
+  std::vector<std::string> encoders;  // 编码器名，供登记断流后的关键帧请求
 };
 
 Plan BuildGraph(const Config& config, dsf::gst::Graph& graph);

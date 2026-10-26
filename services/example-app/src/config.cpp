@@ -65,6 +65,7 @@ Config Load(Reader& root) {
   config.recording.segment_seconds = recording.Get("segment_seconds", 60, AtLeast(1));
   config.recording.raw = recording.Get("raw", false);
   config.recording.osd = recording.Get("osd", true);
+  config.recording.split_on_gap_ms = recording.Get("split_on_gap_ms", 2000, AtLeast(0));
   config.recording.properties = recording.Props("properties");
   Reader retention = recording.Section("retention");
   config.recording.retention.max_files =

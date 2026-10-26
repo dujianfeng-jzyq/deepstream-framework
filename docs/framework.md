@@ -99,7 +99,7 @@ sometimes pad（nvurisrcbin、decodebin）在 pad 出现时自动连接。属性
 | `AddMetaTap` | `ImageSpec::Read` | 元数据采集点（identity）；启用图片编码时前面加 queue |
 | `AddOsd` | `OsdSpec::Read` | nvdsosd（前后各一次格式转换） |
 | `AddTiler` / `AddDemux` | `TilerSpec::Read` | 多路拼接 / 按源拆分（`demux.Pad("src_i")`） |
-| `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；编码器属性在 Jetson 与 dGPU 不同，用 `properties` |
+| `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；编码器属性在 Jetson 与 dGPU 不同，用 `properties`；`keyframe_on_gap_ms`（默认 1000）供应用登记 `app::KeyframeOnGap` |
 | `AddRtspOut` / `AddFakeSink` | — | rtspclientsink / fakesink |
 | `record::AddSegmentSink` | — | parser + splitmuxsink(mp4mux) |
 
@@ -148,7 +148,7 @@ class Component {
 - 启动：`assembly.options().startup_timeout` 默认 30 秒，设为 0 禁用启动超时，负数视为启动失败。异步切换状态的 sink 可能等待首帧，使按需产帧的管线长期无法进入 PLAYING；是否等待取决于元件及其配置。状态切换返回失败或总线报告错误时仍以 `start-error` / `run-error` 结束，`OnPlaying` 只在真正进入 PLAYING 后调用。计时在 `set_state(PLAYING)` 返回异步状态切换结果后开始，不覆盖同步初始化和阻塞调用；定时任务须等主循环运行才能执行。
 - 结果原因：`eos`、`stopped`（成功）；`forced`、`build-error`、`start-error`、`run-error`、`startup-timeout`（失败）。
 
-标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`，两者在 `OnCreated` 注册定时器，由主循环按各自周期调度，不等 PLAYING。指定进度指标时，就绪文件 `$DSF_READY_FILE` 只在处理计数增长时更新：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时只要主循环在运行就每秒更新，按需产帧的源配合 `startup_timeout = 0` 使用，静止期间仍保持就绪。组件的 `Report()` 须能在进入 PLAYING 前报告统计。
+标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`（`KeyframeOnGap` 由应用按编码器登记，见 §8），两者在 `OnCreated` 注册定时器，由主循环按各自周期调度，不等 PLAYING。指定进度指标时，就绪文件 `$DSF_READY_FILE` 只在处理计数增长时更新：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时只要主循环在运行就每秒更新，按需产帧的源配合 `startup_timeout = 0` 使用，静止期间仍保持就绪。组件的 `Report()` 须能在进入 PLAYING 前报告统计。
 
 ## 6. 元数据（需要 SDK）
 
@@ -182,7 +182,7 @@ tap.SetImageFilter([](const dsf::ds::FrameRecord& f) { return !f.objects.empty()
 |---|---|
 | `detection` | `frame_num` `pts_ns` `ntp_ms`(有值时) `frame_width` `frame_height` `objects[]`：`class_id` `label` `confidence`(三位小数) `bbox{x,y,width,height}`（裁剪到帧内后取整，零面积丢弃）`track_id`(被跟踪时) `classes[]`(有值时) `extra`(有值时)；帧级 `extra`；`image{format,width,height,size}`(帧带图片时，只是描述) |
 | `recording_started` | `branch` `segment_id` `start_ms` |
-| `recording_finished` | 另加 `end_ms` `duration_ms`（主机墙钟差）`detected` `path`（已封装完成、可直接读取的文件） |
+| `recording_finished` | 另加 `end_ms` `duration_ms`（`start_ms` 加分段内画面的时长，不含断流；得不到时长时为收尾时的墙钟）`detected` `path`（已封装完成、可直接读取的文件） |
 
 发布：
 
@@ -210,13 +210,17 @@ jpeg = fields.get(b"image")        # bytes；该帧没有图片时为 None
 auto sink = dsf::record::AddSegmentSink(graph, encoded, "h264", 60, "rec_0");
 dsf::record::RecorderOptions options{root, source_id, "osd", "rec_0"};
 options.retention = {1440, 60, 5ull << 30};  // max_files keep_files min_free_bytes；默认全 0 不清理
+options.split_on_gap = std::chrono::milliseconds(2000);       // 默认值；0 关闭
 auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(options, events);
+assembly.Add<dsf::app::KeyframeOnGap>("enc_0", std::chrono::milliseconds(1000));  // 录像所用的编码器
 recorder.MarkDetected();   // 任意线程：当前分段出现过目标
 ```
 
 文件为 `<root>/<source_id>/<branch>/<source_id>-<branch>-<起始本地时间>-<序号>[-detected].mp4`，起始本地时间形如 `20261005T163012.345`（本地时间与毫秒，不带时区标记，时区取自 `/etc/localtime`），程序应使用事件中的 `start_ms` 与 `path`，不解析文件名。写入期间是 `.mp4.tmp`，收到 `splitmuxsink-fragment-closed` 并改名成功后才触发 `finished`；分段内调用过 `MarkDetected()` 时最终文件名带 `-detected`（`segment_id` 不变，`path` 为实际路径）。启动时删除本目录遗留的 `.tmp`。
 
 保留策略 `RecorderOptions::retention` 按录像器（每个源的每个分支）独立计数，在启动时与每个分段收尾后执行，均在控制线程：已收尾分段按修改时间从新到旧，最新 `keep_files` 个始终保留；总数超过 `max_files` 时在其余分段中先删最旧的无目标分段，再删最旧的有目标分段；文件系统剩余空间低于 `min_free_bytes` 时按同样顺序继续删除，并可删入保护区（记 warning）。只处理符合本录像器命名的 `.mp4`，不动 `.tmp` 与其他文件。`max_files` 非 0 时须不小于 `keep_files`，否则构造时抛异常。统计 `<element>_pruned`；删除失败计入 `_failures` 并使 `Healthy()` 为 false。重启后有无目标从文件名还原。
+
+直播源断流恢复后，下一帧的时间戳比上一帧晚整个断流时长（running-time 在断流期间照常前进），splitmuxsink 会把这段时间计入分段时长，文件中留下长时间的静止画面。录像入口相邻两帧相差超过 `RecorderOptions::split_on_gap`（默认 2 秒，0 关闭）时，录像器请求 `split-at-running-time`：断流前的帧留在当前分段，新分段从恢复后第一个关键帧开始，其间的帧不写入录像（留在旧分段会把断流带进去，又不能作为新分段的开头），统计 `<element>_gap_splits`。编码器却会延续断流前的 GOP，所以还要在编码器输入上登记 `app::KeyframeOnGap`（阈值不大于 `split_on_gap`）：它在恢复后的第一帧之前请求关键帧——标准的 GstForceKeyUnit，以及 NVIDIA 编码器只认的 `nv-enc-force-idr`（dGPU 上实测晚一帧生效，录像丢一帧）——RTSP 观看端也随之立即恢复画面，统计 `<encoder>_gap_keyframes`。不登记时录像最多丢一个关键帧间隔。断流期间当前分段保持打开，恢复或停止时收尾。
 
 停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。
 

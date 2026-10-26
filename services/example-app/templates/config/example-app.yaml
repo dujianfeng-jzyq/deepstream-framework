@@ -63,11 +63,16 @@ encoder:
   codec: h264
   bitrate: 8000000
   iframe_interval: 30
+  # 输入断流超过该时长后恢复时，恢复后的第一帧编成关键帧（录像据此切分，观看端立即恢复画面）；0 关闭。
+  keyframe_on_gap_ms: 1000
   # properties: {preset-id: 1}
 
 recording:
   root: ${CONTAINER_DATA_PATH}/recordings
   segment_seconds: 60
+  # 输入断流超过该时长后恢复时开始新分段：断流前的分段只含断流前的画面，事件中的时长不含断流。
+  # 不小于 encoder.keyframe_on_gap_ms，切分才正好落在恢复后的第一帧；0 关闭。
+  split_on_gap_ms: 2000
   # 每个录像器（每路源的每个分支）独立计数。保留最新 keep_files 个分段；超过 max_files 时在其余分段中
   # 先删无目标的、再删有目标的（文件名带 -detected）。剩余空间低于 min_free_mb 时继续删，可删到最新的分段。
   # 0 表示不限制。每个分段约 segment_seconds × 码率，例如 60 s × 8 Mbps ≈ 60 MB，1440 个约 86 GB。

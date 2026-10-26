@@ -9,6 +9,7 @@
 #include <fstream>
 #include <mutex>
 
+#include "dsf/app/components.h"
 #include "dsf/gst/introspect.h"
 #include "dsf/gst/pipeline.h"
 #include "dsf/record/segment_recorder.h"
@@ -111,6 +112,33 @@ gst::Graph BufferedRecordingGraph() {
   record::AddSegmentSink(graph, queue, "h264", 60, "rec");
   return graph;
 }
+
+// 断流：从 at 起，经过 identity 的帧时间戳整体后移 shift（直播源断流恢复后 running-time 的跳变）。
+class TimestampGap : public gst::Component {
+ public:
+  TimestampGap(GstClockTime at, GstClockTime shift) : at_(at), shift_(shift) {}
+  std::string_view Name() const override { return "timestamp-gap"; }
+  void OnCreated(gst::Pipeline& pipeline, GstElement* /*bin*/) override {
+    GstPad* pad = gst_element_get_static_pad(pipeline.Element("gap"), "src");
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                      +[](GstPad*, GstPadProbeInfo* info, gpointer data) {
+                        const auto* self = static_cast<TimestampGap*>(data);
+                        GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+                        if (GST_BUFFER_PTS(buffer) < self->at_) return GST_PAD_PROBE_OK;
+                        buffer = gst_buffer_make_writable(buffer);
+                        GST_BUFFER_PTS(buffer) += self->shift_;
+                        if (GST_BUFFER_DTS_IS_VALID(buffer)) GST_BUFFER_DTS(buffer) += self->shift_;
+                        GST_PAD_PROBE_INFO_DATA(info) = buffer;
+                        return GST_PAD_PROBE_OK;
+                      },
+                      this, nullptr);
+    gst_object_unref(pad);
+  }
+
+ private:
+  GstClockTime at_;
+  GstClockTime shift_;
+};
 
 // 统计经过 identity 的帧。
 class FrameCounter : public gst::Component {
@@ -469,6 +497,80 @@ TEST(recorder_prunes_after_each_segment) {
   recorder.Report(stats);
   CHECK(stats.Text().find("rec_pruned=" + std::to_string(events.finished.size() - 1)) !=
         std::string::npos);
+}
+
+namespace {
+
+// 30 帧（1 秒），第 15 帧起时间戳后移 3 秒（断流）。key_interval 决定周期关键帧的间隔。
+gst::Graph GapGraph(int key_interval) {
+  gst::Graph graph;
+  gst::Element source = graph.Add("videotestsrc", "src").Set("num-buffers", 30);
+  gst::Element encoder = graph.Add("x264enc", "enc")
+                             .Set("key-int-max", key_interval)
+                             .Set("tune", "zerolatency")
+                             .Set("speed-preset", "ultrafast");
+  graph.Chain({source, graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"),
+               graph.Add("videoconvert"), graph.Add("identity", "gap"), encoder});
+  record::AddSegmentSink(graph, encoder, "h264", 60, "rec");
+  return graph;
+}
+
+struct GapRun {
+  std::vector<std::pair<Segment, std::uint64_t>> finished;  // 分段与 end_ms
+  std::string stats;
+};
+
+GapRun RecordAcrossGap(const fs::path& root, int key_interval, bool request_keyframe) {
+  GapRun run;
+  SegmentRecorder::Events callbacks;
+  callbacks.finished = [&](const Segment& segment, std::uint64_t end_ms) {
+    run.finished.emplace_back(segment, end_ms);
+  };
+  record::RecorderOptions options{root.string(), "cam", "osd", "rec"};
+  options.split_on_gap = std::chrono::milliseconds(1000);
+  SegmentRecorder recorder(options, callbacks);
+  TimestampGap gap(GST_SECOND / 2, 3 * GST_SECOND);
+  app::KeyframeOnGap keyframes("enc", std::chrono::milliseconds(1000));
+  gst::Pipeline pipeline("record-gap", GapGraph(key_interval));
+  pipeline.Add(gap);
+  if (request_keyframe) pipeline.Add(keyframes);
+  pipeline.Add(recorder);
+  CHECK(pipeline.Run().success);
+  CHECK(recorder.Healthy());
+  gst::Stats stats;
+  recorder.Report(stats);
+  keyframes.Report(stats);
+  run.stats = stats.Text();
+  return run;
+}
+
+}  // namespace
+
+TEST(recorder_starts_a_new_segment_where_the_input_resumes) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // GOP 足够长：只有断流处请求的关键帧能切分。
+  const GapRun run = RecordAcrossGap(dir.path, 300, true);
+  CHECK_EQ(run.finished.size(), std::size_t{2});
+  if (run.finished.size() != 2) return;
+  CHECK_EQ(FramesIn(run.finished[0].first.final_path), 15);  // 断流前的帧全部留在第一个分段
+  CHECK_EQ(FramesIn(run.finished[1].first.final_path), 15);  // 恢复后的帧一帧不丢
+  // 结束时间按分段内画面的时长计算，不含 3 秒的断流。
+  const std::uint64_t first = run.finished[0].second - run.finished[0].first.start_ms;
+  CHECK(first >= 450 && first <= 550);
+  CHECK(run.stats.find("rec_gap_splits=1") != std::string::npos);
+  CHECK(run.stats.find("enc_gap_keyframes=1") != std::string::npos);
+}
+
+TEST(recorder_drops_frames_before_the_first_keyframe_after_a_gap) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // 不请求关键帧：恢复后的第 15～19 帧是延续旧 GOP 的预测帧，新分段从第 20 帧（周期关键帧）开始。
+  const GapRun run = RecordAcrossGap(dir.path, 10, false);
+  CHECK_EQ(run.finished.size(), std::size_t{2});
+  if (run.finished.size() != 2) return;
+  CHECK_EQ(FramesIn(run.finished[0].first.final_path), 15);
+  CHECK_EQ(FramesIn(run.finished[1].first.final_path), 10);
 }
 
 TEST(recorder_finishes_last_segment_on_drain_stop) {
