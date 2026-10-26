@@ -1,9 +1,12 @@
 // dsf::publish：Redis Stream 发布器。需要本机 redis-server（缺失时 SKIP）。
 
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <hiredis/hiredis.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -31,14 +34,36 @@ std::string Which(const char* program) {
   return path;
 }
 
+// 由内核分配一个当前空闲的端口后释放：测试随后在这个端口启动服务，或确认没有服务监听。
 int FreePort() {
-  static int next = 20000 + static_cast<int>(getpid() % 20000);
-  return next++;
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  socklen_t length = sizeof(address);
+  if (fd < 0 || bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+      getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+    if (fd >= 0) close(fd);
+    throw dsf_test::Failure("cannot allocate a free port");
+  }
+  close(fd);
+  return ntohs(address.sin_port);
+}
+
+// 有界轮询，条件满足返回 true。
+template <typename Condition>
+bool WaitFor(Condition condition, std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!condition()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return true;
 }
 
 class RedisServer {
  public:
-  explicit RedisServer(const std::string& password = {}) : port_(FreePort()) {
+  explicit RedisServer(const std::string& password = {}, int port = 0) : port_(port > 0 ? port : FreePort()) {
     const std::string binary = Which("redis-server");
     if (binary.empty()) SKIP("redis-server not installed");
     std::vector<std::string> args = {binary, "--port", std::to_string(port_), "--save", "",
@@ -184,6 +209,49 @@ TEST(buffers_while_disconnected_and_drops_on_overflow) {
   CHECK_EQ(stats.published, 0u);
   CHECK_EQ(stats.dropped, 10u);  // 7 条溢出 + 3 条排空期满仍未发出
   CHECK(!publisher->connected());
+}
+
+TEST(delivers_buffered_messages_once_redis_comes_up) {
+  const int port = FreePort();  // 先启动发布器，Redis 稍后才在这个端口上线
+  RedisOptions options = Options(port);
+  options.connect_timeout_ms = 100;
+  auto publisher = MakeRedisStreamPublisher(options);
+  Channel& channel = publisher->Open({"test:late", 10, 100});
+  publisher->Start();
+  for (int i = 0; i < 3; ++i) CHECK(channel.TryPublish("m"));
+  CHECK(!publisher->connected());
+  RedisServer server({}, port);
+  // 断线期间消息留在队列中；每秒重连一次，连上后全部发出。
+  CHECK(WaitFor([&] { return channel.Stats().published == 3u; }));
+  CHECK(publisher->connected());
+  publisher->Stop();
+  CHECK_EQ(channel.Stats().dropped, 0u);
+  CHECK_EQ(server.Length("test:late"), 3LL);
+}
+
+TEST(reconnects_after_the_connection_is_lost) {
+  const int port = FreePort();
+  RedisOptions options = Options(port);
+  options.connect_timeout_ms = 100;
+  auto publisher = MakeRedisStreamPublisher(options);
+  Channel& channel = publisher->Open({"test:restart", 10, 100});
+  publisher->Start();
+  {
+    RedisServer first({}, port);
+    CHECK(channel.TryPublish("before"));
+    CHECK(WaitFor([&] { return channel.Stats().published == 1u; }));
+  }  // 服务端退出：已建立的连接失效
+  // 这条消息发往失效的连接，计为失败（至多一次，不补发）；随后的消息在重连后送达。
+  CHECK(channel.TryPublish("lost"));
+  CHECK(WaitFor([&] { return channel.Stats().failed == 1u; }));
+  CHECK(!publisher->connected());
+  RedisServer second({}, port);
+  CHECK(channel.TryPublish("after"));
+  CHECK(WaitFor([&] { return channel.Stats().published == 2u; }));
+  publisher->Stop();
+  const ChannelStats stats = channel.Stats();
+  CHECK_EQ(stats.published + stats.failed + stats.dropped, 3u);  // 每条消息都有去向
+  CHECK_EQ(second.Length("test:restart"), 1LL);
 }
 
 TEST(authenticates_with_password) {

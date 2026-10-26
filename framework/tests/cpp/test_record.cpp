@@ -370,6 +370,24 @@ TEST(prune_frees_space_even_inside_keep_files) {
   CHECK(fs::exists(segments / "notes.mp4"));
 }
 
+TEST(prune_reports_files_it_cannot_remove) {
+  if (::geteuid() == 0) SKIP("root ignores directory permissions");
+  TempDir dir;
+  const fs::path segments = dir.path / "cam/osd";
+  SegmentTracker tracker(dir.path.string(), "cam", "osd");
+  const auto names = MakeSegments(segments, "nnn");
+  fs::permissions(segments, fs::perms::owner_read | fs::perms::owner_exec);
+  record::Retention retention;
+  retention.max_files = 1;
+  const record::PruneResult result = tracker.Prune(retention);
+  fs::permissions(segments, fs::perms::owner_all);
+  CHECK_EQ(result.removed, 0);
+  CHECK_EQ(result.failed, 2);
+  CHECK_EQ(result.errors.size(), 2u);
+  CHECK(result.errors[0].find("cannot remove") != std::string::npos);
+  CHECK_EQ(Remaining(segments, names), std::string("111"));
+}
+
 TEST(recorder_rejects_keep_files_above_max_files) {
   record::RecorderOptions options{"/tmp", "cam", "osd", "rec"};
   options.retention.max_files = 2;
@@ -400,6 +418,31 @@ TEST(recorder_closes_segments_at_eos) {
     CHECK(fs::file_size(segment.final_path) > 0);
     CHECK(!fs::exists(segment.temp_path));
   }
+}
+
+TEST(recorder_reports_segments_it_cannot_finalize) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // 分段开始时在最终路径上放一个目录：收尾改名必然失败，分段不能被报告为完成。
+  std::vector<std::string> started;
+  SegmentRecorder::Events callbacks;
+  callbacks.started = [&](const Segment& segment) {
+    fs::create_directories(segment.final_path);
+    started.push_back(segment.id);
+  };
+  int finished = 0;
+  callbacks.finished = [&](const Segment&, std::uint64_t) { ++finished; };
+  SegmentRecorder recorder({dir.path.string(), "cam", "raw", "rec"}, callbacks);
+  gst::Pipeline pipeline("record-rename-fails", RecordingGraph(45, false));
+  pipeline.Add(recorder);
+  CHECK(pipeline.Run().success);  // 管线本身正常结束，失败由录像器的健康状态报告
+  CHECK(!started.empty());
+  CHECK_EQ(finished, 0);
+  CHECK_EQ(recorder.failures(), static_cast<std::uint64_t>(started.size()));
+  CHECK(!recorder.Healthy());
+  gst::Stats stats;
+  recorder.Report(stats);
+  CHECK(stats.Text().find("rec_failures=" + std::to_string(started.size())) != std::string::npos);
 }
 
 TEST(recorder_prunes_after_each_segment) {

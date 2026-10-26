@@ -245,6 +245,7 @@ TEST(drain_completes_when_eos_reaches_every_sink_and_components_are_done) {
   const Result result = pipeline.Run(options);
   CHECK(result.success);
   CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
+  CHECK(swallow.drained);  // EOS 早已到达 sink：只有等待组件收尾，结束时它才会是 true
   CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
 }
 

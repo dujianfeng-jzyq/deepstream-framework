@@ -45,9 +45,11 @@ struct SoftwareApp {
   }
 };
 
+// 每个实例一个目录：同一用例中可以同时存在多份配置。
 struct TempConfig {
   explicit TempConfig(const std::string& text) {
-    dir = fs::temp_directory_path() / ("dsf-app-" + std::to_string(::getpid()));
+    dir = fs::temp_directory_path() /
+          ("dsf-app-" + std::to_string(::getpid()) + "-" + std::to_string(counter++));
     fs::create_directories(dir);
     path = dir / "soft-app.yaml";
     std::ofstream(path) << text;
@@ -55,6 +57,7 @@ struct TempConfig {
   ~TempConfig() { fs::remove_all(dir); }
   fs::path dir;
   fs::path path;
+  static inline int counter = 0;
 };
 
 int RunApp(std::vector<std::string> args) {
@@ -259,15 +262,23 @@ TEST(stalled_progress_stops_the_pipeline_and_reports_unhealthy) {
   CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds(4));
   CHECK(!readiness.Healthy());
 
-  // 计数增长或没有设置时限时不触发。
+  // 没有设置时限，或计数在增长（运行时长超过时限）时不触发。
+  std::uint64_t progress = 0;
   ReadinessHeartbeat disabled("", [] { return std::uint64_t{0}; }, (config.dir / "ready2").string(),
                               std::chrono::milliseconds(50));
-  dsf::gst::Pipeline idle("idle", IdleLiveGraph());
-  idle.Add(disabled);
-  dsf::gst::Timer stop;
-  idle.Post([&] { stop = idle.Every(std::chrono::milliseconds(500), [&] { idle.RequestStop(); }); });
-  CHECK(idle.Run(options).success);
-  CHECK(disabled.Healthy());
+  ReadinessHeartbeat advancing("", [&progress] { return ++progress; }, (config.dir / "ready3").string(),
+                               std::chrono::milliseconds(50), std::chrono::milliseconds(300));
+  for (ReadinessHeartbeat* heartbeat : {&disabled, &advancing}) {
+    dsf::gst::Pipeline idle("idle", IdleLiveGraph());
+    idle.Add(*heartbeat);
+    dsf::gst::Timer stop;
+    idle.Post([&] { stop = idle.Every(std::chrono::milliseconds(800), [&] { idle.RequestStop(); }); });
+    const dsf::gst::Result idle_result = idle.Run(options);
+    CHECK(idle_result.success);
+    CHECK_EQ(std::string(dsf::gst::ToString(idle_result.reason)), std::string("stopped"));
+    CHECK(heartbeat->Healthy());
+  }
+  CHECK(progress > 5);  // 计数回调确实在推进
 }
 
 TEST(watchdog_section_is_read_by_the_framework) {

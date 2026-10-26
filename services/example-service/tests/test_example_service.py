@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -72,6 +73,7 @@ class ExampleServiceTest(unittest.TestCase):
         port = free_port()
         redis_process = subprocess.Popen([server, "--port", str(port), "--save", "", "--appendonly", "no"],
                                          stdout=subprocess.DEVNULL)
+        service = None
         try:
             client = redis.Redis(port=port)
             for _ in range(100):
@@ -84,28 +86,38 @@ class ExampleServiceTest(unittest.TestCase):
                               .replace("port: 6379", f"port: {port}").replace("password: x", "password: \"\""))
             service = subprocess.Popen([sys.executable, str(SERVICE)], env=self.env,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            deadline = time.time() + 10
-            while not (self.dir / "ready").exists() and time.time() < deadline:
-                time.sleep(0.1)
+            lines = []
+            reader = threading.Thread(target=lambda: [lines.append(line) for line in service.stdout], daemon=True)
+            reader.start()
+            expected = ("event: cam osd /data/a.mp4 duration_ms=5",
+                        "event: detection cam frame=3 objects=1 image=5 bytes")
+            seen = lambda: all(any(text in line for line in list(lines)) for text in expected)
+            # 服务只处理启动后写入的记录，而“启动”的时刻从外面看不到：重复写入直到两条都被处理，
+            # 不靠固定等待。
+            deadline = time.monotonic() + 20
+            while not seen() and time.monotonic() < deadline and service.poll() is None:
+                client.xadd("p:recordings", {"payload": '{"event_type":"recording_finished","source_id":"cam",'
+                                                        '"branch":"osd","path":"/data/a.mp4","duration_ms":5}'})
+                client.xadd("p:detections", {"payload": '{"event_type":"detection","source_id":"cam",'
+                                                        '"frame_num":3,"objects":[{}]}',
+                                             "image": b"\xff\xd8\x00\xff\xd9"})
+                time.sleep(0.2)
             self.assertTrue((self.dir / "ready").exists(), "service never became ready")
-            time.sleep(0.5)  # 服务先记下各 Stream 当前最后一条的 ID，此后写入的记录才会处理
-            client.xadd("p:recordings", {"payload": '{"event_type":"recording_finished","source_id":"cam",'
-                                                    '"branch":"osd","path":"/data/a.mp4","duration_ms":5}'})
-            client.xadd("p:detections", {"payload": '{"event_type":"detection","source_id":"cam",'
-                                                    '"frame_num":3,"objects":[{}]}',
-                                         "image": b"\xff\xd8\x00\xff\xd9"})
-            time.sleep(1.5)
             service.send_signal(signal.SIGTERM)
-            output, _ = service.communicate(timeout=10)
+            service.wait(timeout=10)
+            reader.join(timeout=10)
+            output = "".join(lines)
             self.assertEqual(service.returncode, 0, output)
-            self.assertIn("event: cam osd /data/a.mp4 duration_ms=5", output)
-            self.assertIn("event: detection cam frame=3 objects=1 image=5 bytes", output)
+            for text in expected:
+                self.assertIn(text, output)
             self.assertIn("redis.password=***", output)
             self.assertFalse((self.dir / "ready").exists())
         finally:
+            if service is not None and service.poll() is None:  # 断言失败时不留下运行中的服务
+                service.kill()
+                service.wait()
             redis_process.terminate()
             redis_process.wait()
-
 
 if __name__ == "__main__":
     unittest.main()

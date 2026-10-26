@@ -56,8 +56,10 @@ inline int RunAll() {
       ++failed;
     }
   }
-  std::cout << Registry().size() - static_cast<std::size_t>(failed) << "/" << Registry().size()
-            << " passed\n";
+  const std::size_t passed = Registry().size() - static_cast<std::size_t>(failed + skipped);
+  std::cout << passed << "/" << Registry().size() << " passed";
+  if (skipped > 0) std::cout << ", " << skipped << " skipped";
+  std::cout << "\n";
   const char* forbid = std::getenv("DSF_FORBID_SKIPS");
   if (skipped > 0 && forbid != nullptr && std::string(forbid) == "1") {
     std::cout << "DSF_FORBID_SKIPS=1: " << skipped << " skipped test(s) count as failures\n";

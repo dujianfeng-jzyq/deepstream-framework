@@ -1,7 +1,9 @@
 """配置渲染与现场参数。"""
 
+import io
 import os
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from deploy_support import PROFILE, ProjectTestCase, docker_cli_available
@@ -209,7 +211,9 @@ class SiteFieldsTest(unittest.TestCase):
     def test_ask(self):
         required = site.Field("A", "prompt", "", False)
         answers = iter(["", "value"])
-        self.assertEqual(site.ask(required, prompt=lambda _: next(answers)), "value")
+        with redirect_stdout(io.StringIO()) as output:  # 空答案时重新提问
+            self.assertEqual(site.ask(required, prompt=lambda _: next(answers)), "value")
+        self.assertIn("A 是必填项", output.getvalue())
         default = site.Field("B", "prompt", "d", False)
         self.assertEqual(site.ask(default, prompt=lambda _: ""), "d")
         self.assertEqual(site.ask(default, "inherited", prompt=lambda _: ""), "inherited")  # 继承值优先于清单
