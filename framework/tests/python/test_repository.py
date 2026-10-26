@@ -1,9 +1,13 @@
 """仓库约定：框架与产品的边界、镜像契约、脚本语法与 Python 静态检查。"""
 
 import importlib.util
+import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -49,6 +53,45 @@ class RepositoryTest(unittest.TestCase):
             content = (FRAMEWORK / "docker" / dockerfile).read_text()
             self.assertTrue(content.startswith("# check=skip=InvalidDefaultArgInFrom"))
             self.assertNotRegex(content, r"ARG (DEEPSTREAM|BASE)_IMAGE=")  # 上游镜像必须由 Compose 传入
+
+    def runtime_check(self, workspace: Path) -> subprocess.CompletedProcess:
+        """在 workspace 中执行 runtime-check 阶段的自检脚本（Dockerfile 原文，去掉 RUN 选项）。"""
+        text = (FRAMEWORK / "docker/apps.Dockerfile").read_text()
+        block = re.search(r"^RUN --network=none (.*?)(?<!\\)\n", text, re.M | re.S).group(1)
+        script = block.replace("\\\n", "\n").replace("/workspace/python", str(workspace / "python"))
+        return subprocess.run(["sh", "-c", script], cwd=workspace, capture_output=True, text=True, timeout=60)
+
+    def test_runtime_check_handles_missing_units_and_undeclared_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "python").symlink_to(FRAMEWORK / "python")
+            result = self.runtime_check(workspace)  # 没有 C++ 应用，也没有 Python 服务
+            self.assertEqual(result.returncode, 0, result.stderr)
+            service = workspace / "services/svc/main.py"
+            service.parent.mkdir(parents=True)
+            service.write_text('import sys\nfrom dsf.service import Service\n'
+                               'sys.exit(Service("svc").run(lambda root: None, lambda c, s: None))\n')
+            result = self.runtime_check(workspace)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("svc payload=", result.stdout)
+            service.write_text("import dsf_undeclared_dependency\n" + service.read_text())
+            result = self.runtime_check(workspace)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("dsf_undeclared_dependency", result.stderr)
+
+    def test_healthcheck_reads_the_ready_file_from_the_environment(self):
+        line = next(line for line in (FRAMEWORK / "compose/defaults.yaml").read_text().splitlines()
+                    if line.strip().startswith("test:"))
+        command = json.loads(line.split("test:", 1)[1])  # 双引号的 flow 序列同时是合法 JSON
+        self.assertEqual(command[:3], ["CMD", "python3", "-c"])
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory, "ready")
+            check = lambda: subprocess.run([sys.executable, "-c", command[3]], timeout=30,
+                                           env={"DSF_READY_FILE": str(ready)}).returncode
+            ready.touch()
+            self.assertEqual(check(), 0)
+            os.utime(ready, (time.time() - 60, time.time() - 60))
+            self.assertEqual(check(), 1)
 
     def test_business_services_use_the_base_image_and_readonly_payload(self):
         text = (FRAMEWORK / "compose/defaults.yaml").read_text()

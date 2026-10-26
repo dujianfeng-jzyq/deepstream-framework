@@ -26,7 +26,8 @@ services:
       - /etc/localtime:/etc/localtime:ro  # 时区与宿主一致，不依赖镜像中的 tzdata
     # 就绪 = 服务主循环（或帧处理）在 30 秒内推进过；容器 Up 不代表就绪。
     healthcheck:
-      test: ["CMD", "python3", "-c", "import os,sys,time; sys.exit(time.time() - os.stat('/tmp/dsf.ready').st_mtime > 30)"]
+      # 路径取自容器的 DSF_READY_FILE，单元覆盖它时检查随之改变；Python 运行时的 sleep() 依赖这里的 30 秒。
+      test: ["CMD", "python3", "-c", "import os,sys,time; sys.exit(time.time() - os.stat(os.environ.get('DSF_READY_FILE') or '/tmp/dsf.ready').st_mtime > 30)"]
       interval: 10s
       timeout: 5s
       retries: 3

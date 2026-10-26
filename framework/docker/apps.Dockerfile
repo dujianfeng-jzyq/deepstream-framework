@@ -68,8 +68,9 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     chmod -R a+rX /workspace
 
 # ---------------- runtime-check ----------------
-# 回到原始 base：builder 追加的开发包可能掩盖载荷在运行环境中缺失的依赖。
-# 以非 root、无网络、限时的方式运行自检；失败则没有最终镜像。
+# 回到原始 base：builder 追加的开发包（例如测试用的 python3-redis）可能掩盖载荷在运行环境中缺失的依赖。
+# 以非 root、无网络、限时的方式运行自检；失败则没有最终镜像。项目可以没有 C++ 应用或 Python 服务。
+# Python 服务的 --version 执行模块顶层的导入，未写进 requirements.txt 的顶层依赖在这里失败。
 FROM ${BASE_IMAGE} AS runtime-check
 COPY --from=builder /workspace /workspace
 WORKDIR /workspace
@@ -77,10 +78,15 @@ USER 65534:65534
 ENV XDG_CACHE_HOME=/tmp/cache CONTAINER_WORKSPACE=/workspace
 RUN --network=none set -eu; \
     for app in bin/*; do \
+      [ -e "$app" ] || continue; \
       timeout 60 "$app" --version; \
       timeout 60 "$app" --selftest; \
     done; \
-    PYTHONPATH=/workspace/python python3 -c 'import dsf.service, dsf.config'
+    PYTHONPATH=/workspace/python python3 -c 'import dsf.service, dsf.config'; \
+    for service in services/*/main.py; do \
+      [ -e "$service" ] || continue; \
+      PYTHONPATH=/workspace/python timeout 60 python3 "$service" --version; \
+    done
 
 # ---------------- payload ----------------
 FROM busybox:1.36

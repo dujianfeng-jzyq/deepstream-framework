@@ -236,7 +236,7 @@ def main(port, service: Service):
 sys.exit(Service("my-service", "说明").run(load, main))
 ```
 
-`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、`watchdog.stall_timeout_s`、SIGINT/SIGTERM 与就绪文件。看门狗为正时，主循环超过时限没有调用 `sleep()` / `alive()`，进程记录原因后直接以 1 退出（卡住的主循环无法自行排空）。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
+`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、`watchdog.stall_timeout_s`、SIGINT/SIGTERM 与就绪文件。看门狗为正时，主循环超过时限没有调用 `sleep()` / `alive()`，进程记录原因后直接以 1 退出（卡住的主循环无法自行排空）。`sleep()` 的等待本身算作推进：再长的等待也会定期更新就绪文件，不会被健康检查或看门狗当成卡住。服务的 `main.py` 须支持无副作用的 `--version`（`Service` 已处理），镜像自检在原始 base 中执行它，以发现未声明的顶层依赖。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `finish`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
 
 ## 10. 新增应用
 
