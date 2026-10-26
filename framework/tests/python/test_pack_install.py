@@ -141,6 +141,14 @@ class PackInstallTest(ProjectTestCase):
             self.pack()
         self.assertIn("uncommitted changes", errors.getvalue())
 
+    def test_pack_refuses_a_profile_for_another_platform(self):
+        profile = self.root / "profiles/test.yaml"
+        profile.write_text(f"x-platform: {self.other}\n" + profile.read_text())
+        with self.assertRaisesRegex(DeployError, f"profile test does not fit the built images: "
+                                                 f"it targets {self.other}, the images are {self.platform}"):
+            self.pack()
+        self.assertFalse(any(call[0] == "save" for call in self.docker.calls))  # 检查在保存镜像之前
+
     def test_base_is_packed_on_request_and_platforms_must_match(self):
         self.pack(with_base=True)
         self.assertIn(self.base, [call[1] for call in self.docker.calls if call[0] == "save"])
@@ -399,6 +407,52 @@ class InventoryTest(ProjectTestCase):
         (self.root / "link").symlink_to(self.tmp)
         with self.assertRaisesRegex(DeployError, "symlink"):
             inventory.safe_path(self.root, "link/x")
+
+
+class ProfileChoiceTest(ProjectTestCase):
+    """安装时只提供与发布包平台相符的 profile。只读文本，不需要 Docker 与 PyYAML。"""
+
+    def setUp(self):
+        super().setUp()
+        profiles = self.root / "profiles"
+        (profiles / "server.yaml").write_text("# profile：服务器\nx-platform: amd64\n")
+        (profiles / "jetson.yaml").write_text("# profile：Jetson\nx-platform: arm64\n")
+        self.release = {"TARGET_PLATFORM": "arm64", "CONFIG_PROFILE": "jetson"}
+        self.install_dir = self.tmp / "installed"
+        self.install_dir.mkdir()
+
+    def choose(self, profile=None, interactive=False, answer=""):
+        options = mock.Mock(profile=profile, clean=False, interactive=interactive)
+        output = io.StringIO()
+        with redirect_stdout(output), mock.patch("builtins.input", return_value=answer):
+            result = preflight._choose_profile(options, self.release, self.install_dir, self.root)
+        return result, output.getvalue()
+
+    def installed(self, profile):
+        (self.install_dir / layout.ENV).write_text(f"CONFIG_PROFILE='{profile}'\n")
+
+    def test_only_profiles_for_the_package_platform_are_offered(self):
+        (_, how), menu = self.choose(interactive=True)
+        self.assertEqual(how, "suggested by the package")
+        self.assertIn("jetson  Jetson", menu)
+        self.assertIn("test  测试方案", menu)  # 没有声明 x-platform：不限平台
+        self.assertNotIn("server", menu)
+        self.assertEqual(self.choose(interactive=True, answer="1")[0], ("jetson", "chosen here"))
+
+    def test_a_profile_for_another_platform_is_rejected_before_anything_changes(self):
+        with self.assertRaisesRegex(DeployError, "profile server targets another platform than this arm64 "
+                                                 "package; profiles for arm64: jetson, test"):
+            self.choose(profile="server")
+        self.assertEqual(self.choose(profile="test")[0], ("test", "from --profile"))
+
+    def test_installed_profile_is_kept_only_when_it_still_fits(self):
+        self.installed("test")
+        self.assertEqual(self.choose()[0], ("test", "kept from the current installation"))
+        for retired in ("server", "dgpu-ds71"):  # 平台不符，或新包已不再提供
+            self.installed(retired)
+            (profile, how), output = self.choose()
+            self.assertEqual((profile, how), ("jetson", "suggested by the package"))
+            self.assertIn(f"the installed profile {retired} is not offered by this package for arm64", output)
 
 
 if __name__ == "__main__":

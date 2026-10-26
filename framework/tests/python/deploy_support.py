@@ -18,7 +18,6 @@ from dsf_deploy.docker import Docker
 ROOT = Path(__file__).resolve().parents[3]
 
 PROJECT_ENV = """PROJECT_NAME=demo
-DEEPSTREAM_IMAGE=nvcr.io/nvidia/deepstream:8.0-samples-multiarch
 APPS_VERSION=1.2.0
 BASE_VERSION=1.0.0
 BASE_APT_PACKAGES=
@@ -54,8 +53,12 @@ nested:
   list: [1, 2]
 """
 
+# profile 必须写明上游镜像（项目 project.env 不设默认值）；重写测试 profile 的用例以它开头。
+IMAGE_BUILD = "x-build:\n  DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:8.0-samples-multiarch\n"
+
 PROFILE = """# profile：测试方案
 x-build:
+  DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:8.0-samples-multiarch
   APPS_VERSION: 1.2.1
 x-app-config:
   app:

@@ -8,6 +8,8 @@ model-color-format=0
 onnx-file=../onnx/best.onnx
 model-engine-file=/data/engines/road-assets/best.onnx_b1_gpu0_fp16.engine
 labelfile-path=../onnx/labels.txt
+# ONNX 以固定 batch=1 导出（onnx/export.json：batch 1、dynamic false），batch-size 只能为 1。
+# 多路时 nvinfer 逐帧推理；需要批处理时以 dynamic 重新导出，并在 config.trtexec 中给出形状。
 batch-size=1
 # 2 = FP16，它同时决定上面引擎名里的 fp16 段。
 network-mode=2

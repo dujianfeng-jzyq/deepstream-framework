@@ -1,6 +1,8 @@
-# profile：Jetson（JetPack 6.1+），DeepStream 7.1，host 网络（内核不支持 Docker bridge 时使用）
-# 宿主须先在 /etc/docker/daemon.json 中设置 "bridge": "none", "iptables": false 并安装 NVIDIA runtime；
-# 镜像在编译服务器上构建，用 build-release.sh --with-base 打包，不在 Jetson 上构建。
+# profile：Jetson（JetPack 6.1+），DeepStream 7.1，host 网络
+# host 网络让本方案不依赖 Docker bridge（部分 Jetson 内核缺少它所需的模块）；宿主的 Docker 配置见
+# docs/deployment.md。镜像须为 arm64：在 arm64 机器上构建，用 build-release.sh --with-base 打包。
+# Orin Nano 没有硬件编码器（NVENC）：在它上面关闭应用配置中的 rtsp_out 与录像。
+x-platform: arm64
 x-build:
   DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:7.1-samples-multiarch
 # 所有服务（包括以后新增的单元）都不连 bridge；显式 network_mode 的服务保持不变。
@@ -13,7 +15,7 @@ services:
   model-engine-builder:
     runtime: nvidia
     group_add: [video]
-  # host 网络下监听会直接暴露到现场网络：Redis 默认没有口令，只绑定回环地址。
+  # host 网络下监听会直接暴露到现场网络：Redis 只绑定回环地址。
   redis:
     environment:
       REDIS_EXTRA_ARGS: --bind 127.0.0.1

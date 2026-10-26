@@ -96,6 +96,11 @@ def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None
 
     # 平台以实际镜像为准：构建机架构可能与镜像不同（交叉构建、手动拉取）。
     target_platform = _require_platform(docker, base_image)
+    # 面向 arm64 的 profile 在 x86 构建机上默认得到 amd64 镜像：在这里拦下，而不是到现场才失败。
+    reason = render.profile_mismatch(root, plan.profile, target_platform, values.get("DEEPSTREAM_VERSION", ""))
+    if reason:
+        raise DeployError(f"profile {plan.profile} does not fit the built images: {reason}; "
+                          f"build the images for that platform first")
     for image in dependencies.values():
         if not docker.image_exists(image):
             print(f"pulling dependency image {image} for linux/{target_platform}")

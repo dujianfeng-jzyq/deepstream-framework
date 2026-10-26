@@ -52,12 +52,12 @@ sudo systemctl restart docker                        # 会重启正在运行的�
 
 验证：`docker info --format '{{json .Runtimes}}'` 中包含 `nvidia`，且 `docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi` 能列出 GPU。其他发行版见 [NVIDIA 安装文档](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。
 
-内核不支持 Docker bridge 的 Jetson 使用 `jetson-ds71-host` profile（全部服务走 host 网络），宿主配置见[构建与部署](docs/deployment.md#不支持-bridge-的-jetsonhost-网络)。
+部署方案有两个：`server-ds71`（x86_64 服务器，Docker bridge 网络）与 `jetson-ds71`（Jetson，host 网络），宿主配置见[构建与部署](docs/deployment.md#jetsonhost-网络)。
 
 ### 启动
 
 ```bash
-scripts/apply-profile.sh dgpu-ds80             # 选择部署方案，渲染 .env 与 generated/
+scripts/apply-profile.sh server-ds71           # 选择部署方案，渲染 .env 与 generated/
 mkdir -p ~/deepstream-example/data             # 数据目录（project.env 的 HOST_DATA_PATH）
 docker compose build deepstream-base deepstream-apps
 docker compose up -d
@@ -102,7 +102,7 @@ services/<name>/    服务单元：代码、templates/ 配置模板、compose.ya
 plugins/<name>/     推理自定义库等 SDK 插件
 models/<id>/        模型、标签与 nvinfer 配置
 profiles/           部署方案（平台差异、Compose 覆盖、配置覆盖）
-project.env         项目身份、版本、上游镜像与公共默认值
+project.env         项目身份、版本与公共默认值（上游镜像写在各 profile）
 site-fields.env     现场参数清单
 scripts/ tools/     入口脚本与开发工具
 ```

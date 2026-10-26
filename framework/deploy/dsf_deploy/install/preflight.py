@@ -61,15 +61,25 @@ def default_install_dir(release: dict[str, str]) -> Path:
 
 def _choose_profile(options: Options, release: dict[str, str], install_dir: Path,
                     package_root: Path) -> tuple[str, str]:
+    platform = release.get("TARGET_PLATFORM", "")
+    fitting = [name for name, _ in render.fitting_profiles(package_root, platform)]
     if options.profile:
+        if options.profile in [name for name, _ in render.list_profiles(package_root)] and \
+                options.profile not in fitting:
+            raise DeployError(f"profile {options.profile} targets another platform than this {platform} package; "
+                              f"profiles for {platform}: {', '.join(fitting) or 'none'}")
         return options.profile, "from --profile"
     previous = install_dir / layout.ENV
     if previous.is_file() and not options.clean:
         chosen = envfile.read_compose(previous).get("CONFIG_PROFILE", "")
-        if chosen:
+        if chosen in fitting:
             return chosen, "kept from the current installation"
+        if chosen:
+            # 例如新版本改了 profile 名：不沿用，按新包重新选择（非交互时用包内建议）。
+            print(f"note: the installed profile {chosen} is not offered by this package for {platform}; "
+                  "choosing again")
     suggested = envfile.require(release, "CONFIG_PROFILE", layout.RELEASE_ENV)
-    choices = render.list_profiles(package_root)
+    choices = render.fitting_profiles(package_root, platform)
     if not options.interactive or not choices:
         return suggested, "suggested by the package"
     print("profiles in this package (press Enter for the suggestion):")

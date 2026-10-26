@@ -5,6 +5,8 @@
 （映射递归合并，列表与标量整体替换）。
 profile 的 x-network-mode 给所有未显式声明 network_mode 的服务设置该值（例如内核不支持
 bridge 的设备用 host），新增的服务单元自动生效。
+profile 的 x-platform（amd64/arm64）声明它面向的平台：打包时镜像必须是这个平台，安装时只提供
+与发布包平台、DeepStream 版本相符的 profile。
 先计算完整的渲染计划，再整体替换 .env 与 generated/；校验失败时旧文件保持不变。
 """
 
@@ -123,11 +125,15 @@ def _load_profile(root: Path, name: str) -> dict:
         raise DeployError(f"{path}: {error}") from error
     if not isinstance(profile, dict):
         raise DeployError(f"{path}: a profile must be a mapping")
-    unknown = sorted(k for k in profile
-                     if k not in ("services", "x-build", "x-network-mode") and not k.startswith("x-app-"))
+    unknown = sorted(k for k in profile if k not in ("services", "x-build", "x-network-mode", "x-platform")
+                     and not k.startswith("x-app-"))
     if unknown:
         raise DeployError(f"{path}: unknown top-level keys {unknown}; use services (Compose overrides), "
-                          "x-build (variables), x-network-mode or x-app-<type> (configuration overrides)")
+                          "x-build (variables), x-network-mode, x-platform or x-app-<type> "
+                          "(configuration overrides)")
+    platform = profile.get("x-platform")
+    if platform is not None and platform not in naming.PLATFORMS:
+        raise DeployError(f"{path}: x-platform must be one of {', '.join(naming.PLATFORMS)}")
     build = profile.get("x-build") or {}
     if not isinstance(build, dict) or any(isinstance(v, (dict, list)) for v in build.values()):
         raise DeployError(f"{path}: x-build must map names to scalar values")
@@ -135,6 +141,38 @@ def _load_profile(root: Path, name: str) -> dict:
     if mode is not None and (not isinstance(mode, str) or not mode.strip()):
         raise DeployError(f"{path}: x-network-mode must be a Compose network_mode such as host")
     return profile
+
+
+def _mismatch(profile: dict, platform: str, ds_version: str) -> str:
+    declared = profile.get("x-platform")
+    if declared and platform and declared != platform:
+        return f"it targets {declared}, the images are {platform}"
+    image = (profile.get("x-build") or {}).get("DEEPSTREAM_IMAGE")
+    wanted = naming.deepstream_version(str(image)) if image else ""
+    if wanted and ds_version and wanted != ds_version:
+        return f"it uses DeepStream {wanted}, the images have {ds_version}"
+    return ""
+
+
+def profile_mismatch(root: Path, name: str, platform: str, ds_version: str) -> str:
+    """profile 与给定平台、DeepStream 版本不符的原因，相符返回空串。没有声明 x-platform 或
+    x-build 的 DEEPSTREAM_IMAGE 时，对应一项不检查。"""
+    return _mismatch(_load_profile(root, name), platform, ds_version)
+
+
+_PLATFORM_LINE = re.compile(r"^x-platform:\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*(?:#.*)?$", re.M)
+
+
+def fitting_profiles(root: Path, platform: str) -> list[tuple[str, str]]:
+    """x-platform 与 platform 相符（或没有声明）的 profile 名与说明，供安装时选择。
+    不解析 YAML（安装宿主可能没有 PyYAML）：只读顶层的 x-platform 行；完整的检查（含 DeepStream
+    版本）在渲染时进行，仍在停服之前。"""
+    result = []
+    for name, summary in list_profiles(root):
+        match = _PLATFORM_LINE.search((root / layout.PROFILES / f"{name}.yaml").read_text(encoding="utf-8"))
+        if match is None or match.group(1) == platform:
+            result.append((name, summary))
+    return result
 
 
 def source_revision(root: Path) -> str:
@@ -231,6 +269,14 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
     profile = _load_profile(root, profile_name)
     overrides = _build_variables(profile)
     if released:
+        # 镜像已由发布包决定：面向其他平台或 DeepStream 版本的 profile 不能用来运行它们。
+        reason = _mismatch(profile, variables.get("TARGET_PLATFORM", ""), variables.get("DEEPSTREAM_VERSION", ""))
+        if reason:
+            fitting = [name for name, _ in fitting_profiles(root, variables.get("TARGET_PLATFORM", ""))
+                       if not profile_mismatch(root, name, variables.get("TARGET_PLATFORM", ""),
+                                               variables.get("DEEPSTREAM_VERSION", ""))]
+            raise DeployError(f"profile {profile_name} does not fit this package: {reason}; "
+                              f"profiles that fit: {', '.join(fitting) or 'none'}")
         ignored = sorted(k for k in overrides if k in RELEASE_IMAGE_KEYS)
         if ignored:
             print(f"note: images come from the release package; ignoring x-build {', '.join(ignored)}",
@@ -242,7 +288,10 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
     variables.update(site.resolve(fields, site.read_answers(root / layout.SITE_ENV, fields), variables))
 
     if not released:
-        for key in ("DEEPSTREAM_IMAGE", "APPS_VERSION", "BASE_VERSION"):
+        if not variables.get("DEEPSTREAM_IMAGE"):
+            raise DeployError(f"profile {profile_name} must set x-build: DEEPSTREAM_IMAGE "
+                              f"({layout.PROJECT_ENV} has no default)")
+        for key in ("APPS_VERSION", "BASE_VERSION"):
             envfile.require(variables, key, f"{layout.PROJECT_ENV} or the profile")
         dockerfile = root / BASE_DOCKERFILE
         dockerfile_text = dockerfile.read_text(encoding="utf-8") if dockerfile.is_file() else ""

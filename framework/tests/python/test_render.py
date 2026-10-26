@@ -4,9 +4,10 @@ import io
 import os
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 from pathlib import Path
 
-from deploy_support import PROFILE, ProjectTestCase, docker_cli_available
+from deploy_support import IMAGE_BUILD, PROFILE, ProjectTestCase, docker_cli_available
 from dsf import yamlio
 from dsf_deploy import layout, naming, render, site
 from dsf_deploy.docker import Docker
@@ -51,13 +52,13 @@ class RenderTest(ProjectTestCase):
         profile.write_text("DEEPSTREAM_IMAGE: x\n")
         with self.assertRaisesRegex(DeployError, "unknown top-level keys"):
             self.plan()
-        profile.write_text("x-app-other:\n  a: {}\n")
+        profile.write_text(IMAGE_BUILD + "x-app-other:\n  a: {}\n")
         with self.assertRaisesRegex(DeployError, "no matching templates/other"):
             self.plan()
-        profile.write_text("x-app-config:\n  missing: {}\n")
+        profile.write_text(IMAGE_BUILD + "x-app-config:\n  missing: {}\n")
         with self.assertRaisesRegex(DeployError, "unknown files"):
             self.plan()
-        profile.write_text("x-build:\n  PROJECT_NAME: other\n")
+        profile.write_text(IMAGE_BUILD + "  PROJECT_NAME: other\n")
         self.assertEqual(self.plan().variables["PROJECT_NAME"], "demo")  # 身份不可覆盖
 
     def test_network_mode_covers_every_service(self):
@@ -90,7 +91,7 @@ class RenderTest(ProjectTestCase):
         profile.write_text("x-network-mode: ''\n")
         with self.assertRaisesRegex(DeployError, "x-network-mode must be"):
             self.plan()
-        profile.write_text("x-network-mode: host\n")
+        profile.write_text(IMAGE_BUILD + "x-network-mode: host\n")
         compose = self.root / "services/app/compose.yaml"
         compose.write_text(compose.read_text() + "    networks: [default]\n")
         with self.assertRaisesRegex(DeployError, "service redis declares networks"):
@@ -153,6 +154,49 @@ class RenderTest(ProjectTestCase):
             # compose config 的输出把字面的 $ 写成 $$
             self.assertEqual(services["probe"]["command"][1], secret.replace("$", "$$"))
 
+    def test_each_profile_names_its_deepstream_image(self):
+        (self.root / "profiles/test.yaml").write_text("x-build:\n  APPS_VERSION: 1.2.1\n")
+        with self.assertRaisesRegex(DeployError, "profile test must set x-build: DEEPSTREAM_IMAGE "
+                                                 "\\(project.env has no default\\)"):
+            self.plan()
+        # 框架仍接受 project.env 中的默认值：派生项目可以让多个 profile 共用一个版本。
+        env = self.root / layout.PROJECT_ENV
+        env.write_text(env.read_text() + "DEEPSTREAM_IMAGE=nvcr.io/nvidia/deepstream:7.1-samples-multiarch\n")
+        self.assertEqual(self.plan().variables["DEEPSTREAM_VERSION"], "7.1")
+
+    def test_platform_is_validated(self):
+        profile = self.root / "profiles/test.yaml"
+        profile.write_text("x-platform: mips\n")
+        with self.assertRaisesRegex(DeployError, "x-platform must be one of amd64, arm64"):
+            self.plan()
+        profile.write_text(IMAGE_BUILD + "x-platform: arm64\n")
+        self.plan()  # 开发渲染不按宿主检查：arm64 的 profile 可以在任何机器上渲染
+
+    def test_release_render_rejects_profiles_for_another_package(self):
+        env = self.root / layout.PROJECT_ENV
+        env.write_text(env.read_text() + "BASE_IMAGE=demo/base:fixed\nAPPS_IMAGE=demo/apps:fixed\n"
+                       "TARGET_PLATFORM=amd64\nDEEPSTREAM_VERSION=8.0\n")
+        profiles = self.root / "profiles"
+        (profiles / "server.yaml").write_text("x-platform: amd64\n")
+        (profiles / "test.yaml").write_text("x-platform: arm64\n")
+        with self.assertRaisesRegex(DeployError, "profile test does not fit this package: it targets arm64, "
+                                                 "the images are amd64; profiles that fit: server"):
+            self.plan()
+        (profiles / "test.yaml").write_text("x-platform: amd64\nx-build:\n  DEEPSTREAM_IMAGE: nvcr.io/x:7.1-y\n")
+        with self.assertRaisesRegex(DeployError, "it uses DeepStream 7.1, the images have 8.0"):
+            self.plan()
+        (profiles / "test.yaml").write_text("x-platform: amd64\nx-build:\n  DEEPSTREAM_IMAGE: nvcr.io/x:8.0-y\n")
+        self.assertEqual(self.plan().profile, "test")
+
+    def test_fitting_profiles_read_the_platform_without_yaml(self):
+        profiles = self.root / "profiles"
+        (profiles / "a.yaml").write_text("# profile：甲\nx-platform: amd64\n")
+        (profiles / "b.yaml").write_text("# profile：乙\nx-platform: 'arm64'  # Jetson\nservices: {}\n")
+        # 安装宿主可能没有 PyYAML：列出可选 profile 时不能解析 YAML。
+        with mock.patch.object(render, "_yaml", side_effect=AssertionError("parsed YAML")):
+            self.assertEqual(render.fitting_profiles(self.root, "amd64"), [("a", "甲"), ("test", "测试方案")])
+            self.assertEqual([name for name, _ in render.fitting_profiles(self.root, "arm64")], ["b", "test"])
+
     def test_base_tag_follows_its_build_inputs(self):
         before = self.plan().variables["BASE_IMAGE"]
         env = self.root / layout.PROJECT_ENV
@@ -161,7 +205,8 @@ class RenderTest(ProjectTestCase):
 
     def test_release_installations_keep_packaged_images(self):
         env = self.root / layout.PROJECT_ENV
-        env.write_text(env.read_text() + "BASE_IMAGE=demo/base:fixed\nAPPS_IMAGE=demo/apps:fixed\n")
+        env.write_text(env.read_text() + "BASE_IMAGE=demo/base:fixed\nAPPS_IMAGE=demo/apps:fixed\n"
+                       "DEEPSTREAM_IMAGE=nvcr.io/nvidia/deepstream:8.0-samples-multiarch\n")  # 来自 release.env
         profile = self.root / "profiles/test.yaml"
         profile.write_text("x-build:\n  DEEPSTREAM_IMAGE: other:7.1\n")
         values = self.plan().variables

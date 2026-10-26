@@ -10,6 +10,8 @@ from .envfile import DeployError
 
 _VERSION = re.compile(r"^\d+(\.\d+)*$")
 _ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+# 镜像与发布包的平台名（Docker 的 architecture）。
+PLATFORMS = ("amd64", "arm64")
 
 
 def deepstream_version(image: str) -> str:

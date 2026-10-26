@@ -1,6 +1,0 @@
-# profile：x86_64 独立显卡，DeepStream 8.0
-services:
-  example-app:
-    runtime: nvidia
-  model-engine-builder:
-    runtime: nvidia

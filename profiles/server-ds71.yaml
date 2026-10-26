@@ -1,4 +1,5 @@
-# profile：x86_64 独立显卡，DeepStream 7.1
+# profile：x86_64 服务器（独立显卡），DeepStream 7.1，Docker bridge 网络
+x-platform: amd64
 x-build:
   DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:7.1-samples-multiarch
 services:

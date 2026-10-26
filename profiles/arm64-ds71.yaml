@@ -1,7 +1,0 @@
-# profile：Apple Silicon 开发机，只用于构建与无 GPU 自检
-x-build:
-  DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:7.1-samples-multiarch
-x-app-config:
-  example-app:
-    logging:
-      level: debug

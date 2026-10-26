@@ -81,7 +81,7 @@ services/<name>/             应用、Python 服务或基础设施单元
 plugins/<name>/              推理自定义库等产品插件
 models/<id>/                 模型、标签、推理配置与元数据
 profiles/                    平台部署方案
-project.env                  项目身份、版本、镜像与公共默认值
+project.env                  项目身份、版本与公共默认值（上游镜像由 profile 写明）
 site-fields.env              现场参数清单
 scripts/                     项目初始化、脚手架、渲染、发布与安装入口
 tools/                       项目辅助工具
@@ -342,6 +342,8 @@ site-fields.env 中的默认值 < project.env < profile 的 x-build < site.env
 模板来自 `services/*/templates/<type>/`，渲染到 `generated/<type>/`。未定义的占位符和跨单元同名输出均报错；profile 的 `x-app-<type>` 进行深合并，映射递归合并，列表与标量整体替换。
 
 渲染器先计算并校验完整计划，再替换 `.env` 与 `generated/`。`COMPOSE_FILE` 按根 Compose、名称排序的单元片段、profile 的顺序组装，使配置预检与实际启动使用相同定义。
+
+profile 用 `x-platform` 声明面向的平台。打包时镜像必须是这个平台，安装时只提供与发布包平台（及 DeepStream 版本）相符的 profile，选错平台在停服前失败，而不是停服后 GPU 服务起不来。
 
 网络模式是平台差异，但必须覆盖全部服务：只要有一个服务留在默认网络，Compose 就会创建 bridge 网络。因此 profile 的 `x-network-mode` 由渲染器展开为覆盖文件，排在 `COMPOSE_FILE` 最后，给所有未显式声明 `network_mode` 的服务设置该值；新增单元不需要修改 profile。host 网络下 Compose 的 DNS 不生效，渲染器同时用 `extra_hosts` 把每个服务名指向回环地址：配置只写服务名，不随网络模式分叉。默认不设置，服务通过 Compose 网络的服务名互相访问。
 
