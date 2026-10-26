@@ -16,6 +16,18 @@ namespace {
 constexpr const char* kMediaMtxCredential =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!$()*+.;<=>[]^_-@#&";
 
+// MediaMTX 的路径名只能由这些字符组成，其他路径的推流在连接时被拒绝。
+constexpr const char* kMediaMtxPath =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.~-/:";
+
+// rtsp://<主机>/<路径>[?查询] 中的路径（不含开头的 /）；没有路径时为空。
+std::string UrlPath(const std::string& url) {
+  const std::size_t scheme = url.find("://");
+  const std::size_t begin = url.find('/', scheme == std::string::npos ? 0 : scheme + 3);
+  if (begin == std::string::npos) return {};
+  return url.substr(begin + 1, url.find('?', begin) - begin - 1);
+}
+
 }  // namespace
 
 std::string PublishUrl(const std::string& url, const std::string& password) {
@@ -108,6 +120,15 @@ Config Load(Reader& root) {
   // 而不是停服之后 MediaMTX 无法启动。
   if (config.rtsp_out.password.find_first_not_of(kMediaMtxCredential) != std::string::npos) {
     root.Fail("rtsp_out.password", "MediaMTX accepts only letters, digits and !$()*+.;<=>[]^_-@#&");
+  }
+  // 推流路径来自 CAMERA_ID（模板中为 ${CAMERA_ID}-out）。中文或空格的相机编号能通过源 id 的检查，
+  // 推流却在启动时被 MediaMTX 拒绝：启动失败、容器重启、再失败，检测与录像都不会运行。
+  if (config.rtsp_out.enabled) {
+    const std::string path = UrlPath(config.rtsp_out.url);
+    if (path.empty() || path.find_first_not_of(kMediaMtxPath) != std::string::npos) {
+      root.Fail("rtsp_out.url", "path '" + path + "' is not a valid MediaMTX path: use only letters, digits "
+                "and _.~-/: (the path usually comes from CAMERA_ID)");
+    }
   }
   if (config.rtsp_out.enabled) {
     try {

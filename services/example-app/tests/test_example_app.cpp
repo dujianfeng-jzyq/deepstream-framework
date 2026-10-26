@@ -144,6 +144,22 @@ TEST(rtsp_output_password_is_checked_and_hidden) {
                "rtsp_out.password: is set but the uri has no user name");
 }
 
+TEST(rtsp_output_path_must_be_a_mediamtx_path) {
+  const std::string base = Template();  // 模板的推流路径是 ${CAMERA_ID}-out
+  const auto with_path = [&](const std::string& path) {
+    return Replace(base, "mediamtx:8554/x-out", "mediamtx:8554/" + path);
+  };
+  CHECK(Load(with_path("gate:1-out?tcp")).rtsp_out.enabled);  // 查询串不属于路径
+  CHECK(Load(with_path("site/cam_1.~-out")).rtsp_out.enabled);
+  // MediaMTX 拒绝的路径在预检中报错，而不是在现场反复启动失败。
+  for (const char* bad : {"东门-out", "gate 1-out", "a#b", ""}) {
+    CHECK_THROWS(Load(with_path(bad)), "rtsp_out.url: path");
+  }
+  // 不推流时路径不检查：相机编号仍可用于录像目录与消息。
+  CHECK(!Load(Replace(with_path("东门-out"), "rtsp_out:\n  enabled: true", "rtsp_out:\n  enabled: false"))
+             .rtsp_out.enabled);
+}
+
 TEST(h265_rtsp_output_warns_about_browser_playback) {
   CHECK(example_app::Warnings(Load(Template())).empty());
   const auto warnings = example_app::Warnings(Load(Replace(Template(), "  codec: h264", "  codec: h265")));

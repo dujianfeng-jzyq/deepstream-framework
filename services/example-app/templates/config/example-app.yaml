@@ -1,6 +1,7 @@
 # example-app 配置模板。${VAR} 来自 project.env、profile 与现场参数（site-fields.env）。
 # 字段与默认值由 src/config.cpp 与框架块定义。sources[i]、mux、inference[i]、tracker、analytics、osd、
-# encoder、recording、rtsp_out 都可以加 properties: {属性: 值}，设置对应插件的任意属性；不需要时省略。
+# encoder、recording、rtsp_out、rtsp_out.tiler、redis.image（采集点前的 queue）都可以加 properties: {属性: 值}，
+# 设置对应插件的任意属性；不需要时省略。
 
 logging:
   level: info
@@ -74,6 +75,8 @@ recording:
     max_files: 1440
     keep_files: 60
     min_free_mb: 5120
+  # 每个开启的分支每路源各用一个硬件编码器，RTSP 输出再用一个：N 路同时开 raw 与 osd 需要 2N+1 个编码会话。
+  # GeForce 显卡限制同时打开的 NVENC 会话数，超出时编码器无法启动；Jetson 各型号的编码能力不同（Orin Nano 没有 NVENC）。
   raw: false
   osd: true
 
