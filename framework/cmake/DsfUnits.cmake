@@ -4,13 +4,13 @@
 include_guard(GLOBAL)
 
 # 递归登记 <dir>/*/CMakeLists.txt，按目录名排序，结果与文件系统遍历顺序无关。
+# CONFIGURE_DEPENDS：已有构建目录在 cmake --build 时重新检查，新增或删除的单元随之生效。
 function(dsf_add_unit_directories parent)
-  file(GLOB _children LIST_DIRECTORIES true "${parent}/*")
-  list(SORT _children)
-  foreach(_child IN LISTS _children)
-    if(IS_DIRECTORY "${_child}" AND EXISTS "${_child}/CMakeLists.txt")
-      add_subdirectory("${_child}")
-    endif()
+  file(GLOB _lists CONFIGURE_DEPENDS "${parent}/*/CMakeLists.txt")
+  list(SORT _lists)
+  foreach(_list IN LISTS _lists)
+    get_filename_component(_child "${_list}" DIRECTORY)
+    add_subdirectory("${_child}")
   endforeach()
 endfunction()
 

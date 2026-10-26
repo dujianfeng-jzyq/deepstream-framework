@@ -2,6 +2,10 @@
 logging:
   level: info
 
+# 就绪帧计数超过该秒数不增长时退出，由容器重启恢复；接入实时源时设为明显长于重连时间的值。0 关闭。
+watchdog:
+  stall_timeout_s: 0
+
 sources:
   - id: test0
     type: test   # 换成 rtsp/file/v4l2 接入真实视频

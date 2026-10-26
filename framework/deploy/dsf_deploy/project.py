@@ -40,6 +40,34 @@ def init_project(root: Path, name: str, data_path: str | None) -> None:
     print(f"project: {name}\ndata:    {data_path or f'~/{name}/data'}")
 
 
+# Compose 文件 services: 下的服务名。只读两空格缩进的键，不解析 YAML（与安装器一样只用标准库）。
+_SERVICE_KEY = re.compile(r"^  ([A-Za-z0-9][A-Za-z0-9_.-]*):", re.M)
+
+
+def _compose_services(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    block = re.search(r"^services:\s*$(.*?)(?=^[^\s#]|\Z)", text, re.M | re.S)
+    return set(_SERVICE_KEY.findall(block.group(1))) if block else set()
+
+
+def _check_unit_name(root: Path, name: str) -> None:
+    """名字被占用时报错：同名 Compose 服务会被 Compose 合并成一个（新单元悄悄改写已有服务），
+    标识符相同的单元或插件会生成重名的 CMake 目标；dsf 是框架的命名空间与目标前缀。"""
+    identifier = name.replace("-", "_")
+    if identifier == "dsf" or identifier.startswith("dsf_"):
+        raise DeployError(f"invalid service name {name!r}: the dsf prefix is reserved for the framework")
+    services = _compose_services(root / layout.COMPOSE_ROOT)
+    for compose in (root / layout.SERVICES).glob(f"*/{layout.UNIT_COMPOSE}"):
+        services |= _compose_services(compose)
+    if name in services:
+        raise DeployError(f"invalid service name {name!r}: a Compose service with this name already exists")
+    for parent in (layout.SERVICES, layout.PLUGINS):
+        for unit in (root / parent).glob("*"):
+            if unit.is_dir() and unit.name.replace("-", "_") == identifier:
+                raise DeployError(f"invalid service name {name!r}: {parent}/{unit.name} already uses the "
+                                  f"identifier {identifier} (CMake targets would clash)")
+
+
 def new_unit(root: Path, name: str, kind: str) -> Path:
     """从 framework/templates/<kind>/ 生成 services/<name>/：__NAME__ 替换为服务名，
     __IDENT__ 替换为可作标识符的名字（- 换成 _）。"""
@@ -49,9 +77,8 @@ def new_unit(root: Path, name: str, kind: str) -> Path:
     if not source.is_dir():
         raise DeployError(f"unknown unit kind {kind!r}; available: "
                           + ", ".join(sorted(p.name for p in TEMPLATES.iterdir() if p.is_dir())))
+    _check_unit_name(root, name)
     target = root / layout.SERVICES / name
-    if target.exists():
-        raise DeployError(f"{target} already exists")
     identifier = name.replace("-", "_")
     for path in sorted(source.rglob("*")):
         if path.is_dir() or "__pycache__" in path.parts:
@@ -62,6 +89,6 @@ def new_unit(root: Path, name: str, kind: str) -> Path:
         text = path.read_text(encoding="utf-8").replace("__NAME__", name).replace("__IDENT__", identifier)
         destination.write_text(text, encoding="utf-8")
         destination.chmod(path.stat().st_mode & 0o777)
-    print(f"created {target.relative_to(root)}/ ({kind}); next: cmake --build build && "
-          "scripts/apply-profile.sh")
+    print(f"created {target.relative_to(root)}/ ({kind}); next: scripts/apply-profile.sh <profile> && "
+          "docker compose build deepstream-apps")
     return target
