@@ -134,6 +134,7 @@ class Component {
   virtual void OnMessage(GstMessage*);                 // 每条总线消息
   virtual void OnStopping();                           // 首次停止请求、发送 EOS 之前
   virtual void OnReleased();                           // 已置 NULL、流线程已停：拆探针
+  virtual bool Drained() const;                        // 排空期间：自己的收尾是否完成（默认 true）
   virtual bool Healthy() const;                        // false 时应用以失败退出
   virtual void Report(Stats&) const;                   // 周期统计，可能在进入 PLAYING 前调用
 };

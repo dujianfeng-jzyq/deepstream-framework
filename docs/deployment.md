@@ -131,7 +131,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 ./install.sh [--profile <name>] [--ask] [--clean-install] [--dry-run] [--install-dir <dir>] [--ready-timeout <s>]
 ```
 
-默认安装到 `${INSTALL_ROOT:-${XDG_DATA_HOME:-~/.local/share}}/<项目名>`。顺序不可调换：
+默认安装到 `<根>/<项目名>`：根目录取 `project.env` 中的 `INSTALL_ROOT`（随发布包的 `release.env` 带到现场），为空时取环境变量 `XDG_DATA_HOME`，再为空时取 `~/.local/share`；`--install-dir` 直接指定安装目录。顺序不可调换：
 
 1. 读取 `release.env`，核对本机平台与包完整性（缺失、改动、多余文件或符号链接都拒绝）。
 2. 检查安装目标：安装目录与包不重叠；控制文件、发布路径不能是符号链接，也不能与已有文件/目录类型冲突。之后才读取旧的选择与答案。
