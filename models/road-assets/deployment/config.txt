@@ -28,6 +28,8 @@ custom-lib-path=/workspace/lib/libnvdsinfer_custom_yolo.so
 
 [class-attrs-all]
 nms-iou-threshold=0.45
+# cluster-mode=2 时两个阈值都生效：pre-cluster 筛选进入 NMS 的候选，NMS 之后低于 post-cluster 的框被丢弃。
+# 输出目标的置信度由 post-cluster-threshold 控制；pre-cluster 只需不高于它，调低可让 NMS 看到更多候选。
 pre-cluster-threshold=0.25
 post-cluster-threshold=0.50
 topk=300
