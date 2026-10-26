@@ -20,7 +20,7 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 - 发布构建设置 `DSF_REQUIRE_DEEPSTREAM=ON`：SDK 不可用即失败，不会产出缺少应用的载荷。
 - builder 安装 Redis 服务端、软件编解码插件（并用 SDK 自带脚本恢复上游裁掉的编解码库）、pyflakes 与 Docker/Compose CLI，以非 root 运行 CTest，并设置 `DSF_FORBID_SKIPS=1`：任何 SKIP 都使构建失败。
 - `profiles/`、`project.env`、`site-fields.env` 在编译之后才复制，随后只运行带 `profiles` 标签的测试（每个 profile 渲染并经 `docker compose config` 解析）；改动它们不会重新编译。
-- runtime-check 回到原始 base，对每个应用执行 `--version` 与 `--selftest`，并导入 Python 运行时；任何失败都不会生成 apps 镜像。
+- runtime-check 回到原始 base，对每个应用执行 `--version` 与 `--selftest`，导入 Python 运行时，并对每个 Python 服务执行 `services/<name>/main.py --version`（执行模块顶层的导入：未写进 `requirements.txt` 的顶层依赖在这里失败，函数内的延迟导入不在检查范围内）；没有应用或服务时相应步骤跳过；任何失败都不会生成 apps 镜像。
 - JPEG 编码库在 `image.enabled` 的采集组件启动时才加载，构建和无 GPU 自检不加载其设备依赖。目标 Jetson 仍须使用与 JetPack 匹配的 DeepStream 镜像和 NVIDIA runtime；缺少运行库时启用图片会明确报错。
 - 镜像名由渲染器派生：`<项目>/deepstream-<DS版本>-base:<BASE_VERSION>-<输入摘要>`、`<项目>/deepstream-<DS版本>-apps:<APPS_VERSION>`。base 的输入摘要覆盖 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES`：输入变化一定得到新 tag，同名 tag 不会代表两种内容。
 
@@ -63,7 +63,7 @@ WebRTC 的媒体不走页面所在的 HTTP 连接：MediaMTX 在应答中告诉�
 
 浏览器的 WebRTC 多数只能播放 H.264，`encoder.codec: h265` 的输出只能用 RTSP 播放器查看（example-app 在 `--check-config` 与启动时给出警告）。
 
-公共定义 `dsf-service`：`image: ${BASE_IMAGE}`、渲染用户的 UID/GID、`restart: unless-stopped`、预检标签 `io.deepstream.config-check: "true"`、挂载点环境变量、`PYTHONPATH`、`DSF_READY_FILE`、只读载荷卷与配置目录、可写数据目录、`/etc/localtime`、就绪健康检查（就绪文件 30 秒内更新过）、等待播种完成、日志轮转。注意 `extends` 文件中的相对路径以该文件所在目录为基准，单元 compose.yaml 中的相对路径以项目根为基准。
+公共定义 `dsf-service`：`image: ${BASE_IMAGE}`、渲染用户的 UID/GID、`restart: unless-stopped`、预检标签 `io.deepstream.config-check: "true"`、挂载点环境变量、`PYTHONPATH`、`DSF_READY_FILE`、只读载荷卷与配置目录、可写数据目录、`/etc/localtime`、就绪健康检查（`$DSF_READY_FILE` 30 秒内更新过）、等待播种完成、日志轮转。注意 `extends` 文件中的相对路径以该文件所在目录为基准，单元 compose.yaml 中的相对路径以项目根为基准。
 
 固定挂载点：
 
@@ -105,6 +105,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 `model-engine-builder` 运行 `tools/prepare_model_engines.py --models-path /models`：
 
 - 扫描 `*.txt`，`[property]` 段同时含 `onnx-file` 与 `model-engine-file` 的就是待构建配置；输出路径完全遵循 `model-engine-file`（相对路径以配置目录为基准）。业务服务只读加载，nvinfer 不会把 engine 写到配置指定的路径，因此必须预构建。
+- 计算能力先由 `nvidia-smi` 查询，不支持该查询时（例如部分 Jetson）经 `libcuda` 的驱动 API 读取，两者格式相同；都读不到时失败，`--compute-cap` 可显式指定。
 - 指纹记录 ONNX 哈希、TensorRT 版本、GPU 计算能力、`network-mode`/`batch-size`/`int8-calib-file`、trtexec 参数，以及 engine 自身的哈希；engine 非空且指纹完全一致才复用，二者不配套时一定重建。
 - `network-mode=2` 自动加 `--fp16`，`=1` 加 `--int8`（有校准文件时加 `--calib`）。其他参数写在配置旁的 `<配置名>.trtexec`（例如动态形状），计入指纹。
 - 同一 engine 的检查与构建用文件锁串行化；构建写到同目录临时文件，成功后原子替换，失败保留旧 engine。

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import hashlib
 import os
@@ -38,6 +39,9 @@ PRODUCT_PROPERTIES = ("network-mode", "batch-size", "int8-calib-file")
 # 只决定用哪块卡构建、不影响产物的参数；计算能力已单独计入指纹。
 IGNORED_ARG_PREFIXES = ("--device",)
 TRT_VERSION = re.compile(r"TensorRT\s+v(\d+)")
+COMPUTE_CAP = re.compile(r"^\d+\.\d+$")
+# CUDA 驱动 API 的 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR / _MINOR。
+CU_CC_MAJOR, CU_CC_MINOR = 75, 76
 
 
 class Failure(Exception):
@@ -157,16 +161,40 @@ def trt_version(trtexec: Path) -> str:
     return f"trt{match.group(1)}"
 
 
-def compute_capability(device: int) -> str:
+def _smi_compute_capability(device: int) -> str | None:
     try:
         result = subprocess.run(["nvidia-smi", f"--id={device}", "--query-gpu=compute_cap",
                                  "--format=csv,noheader"], capture_output=True, text=True, check=False)
-    except OSError as error:
-        raise Failure(f"cannot run nvidia-smi: {error}") from error
-    value = result.stdout.strip().splitlines()
-    if result.returncode != 0 or not value or not value[0].strip():
-        raise Failure("cannot read the GPU compute capability; the builder needs a GPU (runtime: nvidia)")
-    return value[0].strip()
+    except OSError:
+        return None
+    lines = result.stdout.strip().splitlines()
+    value = lines[0].strip() if result.returncode == 0 and lines else ""
+    # 不支持该查询的平台可能输出 [N/A] 之类的占位符，不能进入指纹。
+    return value if COMPUTE_CAP.match(value) else None
+
+
+def _cuda_compute_capability(device: int) -> str | None:
+    """经 CUDA 驱动 API 读取：NVIDIA runtime 在容器中提供 libcuda，Jetson 的 nvidia-smi 不一定支持查询。"""
+    try:
+        cuda = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    handle, major, minor = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+    if cuda.cuInit(0) != 0 or cuda.cuDeviceGet(ctypes.byref(handle), device) != 0:
+        return None
+    if cuda.cuDeviceGetAttribute(ctypes.byref(major), CU_CC_MAJOR, handle) != 0 or \
+            cuda.cuDeviceGetAttribute(ctypes.byref(minor), CU_CC_MINOR, handle) != 0:
+        return None
+    return f"{major.value}.{minor.value}"
+
+
+def compute_capability(device: int) -> str:
+    """先问 nvidia-smi，失败再问驱动；两者给出的格式相同（例如 8.9），指纹不随来源变化。"""
+    value = _smi_compute_capability(device) or _cuda_compute_capability(device)
+    if value is None:
+        raise Failure(f"cannot read the compute capability of GPU {device} from nvidia-smi or libcuda; "
+                      "the builder needs a GPU (runtime: nvidia)")
+    return value
 
 
 def build_args(config: ModelConfig, extra: list[str]) -> list[str]:
