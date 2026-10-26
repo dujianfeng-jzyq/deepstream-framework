@@ -13,6 +13,7 @@
 框架负责：命令行（--config、--check-config、--version）、路径（CONTAINER_* 环境变量）、
 logging 段与日志格式、SIGINT/SIGTERM、就绪文件（DSF_READY_FILE，默认 /tmp/dsf.ready）。
 就绪文件只在 service.sleep()/service.alive() 中更新：主循环停止推进时健康检查随之失败。
+sleep() 的等待本身算作推进：长等待分段更新就绪文件，不会被健康检查或看门狗当成卡住。
 watchdog.stall_timeout_s 为正时，主循环超过时限没有推进则进程以失败退出，交给容器的重启策略：
 Docker 只在进程退出时重启，不会重启 unhealthy 的容器。
 """
@@ -38,6 +39,8 @@ LEVELS = ("trace", "debug", "info", "warn", "error", "critical", "off")
 _PYTHON_LEVELS = {"trace": logging.DEBUG, "debug": logging.DEBUG, "info": logging.INFO,
                   "warn": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL,
                   "off": logging.CRITICAL + 10}
+# 健康检查要求就绪文件在 30 秒内更新过（framework/compose/defaults.yaml），sleep() 至少按这个间隔更新。
+_ALIVE_INTERVAL_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ class Service:
         self._ready = ready_file()
         self._signal: int | None = None
         self._last_alive = time.monotonic()
+        self._alive_interval = _ALIVE_INTERVAL_S
 
     # ---- 主循环使用 ----
 
@@ -99,9 +103,15 @@ class Service:
             self.log.warning("cannot update readiness file %s: %s", self._ready, error)
 
     def sleep(self, seconds: float) -> bool:
-        """可被停止信号打断的等待；返回 True 表示仍在运行。"""
-        self.alive()
-        return not self._stop.wait(seconds)
+        """可被停止信号打断的等待；返回 True 表示仍在运行。等待期间持续声明推进。"""
+        deadline = time.monotonic() + seconds
+        while True:
+            self.alive()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self.running
+            if self._stop.wait(min(remaining, self._alive_interval)):
+                return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -148,6 +158,8 @@ class Service:
         self._ready.unlink(missing_ok=True)
         self._last_alive = time.monotonic()
         if stall_timeout > 0:
+            # 分段间隔短于看门狗时限：再长的 sleep() 也不会被误判为卡住。
+            self._alive_interval = min(_ALIVE_INTERVAL_S, stall_timeout / 2)
             threading.Thread(target=self._watch, args=(stall_timeout,), name="watchdog", daemon=True).start()
         try:
             main(config, self)

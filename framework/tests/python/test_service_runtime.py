@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -109,6 +110,25 @@ class ServiceTest(unittest.TestCase):
                 self.assertEqual(Service("svc").run(load, main, ["--bogus"]), 2)
             del os.environ["DSF_READY_FILE"]
 
+    def test_sleep_refreshes_the_ready_file_during_long_waits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory, "ready")
+            os.environ["DSF_READY_FILE"] = str(ready)
+            try:
+                service = Service("svc")
+            finally:
+                del os.environ["DSF_READY_FILE"]
+            service._alive_interval = 0.05
+            touches = []
+            original = service.alive
+            service.alive = lambda: (touches.append(time.monotonic()), original())
+            self.assertTrue(service.sleep(0.3))
+            self.assertGreaterEqual(len(touches), 5)
+            self.assertTrue(ready.exists())
+            self.assertLess(max(b - a for a, b in zip(touches, touches[1:])), 0.2)
+            service.stop()
+            self.assertFalse(service.sleep(10))  # 停止后立即返回，不等到时限
+
 
 def run_service(directory: str, config: str, body: str, timeout: float = 30) -> subprocess.CompletedProcess:
     """在子进程中运行服务：看门狗以 os._exit 结束进程，信号处理会替换进程级处理器。"""
@@ -146,6 +166,15 @@ class ServiceProcessTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("made no progress", result.stdout)
             self.assertFalse(Path(directory, "ready").exists())
+
+    def test_long_sleeps_count_as_progress(self):
+        # 时限 1 秒，单次等待 2.5 秒：等待期间分段更新，看门狗不触发。
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_service(directory, "watchdog:\n  stall_timeout_s: 1\n", """
+                assert service.sleep(2.5)
+                """)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("made no progress", result.stdout)
 
     def test_watchdog_stays_quiet_while_the_loop_advances(self):
         with tempfile.TemporaryDirectory() as directory:
