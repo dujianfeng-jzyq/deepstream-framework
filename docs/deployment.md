@@ -31,7 +31,7 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 ```text
 docker-compose.yaml               框架级：deepstream-base、deepstream-apps（播种）、model-engine-builder
 services/<unit>/compose.yaml      各服务单元（按名称排序）
-profiles/<profile>.yaml           平台差异（runtime: nvidia、设备、用户）
+profiles/<profile>.yaml           平台差异（设备、用户组、网络）
 generated/network.compose.yaml    仅当 profile 设置 x-network-mode 时生成，排在最后
 ```
 
@@ -153,7 +153,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 
 ## 7. 平台与现场验证
 
-profile 中写平台差异：`server-ds71` 为 x86_64 服务器（独立显卡，Docker bridge 网络），`jetson-ds71` 为 Jetson（host 网络）。两者都是 DeepStream 7.1。Apple Silicon 开发机用 `jetson-ds71` 构建并自检（同为 arm64 镜像，不运行推理）。新增平台时复制一份 profile：写明 `x-platform` 与上游镜像，在 `services` 中加入 `runtime: nvidia`、所需设备与 `group_add`，编码器差异写在应用配置的 `encoder.properties`。
+profile 中写平台差异：`server-ds71` 为 x86_64 服务器（独立显卡，Docker bridge 网络），`jetson-ds71` 为 Jetson（host 网络）。两者都是 DeepStream 7.1。Apple Silicon 开发机用 `jetson-ds71` 构建并自检（同为 arm64 镜像，不运行推理）。新增平台时复制一份 profile：写明 `x-platform` 与上游镜像，在 `services` 中加入所需设备与 `group_add`（`runtime: nvidia` 由需要 GPU 的单元自己声明，不写在 profile），编码器差异写在应用配置的 `encoder.properties`。
 
 ### Jetson（host 网络）
 

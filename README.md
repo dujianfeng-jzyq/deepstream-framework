@@ -37,7 +37,7 @@ PYTHONPATH=framework/python:framework/deploy:framework/tests/python python3 -m u
 
 ### NVIDIA Container Toolkit
 
-GPU profile 的服务使用 `runtime: nvidia`，Docker 未注册该运行时会在启动时报 `unknown or invalid runtime name: nvidia`。构建机和目标机都要安装，Jetson 的 JetPack 已自带。x86_64 Ubuntu 上：
+需要 GPU 的服务（应用与 `model-engine-builder`）使用 `runtime: nvidia`，Docker 未注册该运行时会在启动时报 `unknown or invalid runtime name: nvidia`。构建机和目标机都要安装，Jetson 的 JetPack 已自带。x86_64 Ubuntu 上：
 
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \

@@ -1,6 +1,7 @@
 services:
   example-app:
     extends: {file: framework/compose/defaults.yaml, service: dsf-service}
+    runtime: nvidia  # 需要 GPU 的单元自己声明运行时；平台差异（设备、用户组）写在 profile
     entrypoint: [bin/example-app]
     environment:
       NVIDIA_VISIBLE_DEVICES: all

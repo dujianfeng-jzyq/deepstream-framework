@@ -9,11 +9,10 @@ x-build:
 # 渲染器同时把每个服务名指向 127.0.0.1（extra_hosts），配置照常用 redis、mediamtx 等服务名。
 x-network-mode: host
 services:
+  # 非 root 用户访问 /dev/nvhost-*、编解码器等 Jetson 设备；runtime: nvidia 由单元自己声明。
   example-app:
-    runtime: nvidia
-    group_add: [video]  # 非 root 用户访问 /dev/nvhost-*、编解码器等 Jetson 设备
+    group_add: [video]
   model-engine-builder:
-    runtime: nvidia
     group_add: [video]
   # host 网络下监听会直接暴露到现场网络：Redis 只绑定回环地址。
   redis:

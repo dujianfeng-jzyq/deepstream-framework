@@ -2,8 +2,3 @@
 x-platform: amd64
 x-build:
   DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:7.1-samples-multiarch
-services:
-  example-app:
-    runtime: nvidia
-  model-engine-builder:
-    runtime: nvidia

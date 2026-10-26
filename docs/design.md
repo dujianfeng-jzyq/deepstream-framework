@@ -327,7 +327,7 @@ base tag 包含 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES` 的输入�
 | `/models` | 模型、推理配置与 engine | 只读；预构建服务可写 |
 | `/data` | 录像与其他持久数据 | 可写 |
 
-公共部署机制通过 `--check-config` 和 `io.deepstream.config-check` 标签执行服务预检，通过 `$DSF_READY_FILE` 判断运行进度。GPU 设备、容器 runtime 与补充用户组由 profile 定义。
+公共部署机制通过 `--check-config` 和 `io.deepstream.config-check` 标签执行服务预检，通过 `$DSF_READY_FILE` 判断运行进度。容器 runtime 由需要 GPU 的单元自己声明（公共定义不预设，Python 服务不一定需要 GPU）；设备与补充用户组由 profile 定义。
 
 ### 8.3 配置分层与渲染
 

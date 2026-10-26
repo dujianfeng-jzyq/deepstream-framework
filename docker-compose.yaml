@@ -41,6 +41,7 @@ services:
     image: ${BASE_IMAGE}
     user: "${HOST_UID}:${HOST_GID}"  # engine 与指纹归现场用户，业务容器才能读取
     restart: "no"
+    runtime: nvidia
     depends_on:
       deepstream-apps:
         condition: service_completed_successfully

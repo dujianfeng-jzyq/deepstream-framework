@@ -243,7 +243,7 @@ sys.exit(Service("my-service", "说明").run(load, main))
 
 1. `scripts/new-app.sh <name> --kind cpp|python` 生成 `services/<name>/`。
 2. 在 `src/app.cpp`（或 `main.py`）中读取配置、组图、写业务逻辑；配置模板放 `templates/config/<name>.yaml`，现场参数加到 `site-fields.env`。
-3. 平台差异（`runtime: nvidia`、设备、`group_add`）写在 `profiles/*.yaml` 的 `services.<name>`。
+3. 需要 GPU 的单元在自己的 `compose.yaml` 中写 `runtime: nvidia`（C++ 模板已带上）；平台差异（设备、`group_add`）写在 `profiles/*.yaml` 的 `services.<name>`。
 4. 需要自定义推理解析库时在 `plugins/` 下用 `dsf_add_plugin`；模型放 `models/<id>/`，`model-engine-builder` 会自动构建其 engine。
 5. `scripts/apply-profile.sh && docker compose config` 检查部署定义，`docker compose build deepstream-apps` 完成编译、CTest 与自检（宿主 `cmake --build build && ctest` 可用于更快的迭代）。
 

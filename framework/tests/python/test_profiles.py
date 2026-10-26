@@ -33,6 +33,11 @@ class ProfilesTest(unittest.TestCase):
                     plan = render.build_plan(stage, name)
                     render.write_plan(stage, plan)
                     config = Docker().compose_config(stage)
+                    # 请求 GPU 的服务必须在 NVIDIA runtime 下运行，否则 NVIDIA_* 变量不生效、容器内没有 GPU。
+                    gpu = {service: definition.get("runtime") for service, definition in config["services"].items()
+                           if "NVIDIA_VISIBLE_DEVICES" in (definition.get("environment") or {})}
+                    self.assertTrue(gpu)
+                    self.assertEqual(gpu, dict.fromkeys(gpu, "nvidia"))
                     if layout.NETWORK_COMPOSE in plan.files:
                         self.assertNotIn("networks", config)  # 没有服务留在默认网络
 
