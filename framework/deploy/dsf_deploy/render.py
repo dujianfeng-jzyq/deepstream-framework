@@ -221,7 +221,8 @@ def _network_overrides(root: Path, compose_files: list[str], mode: str, yamlio) 
     创建 bridge 网络，所以必须覆盖全部服务；显式的 network_mode（如 none）保持不变。
     extends 来源中的声明同样算显式（相对路径以项目根为基准，与 Compose 一致）。
     mode 为 host 时服务名不再经 Compose 的 DNS 解析：给这些服务加 extra_hosts，把每个服务名
-    指向 127.0.0.1，配置中照常用服务名（redis、mediamtx）访问本机服务，不必按网络模式覆盖。"""
+    指向 127.0.0.1，配置中照常用服务名（redis、mediamtx）访问本机服务，不必按网络模式覆盖；
+    并清空这些服务的 ports（host 网络下端口映射无效，Docker 每次创建容器都会为此告警）。"""
     documents: dict[Path, dict] = {}
 
     def services_of(path: Path) -> dict:
@@ -234,6 +235,7 @@ def _network_overrides(root: Path, compose_files: list[str], mode: str, yamlio) 
         return documents[path]
 
     explicit: dict[str, bool] = {}
+    published: set[str] = set()
     for relative in compose_files:
         for name, service in services_of(root / relative).items():
             sources = [service or {}]
@@ -247,15 +249,19 @@ def _network_overrides(root: Path, compose_files: list[str], mode: str, yamlio) 
                 raise DeployError(f"{relative}: service {name} declares networks, "
                                   "which cannot be combined with x-network-mode")
             explicit[name] = explicit.get(name, False) or any("network_mode" in s for s in sources)
+            if any(source.get("ports") for source in sources):
+                published.add(name)
     names = sorted(explicit)
 
-    def override() -> dict:  # 每个服务一份新列表：共享的对象会被 dump 成 YAML 锚点
+    def override(service: str) -> dict:  # 每个服务一份新列表：共享的对象会被 dump 成 YAML 锚点
         result: dict = {"network_mode": mode}
         if mode == "host":
             result["extra_hosts"] = [f"{name}:127.0.0.1" for name in names]
+            if service in published:  # 只在需要时使用 !reset，没有端口映射的项目不要求新版 Compose
+                result["ports"] = yamlio.Reset()
         return result
 
-    return {"services": {name: override() for name in names if not explicit[name]}}
+    return {"services": {name: override(name) for name in names if not explicit[name]}}
 
 
 def build_plan(root: Path, requested_profile: str | None = None) -> Plan:

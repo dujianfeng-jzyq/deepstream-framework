@@ -56,6 +56,17 @@ def load_text(source):
     return yaml.load(source, Loader=TextLoader)
 
 
+class Reset(list):
+    """输出为 Compose 的 !reset 标签：多文件合并时清空前面文件给出的值（Compose 2.24.4+）。"""
+
+
+class _Dumper(yaml.SafeDumper):
+    pass
+
+
+_Dumper.add_representer(Reset, lambda dumper, value: dumper.represent_sequence("!reset", value))
+
+
 def dump(document) -> str:
     """保持键顺序、输出 UTF-8 原文。"""
-    return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+    return yaml.dump(document, Dumper=_Dumper, sort_keys=False, allow_unicode=True)

@@ -79,8 +79,13 @@ class RenderTest(ProjectTestCase):
     @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
     def test_network_mode_leaves_no_service_on_the_default_network(self):
         (self.root / "profiles/test.yaml").write_text(PROFILE + "x-network-mode: host\n")
+        compose = self.root / "services/app/compose.yaml"
+        compose.write_text(compose.read_text().replace("    entrypoint:", "    ports: [\"8554:8554\"]\n    entrypoint:"))
         render.render(self.root, "test", quiet=True)
+        # host 网络下端口映射无效且 Docker 会告警：渲染器清空它；没有映射的服务不加 !reset
+        self.assertEqual((self.root / layout.NETWORK_COMPOSE).read_text().count("ports: !reset []"), 1)
         config = Docker().compose_config(self.root)
+        self.assertNotIn("ports", config["services"]["app"])
         self.assertNotIn("networks", config)  # 没有服务使用默认网络，Compose 不会创建 bridge
         modes = {name: service.get("network_mode") for name, service in config["services"].items()}
         self.assertEqual(modes.pop("deepstream-apps"), "none")
