@@ -60,8 +60,10 @@ def _replace(plan: Plan, docker: Docker) -> None:
             docker.volume_remove(old_volume)
         stale_check = old_volume != new_volume
     if stale_check and docker.volume_exists(new_volume):
-        print(f"WARNING: a stale payload volume exists and will not be refreshed: {new_volume}\n"
-              f"         remove it with: docker volume rm {new_volume}", file=sys.stderr)
+        # 首次安装或改名后遗留的载荷卷（例如删掉安装目录后重装）：卷只在为空时播种，不删就会运行旧载荷。
+        # 预检已确认没有其他目录启动的同名工程容器在用它。
+        print(f"removing the leftover payload volume {new_volume}")
+        docker.volume_remove(new_volume)
 
     if plan.clean and root.exists():
         print(f"wiping {root}")

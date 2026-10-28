@@ -221,6 +221,35 @@ class PackInstallTest(ProjectTestCase):
         self.assertTrue((self.install_dir / "models/m/deployment/new.txt").exists())
         self.assertTrue((self.install_dir / "notes.txt").exists())
 
+    def test_first_install_removes_a_leftover_payload_volume(self):
+        # 删掉安装目录后重装：遗留的载荷卷不删就会继续运行旧程序。
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        target.volumes = {"demo_app-files", "demo_redis-data"}
+        _, output = self.install(package, target, dry_run=True)
+        self.assertIn("remove: leftover payload volume demo_app-files", output)
+        self.assertEqual(target.volumes, {"demo_app-files", "demo_redis-data"})
+        self.install(package, target)
+        removed = target.calls.index(["volume-rm", "demo_app-files"])
+        started = next(i for i, call in enumerate(target.calls) if call[0] == "compose" and "up" in call)
+        self.assertLess(removed, started)
+        self.assertEqual(target.volumes, {"demo_redis-data"})
+
+    def test_refuses_to_take_over_the_project_started_elsewhere(self):
+        # 开发仓库的栈与安装共用工程名：在这里 up 会接管并重建它的容器。
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        target.containers = [("demo-app-1", str(self.root)), ("demo-redis-1", str(self.root))]
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), \
+                    self.assertRaisesRegex(DeployError, f"started from {self.root}; installing here"):
+                self.install(package, target, dry_run=dry_run)
+        self.assertFalse(self.install_dir.exists())
+        self.assertFalse([call for call in target.calls if call[0] in ("compose", "load", "volume-rm")])
+        self.install(package)
+        target.containers = [("demo-app-1", str(self.install_dir))]  # 本安装启动的容器：照常升级
+        self.install(package, target)
+
     def test_obsolete_file_removed_after_preflight_does_not_abort_the_upgrade(self):
         package = self.pack(with_base=True)
         self.install(package)
@@ -425,6 +454,29 @@ class PackInstallTest(ProjectTestCase):
         target.ps_rows = [{"Service": "app", "State": "exited", "ExitCode": 1}]
         with self.assertRaisesRegex(DeployError, "service app exited with 1"), redirect_stdout(io.StringIO()):
             install(Options(package, self.install_dir, interactive=False, ready_timeout=2), target)
+
+    def test_readiness_timeout_shows_why_a_service_is_not_ready(self):
+        # 只报“未就绪”时现场看不出原因：附上状态与最近的告警，例如相机没有推流。
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        target.ps_rows = [{"Service": "app", "State": "running", "Health": "starting"}]
+        target.logs["app"] = "\n".join(["[info] starting"] + [f"[warning] src: Not Found (404) #{i}"
+                                                               for i in range(5)] + ["[info] retrying"])
+        with self.assertRaises(DeployError) as caught, redirect_stdout(io.StringIO()):
+            install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
+        message = str(caught.exception)
+        self.assertIn("services not ready after 0s: app,", message)
+        self.assertIn("  app: running (starting)\n    [warning] src: Not Found (404) #2\n", message)
+        self.assertIn("[warning] src: Not Found (404) #4\n  deepstream-apps: missing", message)
+        self.assertNotIn("#1", message)  # 只摘最近的几条
+        self.assertNotIn("[info]", message)
+        self.assertIn("camera that is not streaming", message)
+        # GStreamer 的错误详情换行：括号未闭合的行与下一行合并成一条
+        target.logs["app"] = "[warning] src: Not found (gstrtspsrc.c(6736): src:\nNot Found (404))\nResetting source"
+        with self.assertRaises(DeployError) as caught, redirect_stdout(io.StringIO()):
+            install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
+        self.assertIn("    [warning] src: Not found (gstrtspsrc.c(6736): src: Not Found (404))\n",
+                      str(caught.exception))
 
 
 class InventoryTest(ProjectTestCase):

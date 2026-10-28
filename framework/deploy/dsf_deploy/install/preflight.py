@@ -2,7 +2,7 @@
 
 顺序不可调换：
   1. 读取 release.env，核对平台与包完整性
-  2. 检查安装目标路径，之后才读取旧的 profile 与现场答案
+  2. 检查安装目标路径与同名工程是否已由其他目录启动，之后才读取旧的 profile 与现场答案
   3. 选择 profile、收集现场答案（提问默认值含该 profile 的 x-build；宿主没有 PyYAML 时
      为此提前加载包内的 base），检查清洁安装范围与退役文件冲突
   4. 加载镜像（不影响正在运行的旧容器），在临时目录渲染新配置，按最终 Compose
@@ -269,6 +269,17 @@ def _check_configs(services: dict, stage: Path, release: dict[str, str], docker:
         docker.run(args)
 
 
+def _check_other_directories(project: str, install_dir: Path, docker: Docker) -> None:
+    """同名 Compose 工程的容器由其他目录启动（例如开发仓库）时，在这里 up 会接管并重建它们，
+    而那个目录的服务会被悄悄替换。只允许本安装目录启动的容器。"""
+    others = sorted({directory or "(unknown directory)" for _, directory in docker.project_containers(project)
+                     if not directory or Path(os.path.realpath(directory)) != install_dir})
+    if others:
+        raise DeployError(f"the Compose project {project} already has containers started from "
+                          f"{', '.join(others)}; installing here would take them over.\n"
+                          "  stop them first: cd <that directory> && docker compose down")
+
+
 def prepare(options: Options, docker: Docker) -> Plan:
     package_root = options.package.resolve()
     if not docker.available():
@@ -291,6 +302,7 @@ def prepare(options: Options, docker: Docker) -> Plan:
     if install_dir == package_root or install_dir in package_root.parents or package_root in install_dir.parents:
         raise DeployError("the installation directory must not overlap the package directory")
     targets.check(package_root, install_dir)
+    _check_other_directories(release["PROJECT_NAME"], install_dir, docker)
 
     # 3. 现场选择（读取旧值必须在任何删除之前）
     profile, source = _choose_profile(options, release, install_dir, package_root)
@@ -350,8 +362,7 @@ def describe(plan: Plan, docker: Docker) -> str:
     lines += [f"writable mount: {path}" for path in plan.data_paths]
     volume = layout.payload_volume(plan.release["PROJECT_NAME"])
     if not (plan.install_dir / layout.ENV).is_file() and docker.volume_exists(volume):
-        lines.append(f"warning: stale payload volume {volume} exists and would not be refreshed; "
-                     f"remove it with: docker volume rm {volume}")
+        lines.append(f"remove: leftover payload volume {volume} (it would keep the old programs)")
     lines.append("start: docker compose up -d, then wait for readiness")
     return "\n".join(lines)
 

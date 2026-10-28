@@ -70,6 +70,14 @@ class Docker:
     def volume_remove(self, name: str) -> None:
         self._run(["docker", "volume", "rm", name], capture=True)
 
+    def project_containers(self, project: str) -> list[tuple[str, str]]:
+        """Compose 工程 project 的全部容器（含已停止的）：(容器名, 启动它的项目目录)。"""
+        result = self._run(["docker", "ps", "--all", "--filter", f"label=com.docker.compose.project={project}",
+                            "--format", '{{.Names}}\t{{.Label "com.docker.compose.project.working_dir"}}'],
+                           capture=True)
+        rows = (line.partition("\t") for line in result.stdout.splitlines() if line.strip())
+        return [(name, directory) for name, _, directory in rows]
+
     def export_directory(self, image: str, directory: str, target: Path) -> None:
         """把镜像中的目录复制出来（创建不运行的临时容器）。"""
         container = self._run(["docker", "create", image], capture=True).stdout.strip()
@@ -97,6 +105,10 @@ class Docker:
         result = self.compose(project_dir, ["config", "--format", "json"], capture=True,
                               env_file=env_file, files=files)
         return json.loads(result.stdout)
+
+    def compose_logs(self, project_dir: Path, service: str, tail: int) -> str:
+        return self.compose(project_dir, ["logs", "--no-color", "--no-log-prefix", "--tail", str(tail), service],
+                            capture=True).stdout
 
     def compose_ps(self, project_dir: Path) -> list[dict]:
         text = self.compose(project_dir, ["ps", "--all", "--format", "json"], capture=True).stdout.strip()

@@ -81,6 +81,8 @@ class FakeDocker(Docker):
         self.fail_on: str | None = None
         self.env_files: list[tuple[int, str]] = []
         self.labels: dict[str, dict[str, str]] = {}
+        self.containers: list[tuple[str, str]] = []  # (容器名, 启动它的项目目录)
+        self.logs: dict[str, str] = {}
 
     def available(self) -> bool:
         return True
@@ -120,6 +122,9 @@ class FakeDocker(Docker):
         self._record("volume-rm", name)
         self.volumes.discard(name)
 
+    def project_containers(self, project):
+        return list(self.containers)
+
     def export_directory(self, image, directory, target):
         self._record("export", image, directory)
         (Path(target) / "bin").mkdir(parents=True, exist_ok=True)
@@ -136,6 +141,9 @@ class FakeDocker(Docker):
     def compose_config(self, project_dir, env_file=None, files=None):
         self._record("compose-config", str(project_dir))
         return Docker().compose_config(project_dir, env_file=env_file, files=files)
+
+    def compose_logs(self, project_dir, service, tail):
+        return "\n".join(self.logs.get(service, "").splitlines()[-tail:])
 
     def compose_ps(self, project_dir):
         if self.ps_rows is not None:
