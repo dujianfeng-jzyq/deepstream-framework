@@ -51,7 +51,7 @@ int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
 
 配置中的 `logging` 段由框架读取：`level`（trace/debug/info/warn/error/critical/off）、`console`、`file`、`directory`、`stats_interval_s`（组件统计日志周期，0 关闭）。
 
-`watchdog` 段也由框架读取：`stall_timeout_s`（默认 0 关闭）。为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器会一直停在 unhealthy。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。
+`watchdog` 段也由框架读取：`stall_timeout_s`（默认 0 关闭）。为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器会一直停在 unhealthy。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。看门狗从管线创建起计时，不等 PLAYING：直播源可能晚于应用上线时，应用可把 `startup_timeout` 设为 0，让未连上的源与运行中断流一样由看门狗把守，而不是每次启动超时都退出重启（example-app 即如此）。
 
 ## 3. 配置读取
 

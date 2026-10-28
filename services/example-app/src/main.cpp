@@ -1,6 +1,7 @@
 // example-app：多路视频 → 推理 → 跟踪 → Redis 消息 / 分段录像 / RTSP 输出。
 // 本文件只做组装：拓扑在 plan.cpp，配置在 config.cpp，其余机制由框架提供。
 
+#include <chrono>
 #include <memory>
 
 #include <spdlog/spdlog.h>
@@ -32,6 +33,9 @@ struct ExampleApp {
     // RTSP 输出断线（例如 MediaMTX 重启）会报错且不会重连：先排空再退出，录像器封装当前分段，
     // 再由容器重启恢复推流；不排空时每路的当前分段都会丢失。
     assembly.options().drain_on_error = true;
+    // 相机可能晚于应用上线（例如断电后同时启动）：不设启动超时，未连上的源与运行中断流一样由
+    // 看门狗（watchdog.stall_timeout_s）把守。否则每 30 秒退出重启一次，反复重新加载模型。
+    assembly.options().startup_timeout = std::chrono::milliseconds(0);
     for (const auto& warning : example_app::Warnings(config)) spdlog::warn("{}", warning);
     // 断流恢复后的第一帧编成关键帧：录像在断流处干净地切分，RTSP 观看端立即恢复画面。
     if (config.encoder.keyframe_on_gap_ms > 0) {

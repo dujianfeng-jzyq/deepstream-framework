@@ -11,7 +11,7 @@ logging:
   stats_interval_s: 60
 
 # 帧计数 5 分钟不增长时退出，由容器重启恢复（Docker 不会重启 unhealthy 的容器）。
-# 应明显长于 RTSP 的正常重连时间；0 关闭。
+# 启动时相机未上线也按此计时（应用不设启动超时）。应明显长于 RTSP 的正常重连时间；0 关闭。
 watchdog:
   stall_timeout_s: 300
 
