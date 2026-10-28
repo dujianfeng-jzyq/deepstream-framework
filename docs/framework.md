@@ -51,7 +51,9 @@ int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
 
 配置中的 `logging` 段由框架读取：`level`（trace/debug/info/warn/error/critical/off）、`console`、`file`、`directory`、`stats_interval_s`（组件统计日志周期，0 关闭）。
 
-`watchdog` 段也由框架读取：`stall_timeout_s`（默认 0 关闭）。为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器会一直停在 unhealthy。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。看门狗从管线创建起计时，不等 PLAYING：直播源可能晚于应用上线时，应用可把 `startup_timeout` 设为 0，让未连上的源与运行中断流一样由看门狗把守，而不是每次启动超时都退出重启（example-app 即如此）。
+`watchdog` 段也由框架读取：`stall_timeout_s`（默认 0 关闭）。为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器不会自行恢复。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。看门狗从管线创建起计时，不等 PLAYING：直播源可能晚于应用上线时，应用可把 `startup_timeout` 设为 0，让未连上的源与运行中断流一样由看门狗把守，而不是每次启动超时都退出重启（example-app 即如此）。
+
+`readiness` 段也由框架读取：`require_input`（默认 false）。默认时就绪（健康检查）表示应用活着：主循环在运行且看门狗没有触发，没有输入也算就绪——线阵相机、外触发等源在启动后可能长时间不产帧，这是正常状态，不应让健康检查失败、安装等待超时。输入是否在供帧由看门狗把守（持续供帧的源设 `stall_timeout_s`，按需产帧的源设 0 或足够长），并记录在就绪文件中（`count=<计数> idle_s=<距上次增长的秒数>`），安装器据此提示还没有收到输入的服务。设为 true 时就绪还要求就绪计数在健康检查周期（30 秒）内增长过，健康状态因此直接反映输入是否在供帧。
 
 ## 3. 配置读取
 
@@ -148,7 +150,7 @@ class Component {
 - 启动：`assembly.options().startup_timeout` 默认 30 秒，设为 0 禁用启动超时，负数视为启动失败。异步切换状态的 sink 可能等待首帧，使按需产帧的管线长期无法进入 PLAYING；是否等待取决于元件及其配置。状态切换返回失败或总线报告错误时仍以 `start-error` / `run-error` 结束，`OnPlaying` 只在真正进入 PLAYING 后调用。计时在 `set_state(PLAYING)` 返回异步状态切换结果后开始，不覆盖同步初始化和阻塞调用；定时任务须等主循环运行才能执行。
 - 结果原因：`eos`、`stopped`（成功）；`forced`、`build-error`、`start-error`、`run-error`、`startup-timeout`（失败）。
 
-标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`（`KeyframeOnGap` 由应用按编码器登记，见 §8），两者在 `OnCreated` 注册定时器，由主循环按各自周期调度，不等 PLAYING。指定进度指标时，就绪文件 `$DSF_READY_FILE` 只在处理计数增长时更新：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时只要主循环在运行就每秒更新，按需产帧的源配合 `startup_timeout = 0` 使用，静止期间仍保持就绪。组件的 `Report()` 须能在进入 PLAYING 前报告统计。
+标准组件由框架自动加入：`ReadinessHeartbeat` 与 `StatsReporter`（`KeyframeOnGap` 由应用按编码器登记，见 §8），两者在 `OnCreated` 注册定时器，由主循环按各自周期调度，不等 PLAYING。就绪文件 `$DSF_READY_FILE` 默认在主循环运行时每秒更新；`readiness.require_input: true` 时只在处理计数增长时更新（见 §2）。进度指标同时供看门狗与就绪文件中的计数使用：DeepStream 管线用 `assembly.ReadyWhen([&tap] { return tap.frames(); })` 按批次元数据中的真实帧计数——mux 之后一个 buffer 是一个批次，多路时某一路断流批次仍会推送，按 buffer 计数不能反映输入是否在供帧；不经过 nvstreammux 的普通管线可用 `ReadyWhenFramesReach(元件)`；都不指定时没有计数，看门狗不会触发，就绪文件内容为 `alive`。按需产帧的源配合 `startup_timeout = 0` 使用。组件的 `Report()` 须能在进入 PLAYING 前报告统计。
 
 ## 6. 元数据（需要 SDK）
 

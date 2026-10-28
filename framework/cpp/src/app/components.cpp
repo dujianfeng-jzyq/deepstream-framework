@@ -26,9 +26,9 @@ std::string ReadyFilePath() {
 
 ReadinessHeartbeat::ReadinessHeartbeat(std::string element, std::function<std::uint64_t()> progress,
                                        std::string path, std::chrono::milliseconds interval,
-                                       std::chrono::milliseconds stall_timeout)
+                                       std::chrono::milliseconds stall_timeout, bool require_input)
     : element_(std::move(element)), progress_(std::move(progress)), path_(std::move(path)),
-      interval_(interval), stall_timeout_(stall_timeout) {}
+      interval_(interval), stall_timeout_(stall_timeout), require_input_(require_input) {}
 
 std::uint64_t ReadinessHeartbeat::Count() const {
   return progress_ ? progress_() : buffers_.load(std::memory_order_relaxed);
@@ -43,10 +43,10 @@ void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   timer_ = pipeline.Every(interval_, [this, counting, &pipeline] {
     const std::uint64_t count = Count();
     const auto now = std::chrono::steady_clock::now();
-    if (!counting || count != last_) {
+    const bool advanced = !counting || count != last_;
+    if (advanced) {
       last_ = count;
       last_progress_ = now;
-      Touch(count);
     } else if (stall_timeout_.count() > 0 && !stalled_ && now - last_progress_ >= stall_timeout_) {
       // 排空而不是立即结束：录像等组件仍能收尾；排空超时由管线的 stop_timeout 兜底。
       stalled_ = true;
@@ -54,6 +54,7 @@ void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
                     std::chrono::duration_cast<std::chrono::seconds>(stall_timeout_).count(), count);
       pipeline.RequestStop();
     }
+    if (!stalled_ && (advanced || !require_input_)) Touch(counting, count, now);
   });
   if (element_.empty() || progress_) return;
   GstElement* element = gst_bin_get_by_name(GST_BIN(bin), element_.c_str());
@@ -70,9 +71,14 @@ void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
       &buffers_, nullptr);
 }
 
-void ReadinessHeartbeat::Touch(std::uint64_t count) {
+void ReadinessHeartbeat::Touch(bool counting, std::uint64_t count, std::chrono::steady_clock::time_point now) {
   std::ofstream stream(path_, std::ios::trunc);
-  stream << count << "\n";
+  if (!counting) {
+    stream << "alive\n";
+    return;
+  }
+  stream << "count=" << count
+         << " idle_s=" << std::chrono::duration_cast<std::chrono::seconds>(now - last_progress_).count() << "\n";
 }
 
 void ReadinessHeartbeat::OnReleased() {

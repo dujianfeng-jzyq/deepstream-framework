@@ -91,6 +91,12 @@ WatchdogOptions WatchdogOptions::Read(config::Reader reader) {
   return options;
 }
 
+ReadinessOptions ReadinessOptions::Read(config::Reader reader) {
+  ReadinessOptions options;
+  options.require_input = reader.Get("require_input", false);
+  return options;
+}
+
 void ValidateLogging(const LogOptions& options) {
   bool known = false;
   for (const auto& [name, level] : Levels()) known = known || name == options.level;
@@ -252,6 +258,7 @@ int Run(int argc, char** argv, const Definition& definition) {
       line.config_path.empty() ? paths.config + "/" + info.name + ".yaml" : line.config_path;
   LogOptions logging;
   WatchdogOptions watchdog;
+  ReadinessOptions ready;
   std::string summary;
   Assembly assembly(paths);
   try {
@@ -259,6 +266,7 @@ int Run(int argc, char** argv, const Definition& definition) {
     config::Reader root = document.Root();
     logging = LogOptions::Read(root.Section("logging"));
     watchdog = WatchdogOptions::Read(root.Section("watchdog"));
+    ready = ReadinessOptions::Read(root.Section("readiness"));
     definition.load(root);
     root.Finish();
     summary = root.Describe();
@@ -310,7 +318,8 @@ int Run(int argc, char** argv, const Definition& definition) {
     for (const publish::Channel* channel : publisher->Channels()) channels.push_back(channel);
   }
   ReadinessHeartbeat readiness(assembly.ready_element(), assembly.ready_progress(), ReadyFilePath(),
-                               std::chrono::seconds(1), std::chrono::seconds(watchdog.stall_timeout_s));
+                               std::chrono::seconds(1), std::chrono::seconds(watchdog.stall_timeout_s),
+                               ready.require_input);
   reported.push_back(&readiness);
   StatsReporter stats(std::chrono::seconds(logging.stats_interval_s), reported, channels);
 

@@ -15,6 +15,11 @@ logging:
 watchdog:
   stall_timeout_s: 300
 
+# 就绪（健康检查）默认只要求应用活着，相机没有推流时也算就绪，安装不必等待画面；
+# 设为 true 时还要求帧计数在增长，健康状态因此反映输入是否在供帧。
+readiness:
+  require_input: false
+
 # 视频源列表；序号即 mux 的输入编号。增加一项即成为多路应用。
 sources:
   - id: ${CAMERA_ID}

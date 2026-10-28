@@ -66,6 +66,15 @@ struct WatchdogOptions {
   static WatchdogOptions Read(config::Reader reader);
 };
 
+// 就绪（健康检查）的含义。require_input 为 false（默认）时就绪表示应用活着：主循环在运行且看门狗没有
+// 触发，没有输入也算就绪，线阵、外触发等不一定产帧的源不会被当成故障；输入是否在供帧由看门狗把守，
+// 并记录在就绪文件中（见 ReadinessHeartbeat）。为 true 时就绪还要求就绪计数在健康检查周期内增长过。
+struct ReadinessOptions {
+  bool require_input = false;
+
+  static ReadinessOptions Read(config::Reader reader);
+};
+
 // 装配：应用在 Build 中向这里添加图、组件与发布器。
 class Assembly {
  public:

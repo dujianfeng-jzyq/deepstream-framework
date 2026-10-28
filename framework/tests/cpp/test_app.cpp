@@ -219,9 +219,9 @@ TEST(counted_readiness_only_updates_when_progress_changes) {
             ++phase;
           }
         } else if ((phase == 1 || phase == 3) && fs::exists(ready)) {
-          std::uint64_t count = 0;
-          std::ifstream(ready) >> count;
-          counts_match = counts_match && count == (phase == 1 ? 1u : 2u);
+          std::string text;
+          std::getline(std::ifstream(ready), text);
+          counts_match = counts_match && text.rfind(phase == 1 ? "count=1 idle_s=" : "count=2 idle_s=", 0) == 0;
           fs::remove(ready);
           idle_checks = 0;
           if (++phase == 4) pipeline.RequestStop();
@@ -279,6 +279,56 @@ TEST(stalled_progress_stops_the_pipeline_and_reports_unhealthy) {
     CHECK(heartbeat->Healthy());
   }
   CHECK(progress > 5);  // 计数回调确实在推进
+}
+
+TEST(readiness_without_required_input_stays_fresh_while_idle) {
+  if (!dsf::gst::HasFactory("appsrc")) SKIP("GStreamer element missing: appsrc");
+  // 线阵、外触发等源可能长时间不产帧：应用活着就算就绪，文件记录计数与空闲时长；看门狗触发后不再更新。
+  TempConfig config("frames: 1\n");
+  const fs::path ready = config.dir / "ready";
+  ReadinessHeartbeat readiness("", [] { return std::uint64_t{0}; }, ready.string(), std::chrono::milliseconds(50),
+                               std::chrono::milliseconds(1500), /*require_input=*/false);
+  dsf::gst::Pipeline pipeline("idle-input", IdleLiveGraph());
+  pipeline.Add(readiness);
+  int updates = 0;
+  int ticks = 0;
+  bool content_ok = true;
+  bool quiet_after_stall = true;
+  int stalled_ticks = 0;
+  dsf::gst::Timer timer;
+  pipeline.Post([&] {
+    timer = pipeline.Every(std::chrono::milliseconds(200), [&] {
+      ++ticks;
+      if (!readiness.Healthy()) {  // 第一次只清掉触发前写下的文件
+        quiet_after_stall = quiet_after_stall && (stalled_ticks++ == 0 || !fs::exists(ready));
+        fs::remove(ready);
+      } else if (fs::exists(ready)) {
+        std::string text;
+        std::getline(std::ifstream(ready), text);
+        content_ok = content_ok && text.rfind("count=0 idle_s=", 0) == 0;
+        fs::remove(ready);
+        ++updates;
+      }
+      if (ticks >= 25) pipeline.RequestStop(dsf::gst::StopMode::kImmediate);
+    });
+  });
+  dsf::gst::Options options;
+  options.handle_signals = false;
+  options.startup_timeout = std::chrono::milliseconds(0);
+  const dsf::gst::Result result = pipeline.Run(options);
+  CHECK(result.success);  // 看门狗排空停止
+  CHECK(updates >= 4);    // 计数不变也持续更新
+  CHECK(content_ok);
+  CHECK(quiet_after_stall);
+  CHECK(!readiness.Healthy());
+}
+
+TEST(readiness_section_is_read_by_the_framework) {
+  CHECK(!ReadinessOptions{}.require_input);  // 默认就绪只要求应用活着
+  TempConfig valid("frames: 1\nreadiness:\n  require_input: true\n");
+  CHECK_EQ(RunApp({"--check-config", "--config", valid.path.string()}), 0);
+  TempConfig invalid("frames: 1\nreadiness:\n  require_input: sometimes\n");
+  CHECK_EQ(RunApp({"--check-config", "--config", invalid.path.string()}), 1);
 }
 
 TEST(watchdog_section_is_read_by_the_framework) {

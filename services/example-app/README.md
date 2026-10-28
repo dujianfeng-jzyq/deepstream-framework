@@ -12,7 +12,7 @@
 
 运行时行为：
 
-- 就绪按批次元数据中的真实帧数计；帧计数 5 分钟不增长时退出，由容器重启恢复（`watchdog.stall_timeout_s`）；启动时相机未上线同样按此计时，不会每 30 秒重启。
+- 就绪只要求应用活着，相机没有推流时也算就绪（`readiness.require_input: false`）；批次元数据中的真实帧数 5 分钟不增长时退出，由容器重启恢复（`watchdog.stall_timeout_s`）；启动时相机未上线同样按此计时，不会每 30 秒重启。
 - RTSP 输出断线时先排空再退出（`drain_on_error`），录像器封装当前分段，重启后恢复推流。
 - 有目标的帧发检测消息，并给该路当前的录像分段打 `-detected` 标记；可选整帧 JPEG 随消息发送（`redis.image`）。
 - 消息格式见 `docs/framework.md` 的“消息”一节，消费示例见 `services/example-service`。

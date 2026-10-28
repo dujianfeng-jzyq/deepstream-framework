@@ -6,6 +6,10 @@ logging:
 watchdog:
   stall_timeout_s: 0
 
+# 就绪默认只要求应用活着（没有输入也算就绪，适合线阵、外触发等按需产帧的源）；true 时还要求帧计数在增长。
+readiness:
+  require_input: false
+
 sources:
   - id: test0
     type: test   # 换成 rtsp/file/v4l2 接入真实视频
