@@ -1,5 +1,6 @@
 """执行已预检的安装计划。从这里开始会停止旧服务；失败不自动回滚，可重新安装旧包恢复。
-停服之后到启动之前的任何失败或中断（包括 Ctrl-C）都会说明现场状态与恢复办法，再原样抛出。
+停服之后到启动之前的任何失败或中断（包括 Ctrl-C）都会说明现场状态与恢复办法，再原样抛出；
+就绪等待中的中断只结束等待，服务已经启动。
 
 顺序：重验目标 → 用旧定义停服并删除载荷卷（使其重新播种）→ 按需清空目录 → 删除退役文件 →
 复制发布文件 → 写入 project.env、site.env、受管理清单与预检过的配置快照 → 启动并等待就绪。
@@ -30,7 +31,12 @@ def apply(plan: Plan, docker: Docker, ready_timeout: float) -> None:
     except BaseException:
         print(incomplete_message(root, upgrading), file=sys.stderr)
         raise
-    ready.wait(docker, root, ready_timeout)
+    try:
+        ready.wait(docker, root, ready_timeout)
+    except KeyboardInterrupt:
+        print(f"\nstopped waiting: the services are installed and keep running\n"
+              f"  check: cd {root} && docker compose ps", file=sys.stderr)
+        raise
     print(f"\ninstalled: {root} (profile {plan.profile})")
     print(f"logs:      cd {root} && docker compose logs -f")
     print("rollback:  install the previous release package again")

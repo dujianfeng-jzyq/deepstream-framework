@@ -140,7 +140,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 4. 加载镜像（不影响运行中的旧容器）；在临时目录渲染新配置（宿主没有 PyYAML 时用 base 镜像渲染）；按最终 Compose 检查并准备可写 bind 挂载；核对每个服务镜像的平台；从新 apps 镜像取出载荷，离线、只读地执行所有带预检标签服务的 `--check-config`。
 5. `--dry-run` 到此结束并打印计划。否则重验目标，用旧定义 `docker compose down --remove-orphans`，再只删除载荷卷 `<项目名>_app-files` 使其重新播种（不用 `down -v`：它会删除项目的全部命名卷，包括服务的持久数据；首次安装时删除遗留的同名载荷卷，例如删掉安装目录后重装，否则会继续运行旧载荷）。
 6. 按需清空安装目录；删除未被修改的退役受管理文件；复制发布文件；写入 `project.env`（由 `release.env` 派生）、`site.env`、`.managed-files.json` 与预检过的配置快照（不再重新渲染）。
-7. `docker compose config --quiet`、`up -d`，有界等待：常驻服务运行且健康，一次性服务成功退出。超时或服务提前退出时列出未就绪服务的状态与最近几条告警/错误日志（例如相机还没有推流时的 RTSP 404）。
+7. `docker compose config --quiet`、`up -d`，有界等待：常驻服务运行且健康，一次性服务成功退出。就绪默认不要求输入（`readiness.require_input`，见 [framework.md](framework.md)），相机没有推流时安装照常完成，并提示就绪文件中计数仍为 0 的服务（`note: <服务> has not received any input yet`）。等待期间每 30 秒报告仍在等待的服务及其状态。超时或服务提前退出时列出未就绪服务的状态与最近几条告警/错误日志（例如相机还没有推流时的 RTSP 404），以非零状态退出；此时安装已完成，服务继续运行并按重启策略恢复，安装器只是不再等待。等待中按 Ctrl-C 同样只结束等待。
 
 规则：
 

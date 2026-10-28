@@ -83,6 +83,7 @@ class FakeDocker(Docker):
         self.labels: dict[str, dict[str, str]] = {}
         self.containers: list[tuple[str, str]] = []  # (容器名, 启动它的项目目录)
         self.logs: dict[str, str] = {}
+        self.ready_files: dict[str, str] = {}
 
     def available(self) -> bool:
         return True
@@ -144,6 +145,9 @@ class FakeDocker(Docker):
 
     def compose_logs(self, project_dir, service, tail):
         return "\n".join(self.logs.get(service, "").splitlines()[-tail:])
+
+    def ready_state(self, project_dir, service):
+        return self.ready_files.get(service, "")
 
     def compose_ps(self, project_dir):
         if self.ps_rows is not None:

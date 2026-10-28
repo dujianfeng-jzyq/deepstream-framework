@@ -110,6 +110,14 @@ class Docker:
         return self.compose(project_dir, ["logs", "--no-color", "--no-log-prefix", "--tail", str(tail), service],
                             capture=True).stdout
 
+    def ready_state(self, project_dir: Path, service: str) -> str:
+        """服务就绪文件（$DSF_READY_FILE）的内容；读不到返回空串。"""
+        try:
+            return self.compose(project_dir, ["exec", "-T", service, "sh", "-c",
+                                              'cat "${DSF_READY_FILE:-/tmp/dsf.ready}"'], capture=True).stdout
+        except DeployError:
+            return ""
+
     def compose_ps(self, project_dir: Path) -> list[dict]:
         text = self.compose(project_dir, ["ps", "--all", "--format", "json"], capture=True).stdout.strip()
         if not text:

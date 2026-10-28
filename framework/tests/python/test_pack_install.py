@@ -14,7 +14,7 @@ from unittest import mock
 from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
 from dsf_deploy import cli, inventory, layout, naming, pack, render, site
 from dsf_deploy.envfile import DeployError, read, unquote_answer
-from dsf_deploy.install import Options, install, preflight
+from dsf_deploy.install import Options, install, preflight, ready
 from dsf_deploy.install.apply import apply
 
 
@@ -466,17 +466,56 @@ class PackInstallTest(ProjectTestCase):
             install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
         message = str(caught.exception)
         self.assertIn("services not ready after 0s: app,", message)
-        self.assertIn("  app: running (starting)\n    [warning] src: Not Found (404) #2\n", message)
+        self.assertIn("  app: running, starting\n    [warning] src: Not Found (404) #2\n", message)
         self.assertIn("[warning] src: Not Found (404) #4\n  deepstream-apps: missing", message)
         self.assertNotIn("#1", message)  # 只摘最近的几条
         self.assertNotIn("[info]", message)
         self.assertIn("camera that is not streaming", message)
+        self.assertIn("the services are installed and keep running", message)
         # GStreamer 的错误详情换行：括号未闭合的行与下一行合并成一条
         target.logs["app"] = "[warning] src: Not found (gstrtspsrc.c(6736): src:\nNot Found (404))\nResetting source"
         with self.assertRaises(DeployError) as caught, redirect_stdout(io.StringIO()):
             install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
         self.assertIn("    [warning] src: Not found (gstrtspsrc.c(6736): src: Not Found (404))\n",
                       str(caught.exception))
+
+    def test_ready_service_without_input_is_noted(self):
+        # 就绪不要求输入：相机没有推流时安装照常完成，但提示现场还没有收到画面。
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        target.ready_files["app"] = "count=0 idle_s=12\n"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            install(Options(package, self.install_dir, interactive=False), target)
+        self.assertIn("all services are ready\nnote: app has not received any input yet", output.getvalue())
+        target.ready_files["app"] = "count=250 idle_s=0\n"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            install(Options(package, self.install_dir, interactive=False), target)
+        self.assertNotIn("note:", output.getvalue())
+
+    def test_readiness_wait_reports_progress(self):
+        # 相机未推流时等待会持续到超时：期间不报进度会被当成安装卡住。
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        target.ps_rows = [{"Service": "app", "State": "running", "Health": "starting"}]
+        output = io.StringIO()
+        with mock.patch.object(ready, "PROGRESS_INTERVAL", 0), redirect_stdout(output), \
+                self.assertRaises(DeployError):
+            install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
+        self.assertIn("waiting up to 0s for the services to become ready (Ctrl-C stops waiting", output.getvalue())
+        self.assertIn("s: waiting for app (running, starting), deepstream-apps (missing)", output.getvalue())
+
+    def test_interrupted_readiness_wait_says_the_services_keep_running(self):
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        target.ps_rows = [{"Service": "app", "State": "running", "Health": "starting"}]
+        errors = io.StringIO()
+        with mock.patch.object(ready.time, "sleep", side_effect=KeyboardInterrupt), redirect_stdout(io.StringIO()), \
+                redirect_stderr(errors), self.assertRaises(KeyboardInterrupt):
+            install(Options(package, self.install_dir, interactive=False), target)
+        self.assertIn("stopped waiting: the services are installed and keep running", errors.getvalue())
+        self.assertNotIn("installation incomplete", errors.getvalue())
 
 
 class InventoryTest(ProjectTestCase):
