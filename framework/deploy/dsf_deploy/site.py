@@ -21,6 +21,7 @@ from . import envfile
 from .envfile import DeployError
 
 SECRET_MARKERS = ("PASSWORD", "PASSWD", "TOKEN", "SECRET")
+CLEAR = "CLEAR"  # 提问时输入它把可留空的字段清空
 RESERVED_KEYS = {"PROJECT_NAME", "CONFIG_PROFILE", "HOST_UID", "HOST_GID", "HOST_DATA_PATH",
                  "INSTALL_ROOT", "PIP_INDEX_URL", "BASE_APT_PACKAGES", "TARGET_PLATFORM",
                  "DEEPSTREAM_VERSION", "BASE_INPUTS", "SOURCE_REVISION"}
@@ -115,14 +116,19 @@ def resolve(fields: list[Field], answers: dict[str, str], inherited: dict[str, s
 
 def ask(field: Field, default: str | None = None, prompt: Callable[[str], str] = input,
         prompt_secret: Callable[[str], str] = getpass.getpass) -> str:
-    """default 是继承后的有效默认值（见 resolve）；回车接受的值会作为答案保存，
-    所以它必须与渲染时的继承值一致，否则会遮住 project.env 或 profile 的设置。"""
+    """default 是回车接受的值：首次提问时是继承后的默认值（见 resolve），它会作为答案保存，
+    所以必须与渲染时的继承值一致，否则会遮住 project.env 或 profile 的设置；重新提问（--ask）时
+    是已保存的答案。可留空的字段有默认值时输入 CLEAR 清空（回车只能接受默认值）。"""
     default = field.default if default is None else default
     reader = prompt_secret if field.secret else prompt
     suffix = f" [{'***' if field.secret else default}]" if default else (
         "（可留空）" if field.nullable else "（必填）")
+    if default and field.nullable:
+        suffix += f"（输入 {CLEAR} 清空）"
     while True:
         answer = reader(f"{field.prompt}{suffix}: ").strip()
+        if answer == CLEAR and field.nullable:
+            return ""
         if answer or default or field.nullable:
             return answer or default
         print(f"  {field.key} 是必填项")

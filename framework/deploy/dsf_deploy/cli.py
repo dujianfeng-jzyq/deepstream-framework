@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--package", required=True, help="解压后的发布包目录")
     p.add_argument("--install-dir", type=Path)
     p.add_argument("--profile", help="覆盖已记录或包内建议的 profile")
-    p.add_argument("--ask", action="store_true", help="重新填写现场参数")
+    p.add_argument("--ask", action="store_true", help="逐项重新填写现场参数，默认值为当前答案（需要终端）")
     p.add_argument("--clean-install", action="store_true", help="清空安装目录后安装（数据目录保留）")
     p.add_argument("--dry-run", action="store_true", help="只预检并打印计划，不停服、不写安装目录")
     p.add_argument("--ready-timeout", type=float, default=180.0, help="启动后的就绪等待上限（秒）")

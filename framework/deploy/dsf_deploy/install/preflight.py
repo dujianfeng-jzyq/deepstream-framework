@@ -103,15 +103,18 @@ def _choose_profile(options: Options, release: dict[str, str], install_dir: Path
 def _collect_answers(options: Options, install_dir: Path, package_root: Path,
                      inherited: Callable[[], dict[str, str]],
                      previous: Callable[[], dict[str, str]] | None = None):
-    """升级沿用已保存的答案（包括显式空答案）；--ask 与 --clean-install 重新收集。
+    """升级沿用已保存的答案（包括显式空答案）；--clean-install 重新收集。
+    --ask 逐项重新提问，默认值是已保存的答案：只想改一项时其余回车即可，口令不会因回车被清空。
     非交互时只保存已有答案，缺失键留给渲染按 project.env/profile 继承。
-    交互提问的默认值与渲染的继承值一致：回车保存的答案不会遮住所选 profile 的设置。
+    没有已保存答案时，提问的默认值与渲染的继承值一致：回车保存的答案不会遮住所选 profile 的设置。
     previous 是改换 profile 前的继承值：等于旧默认值的答案视为当时回车接受的默认值，
     新 profile 的默认值不同时丢弃，改为重新提问或继承；现场输入的其他值保留。"""
     fields = site.parse_fields(package_root / layout.SITE_FIELDS)
-    fresh = options.ask or options.clean
+    if options.ask and not options.interactive:
+        raise DeployError(f"--ask needs a terminal to ask the site questions; edit "
+                          f"{install_dir / layout.SITE_ENV} and run the installer again instead")
     retired: list[str] = []
-    answers = {} if fresh else site.read_answers(install_dir / layout.SITE_ENV, fields, retired)
+    answers = {} if options.clean else site.read_answers(install_dir / layout.SITE_ENV, fields, retired)
     if retired:
         print(f"dropped site fields no longer used by this release: {', '.join(retired)}")
     if answers and previous is not None:
@@ -122,11 +125,16 @@ def _collect_answers(options: Options, install_dir: Path, package_root: Path,
         if stale:
             print(f"profile changed: {', '.join(stale)} follow the new profile "
                   "(the saved values were the previous profile's defaults)")
-    pending = [item for item in fields if item.key not in answers] if options.interactive else []
+    if not options.interactive:
+        pending = []
+    elif options.ask:
+        pending = fields
+    else:
+        pending = [item for item in fields if item.key not in answers]
     if pending:
         suggested = site.defaults(fields, inherited())
         for item in pending:
-            answers[item.key] = site.ask(item, suggested[item.key])
+            answers[item.key] = site.ask(item, answers.get(item.key, suggested[item.key]))
     site.validate(fields, answers)
     return fields, answers
 

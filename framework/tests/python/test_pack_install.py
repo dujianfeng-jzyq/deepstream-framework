@@ -77,16 +77,17 @@ class PackInstallTest(ProjectTestCase):
             install(Options(package, **options), target)
         return target, output.getvalue()
 
-    def press_enter(self, prompts):
-        """交互提问一律回车，提示文本记入 prompts。"""
+    def press_enter(self, prompts, replies=None):
+        """交互提问：replies 中的键输入对应的值，其余回车；提示文本记入 prompts。"""
         real_ask = site.ask
 
-        def record(text):
-            prompts.append(text)
-            return ""
+        def answer(item, default=None):
+            def record(text):
+                prompts.append(text)
+                return (replies or {}).get(item.key, "")
+            return real_ask(item, default, prompt=record, prompt_secret=record)
 
-        return mock.patch.object(site, "ask", lambda item, default=None: real_ask(
-            item, default, prompt=record, prompt_secret=record))
+        return mock.patch.object(site, "ask", answer)
 
     def set_profile_build(self, name, values):
         """写 profiles/<name>.yaml：在测试 profile 之上加 x-build 变量。"""
@@ -255,14 +256,40 @@ class PackInstallTest(ProjectTestCase):
         with self.assertRaisesRegex(DeployError, "does not look like an installation"):
             self.install(package, clean=True, install_dir=foreign)
 
-    def test_saved_answers_are_reused_and_ask_resets_them(self):
+    def test_saved_answers_are_reused(self):
         package = self.pack(with_base=True)
         self.install(package)
         (self.install_dir / layout.SITE_ENV).write_text("CAMERA_ID=site-cam\n")
         self.install(package)
         self.assertIn("camera: site-cam", (self.install_dir / "generated/config/app.yaml").read_text())
-        self.install(package, ask=True)  # 非交互 --ask：清空旧答案，回到默认值
-        self.assertIn("camera: cam0", (self.install_dir / "generated/config/app.yaml").read_text())
+
+    def test_ask_offers_the_saved_answers(self):
+        # 现场用 --ask 只改一项：其余回车保留，口令不会因回车被清空。
+        package = self.pack(with_base=True)
+        self.install(package)
+        saved = {"CAMERA_ID": "site-cam", "RTSP_PASSWORD": "s3cret", "SITE_NAME": "custom"}
+        site.write_answers(self.install_dir / layout.SITE_ENV, saved)
+        prompts = []
+        with self.press_enter(prompts):
+            self.install(package, ask=True, interactive=True)
+        self.assertEqual(answers(self.install_dir), saved)
+        self.assertEqual(len(prompts), 3)  # 已有答案的字段也逐项提问
+        self.assertIn("[site-cam]", prompts[0])
+        self.assertIn("[***]", prompts[1])
+        self.assertNotIn("s3cret", "".join(prompts))
+        with self.press_enter([], {"CAMERA_ID": "gate-2", "RTSP_PASSWORD": site.CLEAR}):
+            self.install(package, ask=True, interactive=True)
+        self.assertEqual(answers(self.install_dir), {**saved, "CAMERA_ID": "gate-2", "RTSP_PASSWORD": ""})
+
+    def test_ask_without_a_terminal_fails_before_stopping(self):
+        package = self.pack(with_base=True)
+        self.install(package)
+        before = (self.install_dir / layout.SITE_ENV).read_text()
+        target = FakeDocker()
+        with self.assertRaisesRegex(DeployError, "--ask needs a terminal"):
+            self.install(package, target=target, ask=True)
+        self.assertFalse([call for call in target.calls if "down" in call])
+        self.assertEqual((self.install_dir / layout.SITE_ENV).read_text(), before)
 
     def test_upgrade_drops_answers_for_retired_fields(self):
         # 新版本删除了现场字段：升级不能因旧 site.env 中的键失败，丢弃它并重写 site.env。

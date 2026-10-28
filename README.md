@@ -81,7 +81,7 @@ scripts/build-release.sh --with-base   # 首次部署或 base 变化时带上 ba
 ```bash
 ./install.sh             # 首次交互安装会询问 profile 与现场参数
 ./install.sh --dry-run   # 只预检并打印计划
-./install.sh --ask       # 重新填写现场参数
+./install.sh --ask       # 逐项修改现场参数（回车保留当前值）
 ```
 
 安装器在停旧服务之前完成全部预检（完整性、平台、路径安全、数据目录、用新载荷执行 `--check-config`），失败时旧服务保持运行。

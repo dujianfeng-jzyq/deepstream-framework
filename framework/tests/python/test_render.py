@@ -268,6 +268,13 @@ class SiteFieldsTest(unittest.TestCase):
         self.assertIn("[inherited]", prompts[0])
         secret = site.Field("X_TOKEN", "p", "", True)
         self.assertEqual(site.ask(secret, prompt=lambda _: 1 / 0, prompt_secret=lambda _: ""), "")
+        prompts = []
+        self.assertEqual(site.ask(secret, "saved", prompt_secret=lambda text: prompts.append(text) or ""),
+                         "saved")  # 回车保留已有口令，提示中不显示它
+        self.assertIn("[***]", prompts[0])
+        self.assertIn(site.CLEAR, prompts[0])
+        self.assertEqual(site.ask(secret, "saved", prompt_secret=lambda _: site.CLEAR), "")
+        self.assertEqual(site.ask(default, prompt=lambda _: site.CLEAR), site.CLEAR)  # 不可留空的字段照字面
         self.assertEqual(site.masked([secret], {"X_TOKEN": "s"}), "X_TOKEN=***")
 
     def test_defaults_follow_inherited_values(self):
