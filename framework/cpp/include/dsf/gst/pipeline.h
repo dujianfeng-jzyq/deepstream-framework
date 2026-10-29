@@ -128,6 +128,8 @@ class Pipeline {
   // 在控制线程上周期执行；任务异常只记录。管线结束时自动停止，Timer 可以提前取消。
   // 只在控制线程调用（例如组件回调或 Post 的任务中）。
   Timer Every(std::chrono::milliseconds interval, std::function<void()> task);
+  // 在控制线程上延迟执行一次，其余同 Every。
+  Timer After(std::chrono::milliseconds delay, std::function<void()> task);
 
   const std::string& name() const { return name_; }
   // 借用指针，只在控制线程、Run 期间有效。
@@ -152,6 +154,7 @@ class Pipeline {
   void Cleanup();
   void ClosePosted();     // 丢弃并拒绝之后的 Post 任务
   void DestroySources();  // 销毁并释放 sources_
+  Timer Schedule(std::chrono::milliseconds delay, std::function<void()> task, bool repeat);
   GSource* Attach(GSource* source, GSourceFunc callback);
   void Destroy(GSource** source);
 
@@ -187,6 +190,9 @@ class Pipeline {
   std::vector<std::unique_ptr<SinkWatch>> sink_watches_;
   std::atomic<std::size_t> sinks_at_eos_{0};
 };
+
+// 直接向 element 的每个 sink pad 发送 EOS，不经过它的上游（排空注入点、录像兜底使用）。
+void SendEosToSinkPads(GstElement* element);
 
 }  // namespace dsf::gst
 

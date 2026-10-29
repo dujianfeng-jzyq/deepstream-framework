@@ -188,8 +188,16 @@ void Pipeline::AttachPostedLocked(std::function<void()> task) {
 }
 
 Timer Pipeline::Every(std::chrono::milliseconds interval, std::function<void()> task) {
-  GSource* source = g_timeout_source_new(static_cast<guint>(interval.count()));
-  AttachTask(context_, source, std::move(task), true);
+  return Schedule(interval, std::move(task), true);
+}
+
+Timer Pipeline::After(std::chrono::milliseconds delay, std::function<void()> task) {
+  return Schedule(delay, std::move(task), false);
+}
+
+Timer Pipeline::Schedule(std::chrono::milliseconds delay, std::function<void()> task, bool repeat) {
+  GSource* source = g_timeout_source_new(static_cast<guint>(delay.count()));
+  AttachTask(context_, source, std::move(task), repeat);
   // 管线结束时一并停止：默认 context 跨管线共享，遗留的定时器会在下一次运行中触发。
   sources_.push_back(g_source_ref(source));
   return Timer(source);
@@ -522,16 +530,20 @@ void Pipeline::StopOnControlThread(StopMode mode) {
   for (const std::string& name : drain_points_) {
     GstElement* element = gst_bin_get_by_name(GST_BIN(pipeline_), name.c_str());
     if (element == nullptr) continue;
-    GstIterator* pads = gst_element_iterate_sink_pads(element);
-    GValue pad = G_VALUE_INIT;
-    while (gst_iterator_next(pads, &pad) == GST_ITERATOR_OK) {
-      gst_pad_send_event(GST_PAD(g_value_get_object(&pad)), gst_event_new_eos());
-      g_value_reset(&pad);
-    }
-    g_value_unset(&pad);
-    gst_iterator_free(pads);
+    SendEosToSinkPads(element);
     gst_object_unref(element);
   }
+}
+
+void SendEosToSinkPads(GstElement* element) {
+  GstIterator* pads = gst_element_iterate_sink_pads(element);
+  GValue pad = G_VALUE_INIT;
+  while (gst_iterator_next(pads, &pad) == GST_ITERATOR_OK) {
+    gst_pad_send_event(GST_PAD(g_value_get_object(&pad)), gst_event_new_eos());
+    g_value_reset(&pad);
+  }
+  g_value_unset(&pad);
+  gst_iterator_free(pads);
 }
 
 gboolean Pipeline::OnSignal(gpointer self) {

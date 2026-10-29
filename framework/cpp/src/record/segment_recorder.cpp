@@ -415,19 +415,11 @@ void SegmentRecorder::OnStopping() {
   // 兜底：EOS 在 eos_fallback 内仍未到达录像入口（某个上游元件不传递 EOS）时，直接向录像入口
   // 发送 EOS，封装已经收到的帧。录像入口已收到 EOS 时重复发送不会产生影响。
   if (sink_ == nullptr || pipeline_ == nullptr || options_.eos_fallback.count() <= 0) return;
-  fallback_ = pipeline_->Every(options_.eos_fallback, [this] {
-    fallback_.Cancel();
+  fallback_ = pipeline_->After(options_.eos_fallback, [this] {
     if (sink_ == nullptr || Drained()) return;
     spdlog::warn("{}: end of stream did not reach the recorder within {} ms; closing the segment",
                  options_.element, options_.eos_fallback.count());
-    GstIterator* pads = gst_element_iterate_sink_pads(sink_);
-    GValue item = G_VALUE_INIT;
-    while (gst_iterator_next(pads, &item) == GST_ITERATOR_OK) {
-      gst_pad_send_event(GST_PAD(g_value_get_object(&item)), gst_event_new_eos());
-      g_value_reset(&item);
-    }
-    g_value_unset(&item);
-    gst_iterator_free(pads);
+    gst::SendEosToSinkPads(sink_);
   });
 }
 

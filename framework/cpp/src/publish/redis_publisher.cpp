@@ -68,7 +68,7 @@ class RedisPublisher : public Publisher {
 
   Channel& Open(const ChannelSpec& spec) override {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (started_) throw std::logic_error("channels must be opened before Start");
+    if (state_ != State::kIdle) throw std::logic_error("channels must be opened before Start");
     if (spec.target.empty()) throw std::invalid_argument("channel target must not be empty");
     if (spec.capacity <= 0 || spec.max_length <= 0) {
       throw std::invalid_argument("channel capacity and max_length must be positive");
@@ -79,24 +79,22 @@ class RedisPublisher : public Publisher {
 
   void Start() override {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (started_) return;  // 一次性：停止后不能再次启动
-    started_ = running_ = accepting_ = true;
-    stopping_ = false;
+    if (state_ != State::kIdle) return;  // 一次性：停止后不能再次启动
+    state_ = State::kRunning;
     worker_ = std::thread([this] { Work(); });
   }
 
   void Stop() override {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!running_) return;
-      accepting_ = false;
-      stopping_ = true;
+      if (state_ != State::kRunning) return;  // 未启动、正在或已经停止
+      state_ = State::kDraining;
       deadline_ = Clock::now() + std::chrono::milliseconds(options_.drain_timeout_ms);
     }
     wakeup_.notify_all();
     worker_.join();
     std::lock_guard<std::mutex> lock(mutex_);
-    running_ = false;
+    state_ = State::kStopped;
   }
 
   bool connected() const override { return connected_.load(); }
@@ -122,7 +120,7 @@ class RedisPublisher : public Publisher {
       const std::size_t max_bytes = channel.spec_.max_bytes;
       // 字节上限只约束积压：空队列总能放下一条，单条超过上限的消息不会永远发不出去。
       const bool fits = max_bytes == 0 || channel.queue_.empty() || channel.queued_bytes_ + size <= max_bytes;
-      if (accepting_ && !fields.empty() && fits &&
+      if (state_ == State::kRunning && !fields.empty() && fits &&
           channel.queue_.size() < static_cast<std::size_t>(channel.spec_.capacity)) {
         channel.queue_.push_back(std::move(fields));
         channel.queued_bytes_ += size;
@@ -179,15 +177,16 @@ class RedisPublisher : public Publisher {
     for (;;) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        wakeup_.wait(lock, [this] { return stopping_ || HasWork(); });
-        if (stopping_ && (!HasWork() || Clock::now() >= deadline_)) break;
+        wakeup_.wait(lock, [this] { return state_ == State::kDraining || HasWork(); });
+        if (state_ == State::kDraining && (!HasWork() || Clock::now() >= deadline_)) break;
       }
       if (!Connect()) {
         // 断线时不取出消息：队列继续缓冲，满了才在入队处丢弃。
         std::unique_lock<std::mutex> lock(mutex_);
         const auto retry = Clock::now() + std::chrono::seconds(1);
-        wakeup_.wait_until(lock, stopping_ ? std::min(retry, deadline_) : retry,
-                           [this] { return stopping_ && Clock::now() >= deadline_; });
+        const bool draining = state_ == State::kDraining;
+        wakeup_.wait_until(lock, draining ? std::min(retry, deadline_) : retry,
+                           [this] { return state_ == State::kDraining && Clock::now() >= deadline_; });
         continue;
       }
       Batch batch;
@@ -291,14 +290,14 @@ class RedisPublisher : public Publisher {
     spdlog::warn("{}", message);
   }
 
+  // 只进不退：kIdle 只能打开通道，kRunning 接收消息，kDraining 在期限内发完剩余消息，kStopped 结束。
+  enum class State { kIdle, kRunning, kDraining, kStopped };
+
   RedisOptions options_;
   mutable std::mutex mutex_;
   std::condition_variable wakeup_;
   std::vector<std::unique_ptr<RedisChannel>> channels_;
-  bool started_ = false;
-  bool running_ = false;
-  bool accepting_ = false;
-  bool stopping_ = false;
+  State state_ = State::kIdle;  // 由 mutex_ 保护
   Clock::time_point deadline_;
   std::thread worker_;
   redisContext* context_ = nullptr;  // 只在工作线程使用

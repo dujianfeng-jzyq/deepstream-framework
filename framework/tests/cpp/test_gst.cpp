@@ -209,6 +209,26 @@ TEST(drain_stop_finishes_as_stopped) {
   CHECK(ticks >= 5);
 }
 
+TEST(after_runs_once_and_can_be_cancelled) {
+  Pipeline pipeline("after", TestGraph(0, true));
+  int once = 0;
+  int cancelled = 0;
+  Timer fire;
+  Timer skip;
+  Timer stop;
+  pipeline.Post([&] {
+    fire = pipeline.After(std::chrono::milliseconds(20), [&] { ++once; });
+    skip = pipeline.After(std::chrono::milliseconds(100), [&] { ++cancelled; });
+    skip.Cancel();
+    stop = pipeline.After(std::chrono::milliseconds(300), [&] { pipeline.RequestStop(); });
+  });
+  Options options;
+  options.handle_signals = false;
+  CHECK(pipeline.Run(options).ok());
+  CHECK_EQ(once, 1);  // 只执行一次，不像 Every 那样重复
+  CHECK_EQ(cancelled, 0);
+}
+
 // 吞掉到达 sink 的 EOS，模拟收到 EOS 后不结束的网络 sink（例如 rtspclientsink）。
 class SwallowEos : public Component {
  public:
