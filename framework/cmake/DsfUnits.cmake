@@ -3,6 +3,12 @@
 
 include_guard(GLOBAL)
 
+# 是否为单元生成 install 规则（进入载荷），默认 ON。变量按目录作用域继承：框架测试在自己的目录中
+# 设为 OFF，在那里生成的模板单元照常编译并登记测试，但不进入载荷。
+if(NOT DEFINED DSF_INSTALL)
+  set(DSF_INSTALL ON)
+endif()
+
 # 递归登记 <dir>/*/CMakeLists.txt，按目录名排序，结果与文件系统遍历顺序无关。
 # CONFIGURE_DEPENDS：已有构建目录在 cmake --build 时重新检查，新增或删除的单元随之生效。
 function(dsf_add_unit_directories parent)
@@ -28,7 +34,9 @@ function(dsf_add_app name)
   if(NOT ARG_NO_DEEPSTREAM)
     target_link_libraries(${name} PRIVATE dsf::ds_meta)
   endif()
-  install(TARGETS ${name} RUNTIME DESTINATION bin)
+  if(DSF_INSTALL)
+    install(TARGETS ${name} RUNTIME DESTINATION bin)
+  endif()
   if(BUILD_TESTING AND DSF_PYTHON)
     add_test(NAME ${name}_cli
              COMMAND "${DSF_PYTHON}" "${DSF_FRAMEWORK_DIR}/tests/python/app_cli_check.py"
@@ -49,9 +57,11 @@ function(dsf_add_plugin name)
     set_target_properties(${name} PROPERTIES OUTPUT_NAME ${ARG_OUTPUT_NAME})
   endif()
   target_link_libraries(${name} PRIVATE dsf::deepstream ${ARG_LIBRARIES} dsf_warnings)
-  install(TARGETS ${name} LIBRARY DESTINATION lib)
-  if(ARG_FILES)
-    install(FILES ${ARG_FILES} DESTINATION share/${name})
+  if(DSF_INSTALL)
+    install(TARGETS ${name} LIBRARY DESTINATION lib)
+    if(ARG_FILES)
+      install(FILES ${ARG_FILES} DESTINATION share/${name})
+    endif()
   endif()
 endfunction()
 
@@ -61,6 +71,9 @@ function(dsf_add_python_service name)
   cmake_parse_arguments(ARG "" "REQUIREMENTS" "FILES" ${ARGN})
   if(NOT ARG_FILES)
     set(ARG_FILES main.py)
+  endif()
+  if(NOT DSF_INSTALL)
+    return()
   endif()
   install(FILES ${ARG_FILES} DESTINATION services/${name}
           PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)

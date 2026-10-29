@@ -273,7 +273,7 @@ sys.exit(Service("my-service", "说明").run(load, main))
 
 ## 10. 新增应用
 
-1. `scripts/new-app.sh <name> --kind cpp|python` 生成 `services/<name>/`。名字不能与已有的 Compose 服务相同（Compose 会把同名服务合并），也不能与已有单元或插件的标识符（`-` 换成 `_`）相同（CMake 目标会重名）；`dsf` 前缀留给框架。
+1. `scripts/new-app.sh <name> --kind cpp|python` 生成 `services/<name>/`。名字不能与已有的 Compose 服务相同（Compose 会把同名服务合并），也不能与已有单元或插件的标识符（`-` 换成 `_`）相同（CMake 目标会重名）；`dsf` 前缀留给框架。框架测试用同一实现把两种模板生成为 `dsf-template-cpp` 与 `dsf-template-python`，照常编译并运行它们的测试（C++ 可执行文件在 builder 中编译），所以生成的骨架总能直接构建；它们的 install 规则关闭（`DSF_INSTALL=OFF`），不进入载荷。
 2. 在 `src/app.cpp`（或 `main.py`）中读取配置、组图、写业务逻辑；配置模板放 `templates/config/<name>.yaml`，现场参数加到 `site-fields.env`。
 3. 需要 GPU 的单元在自己的 `compose.yaml` 中写 `runtime: nvidia`（C++ 模板已带上）；平台差异（设备、`group_add`）写在 `profiles/*.yaml` 的 `services.<name>`。
 4. 需要自定义推理解析库时在 `plugins/` 下用 `dsf_add_plugin`；模型放 `models/<id>/`，`model-engine-builder` 会自动构建其 engine。
@@ -284,7 +284,7 @@ sys.exit(Service("my-service", "说明").run(load, main))
 | 层 | 内容 | 环境 |
 |---|---|---|
 | 框架单元/集成 | 配置、图、内省、Pipeline、块结构、消息、软件录像、Redis 投递、入口 | 开发机（GStreamer 软件插件、redis-server 可选） |
-| 应用核心 | 模板与读取代码一致、拓扑结构、跨字段规则 | 开发机 |
+| 应用核心 | 模板与读取代码一致、拓扑结构、跨字段规则；`new-app` 模板生成的单元可编译、测试通过 | 开发机（模板的 C++ 可执行文件需要 SDK） |
 | SDK 层 | 应用与插件编译链接、CLI 冒烟测试 | builder 镜像 |
 | 部署 | 渲染、打包、安装（假 Docker）、engine 工具（假 trtexec）、仓库约定 | 开发机（docker CLI 可选） |
 | 镜像 | builder 中的 CTest（以上各层全部执行，`DSF_FORBID_SKIPS=1` 使 SKIP 计为失败），每个 profile 的渲染与 Compose 解析，原始 base 中的非 root 无网络自检 | 有 Docker 的开发机或编译服务器 |

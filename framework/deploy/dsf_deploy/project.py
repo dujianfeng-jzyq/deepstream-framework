@@ -68,17 +68,15 @@ def _check_unit_name(root: Path, name: str) -> None:
                                   f"identifier {identifier} (CMake targets would clash)")
 
 
-def new_unit(root: Path, name: str, kind: str) -> Path:
-    """从 framework/templates/<kind>/ 生成 services/<name>/：__NAME__ 替换为服务名，
-    __IDENT__ 替换为可作标识符的名字（- 换成 _）。"""
+def generate_unit(kind: str, name: str, target: Path) -> None:
+    """把 framework/templates/<kind>/ 生成到 target：__NAME__ 替换为服务名，__IDENT__ 替换为可作标识符的名字
+    （- 换成 _）。不检查与已有单元的冲突（见 new_unit）；框架测试用它生成并编译模板单元。"""
     if not NAME.match(name):
         raise DeployError(f"invalid service name {name!r}: lowercase letters, digits and '-'")
     source = TEMPLATES / kind
     if not source.is_dir():
         raise DeployError(f"unknown unit kind {kind!r}; available: "
                           + ", ".join(sorted(p.name for p in TEMPLATES.iterdir() if p.is_dir())))
-    _check_unit_name(root, name)
-    target = root / layout.SERVICES / name
     identifier = name.replace("-", "_")
     for path in sorted(source.rglob("*")):
         if path.is_dir() or "__pycache__" in path.parts:
@@ -89,6 +87,13 @@ def new_unit(root: Path, name: str, kind: str) -> Path:
         text = path.read_text(encoding="utf-8").replace("__NAME__", name).replace("__IDENT__", identifier)
         destination.write_text(text, encoding="utf-8")
         destination.chmod(path.stat().st_mode & 0o777)
+
+
+def new_unit(root: Path, name: str, kind: str) -> Path:
+    """从 framework/templates/<kind>/ 生成 services/<name>/（见 generate_unit），名字不得与已有单元冲突。"""
+    _check_unit_name(root, name)
+    target = root / layout.SERVICES / name
+    generate_unit(kind, name, target)
     print(f"created {target.relative_to(root)}/ ({kind}); next: scripts/apply-profile.sh <profile> && "
           "docker compose build deepstream-apps")
     return target
