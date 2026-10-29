@@ -245,11 +245,9 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   handler_ = g_signal_connect(sink_, "format-location", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
                               this);
   if (options_.split_on_gap.count() > 0) {
-    input_ = gst_element_get_static_pad(sink_, "video");  // AddSegmentSink 请求的 pad
-    if (input_ == nullptr) {
-      throw std::runtime_error("recording element '" + options_.element + "' has no video pad");
-    }
-    probe_ = gst_pad_add_probe(input_, GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput, this, nullptr);
+    // video 是 AddSegmentSink 请求的 pad。
+    input_.Attach(GST_BIN(bin), options_.element, "video", GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput,
+                  this);
   }
 }
 
@@ -305,12 +303,7 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
 void SegmentRecorder::OnReleased() {
   fallback_.Cancel();
   pipeline_ = nullptr;
-  if (input_ != nullptr) {
-    if (probe_ != 0) gst_pad_remove_probe(input_, probe_);
-    probe_ = 0;
-    gst_object_unref(input_);
-    input_ = nullptr;
-  }
+  input_.Remove();
   if (sink_ == nullptr) return;
   if (handler_ != 0) g_signal_handler_disconnect(sink_, handler_);
   handler_ = 0;

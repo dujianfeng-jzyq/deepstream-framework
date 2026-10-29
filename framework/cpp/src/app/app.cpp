@@ -132,6 +132,16 @@ publish::Publisher& Assembly::AddPublisher(std::unique_ptr<publish::Publisher> p
   return *publishers_.back();
 }
 
+void Assembly::ReadyWhen(std::function<std::uint64_t()> progress) {
+  if (ready_progress_) throw std::logic_error("the readiness counter is already set");
+  ready_progress_ = std::move(progress);
+}
+
+void Assembly::ReadyWhenFramesReach(const std::string& element) {
+  auto& counter = Add<BufferCounter>(element);
+  ReadyWhen([&counter] { return counter.count(); });
+}
+
 gst::Requirements Assembly::Requirements() const {
   gst::Requirements requirements = graph_.Requirements();
   for (const auto& component : components_) component->Require(requirements);
@@ -203,13 +213,10 @@ std::string BuildInfo(const Info& info, const Paths& paths) {
 
 int RunSelfTest() {
   gst::Graph graph;
-  graph.Add("videotestsrc", "source").Set("num-buffers", kSelfTestFrames);
-  graph.Caps("video/x-raw,format=RGB,width=320,height=240,framerate=30/1", "caps");
-  graph.Add("videoconvert", "convert");
-  graph.Add("fakesink", "sink").Set("signal-handoffs", true).Set("sync", false);
-  graph.Link(graph.Find("source"), graph.Find("caps"));
-  graph.Link(graph.Find("caps"), graph.Find("convert"));
-  graph.Link(graph.Find("convert"), graph.Find("sink"));
+  graph.Chain({graph.Add("videotestsrc", "source").Set("num-buffers", kSelfTestFrames),
+               graph.Caps("video/x-raw,format=RGB,width=320,height=240,framerate=30/1", "caps"),
+               graph.Add("videoconvert", "convert"),
+               graph.Add("fakesink", "sink").Set("signal-handoffs", true).Set("sync", false)});
 
   HandoffCounter counter;
   gst::Pipeline pipeline("selftest", graph);
@@ -217,7 +224,7 @@ int RunSelfTest() {
   gst::Options options;
   options.startup_timeout = std::chrono::seconds(10);
   const gst::Result result = pipeline.Run(options);
-  if (!result.success || result.reason != gst::FinishReason::kEos) {
+  if (result.reason != gst::FinishReason::kEos) {
     spdlog::error("selftest failed: {} {}", gst::ToString(result.reason), result.error);
     return kExitFailure;
   }
@@ -317,9 +324,8 @@ int Run(int argc, char** argv, const Definition& definition) {
   for (const auto& publisher : assembly.publishers()) {
     for (const publish::Channel* channel : publisher->Channels()) channels.push_back(channel);
   }
-  ReadinessHeartbeat readiness(assembly.ready_element(), assembly.ready_progress(), ReadyFilePath(),
-                               std::chrono::seconds(1), std::chrono::seconds(watchdog.stall_timeout_s),
-                               ready.require_input);
+  ReadinessHeartbeat readiness(assembly.ready_progress(), ReadyFilePath(), std::chrono::seconds(1),
+                               std::chrono::seconds(watchdog.stall_timeout_s), ready.require_input);
   reported.push_back(&readiness);
   StatsReporter stats(std::chrono::seconds(logging.stats_interval_s), reported, channels);
 
@@ -345,7 +351,7 @@ int Run(int argc, char** argv, const Definition& definition) {
     }
   }
   if (!readiness.Healthy()) healthy = false;  // 看门狗已在触发时记录原因
-  return result.success && healthy ? kExitOk : kExitFailure;
+  return result.ok() && healthy ? kExitOk : kExitFailure;
 }
 
 }  // namespace dsf::app

@@ -24,26 +24,21 @@ std::string ReadyFilePath() {
   return value != nullptr && *value != '\0' ? value : "/tmp/dsf.ready";
 }
 
-ReadinessHeartbeat::ReadinessHeartbeat(std::string element, std::function<std::uint64_t()> progress,
-                                       std::string path, std::chrono::milliseconds interval,
+ReadinessHeartbeat::ReadinessHeartbeat(std::function<std::uint64_t()> progress, std::string path,
+                                       std::chrono::milliseconds interval,
                                        std::chrono::milliseconds stall_timeout, bool require_input)
-    : element_(std::move(element)), progress_(std::move(progress)), path_(std::move(path)),
-      interval_(interval), stall_timeout_(stall_timeout), require_input_(require_input) {}
+    : progress_(std::move(progress)), path_(std::move(path)), interval_(interval),
+      stall_timeout_(stall_timeout), require_input_(require_input) {}
 
-std::uint64_t ReadinessHeartbeat::Count() const {
-  return progress_ ? progress_() : buffers_.load(std::memory_order_relaxed);
-}
-
-void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
+void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* /*bin*/) {
   std::error_code ignored;
   std::filesystem::remove(path_, ignored);  // 上次运行留下的文件不能代表本次就绪
   // 定时器由主循环驱动，不等 PLAYING：按需产帧的管线可能等待首帧才能完成状态切换。
-  const bool counting = progress_ || !element_.empty();
   last_progress_ = std::chrono::steady_clock::now();
-  timer_ = pipeline.Every(interval_, [this, counting, &pipeline] {
-    const std::uint64_t count = Count();
+  timer_ = pipeline.Every(interval_, [this, &pipeline] {
+    const std::uint64_t count = progress_ ? progress_() : 0;
     const auto now = std::chrono::steady_clock::now();
-    const bool advanced = !counting || count != last_;
+    const bool advanced = !progress_ || count != last_;
     if (advanced) {
       last_ = count;
       last_progress_ = now;
@@ -54,26 +49,13 @@ void ReadinessHeartbeat::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
                     std::chrono::duration_cast<std::chrono::seconds>(stall_timeout_).count(), count);
       pipeline.RequestStop();
     }
-    if (!stalled_ && (advanced || !require_input_)) Touch(counting, count, now);
+    if (!stalled_ && (advanced || !require_input_)) Touch(count, now);
   });
-  if (element_.empty() || progress_) return;
-  GstElement* element = gst_bin_get_by_name(GST_BIN(bin), element_.c_str());
-  if (element == nullptr) throw std::runtime_error("readiness element '" + element_ + "' is missing");
-  pad_ = gst_element_get_static_pad(element, "src");
-  gst_object_unref(element);
-  if (pad_ == nullptr) throw std::runtime_error("readiness element '" + element_ + "' has no src pad");
-  probe_ = gst_pad_add_probe(
-      pad_, GST_PAD_PROBE_TYPE_BUFFER,
-      +[](GstPad*, GstPadProbeInfo*, gpointer data) -> GstPadProbeReturn {
-        static_cast<std::atomic<std::uint64_t>*>(data)->fetch_add(1, std::memory_order_relaxed);
-        return GST_PAD_PROBE_OK;
-      },
-      &buffers_, nullptr);
 }
 
-void ReadinessHeartbeat::Touch(bool counting, std::uint64_t count, std::chrono::steady_clock::time_point now) {
+void ReadinessHeartbeat::Touch(std::uint64_t count, std::chrono::steady_clock::time_point now) {
   std::ofstream stream(path_, std::ios::trunc);
-  if (!counting) {
+  if (!progress_) {
     stream << "alive\n";
     return;
   }
@@ -83,19 +65,24 @@ void ReadinessHeartbeat::Touch(bool counting, std::uint64_t count, std::chrono::
 
 void ReadinessHeartbeat::OnReleased() {
   timer_.Cancel();
-  if (pad_ != nullptr) {
-    if (probe_ != 0) gst_pad_remove_probe(pad_, probe_);
-    probe_ = 0;
-    gst_object_unref(pad_);
-    pad_ = nullptr;
-  }
   std::error_code ignored;
   std::filesystem::remove(path_, ignored);
 }
 
-void ReadinessHeartbeat::Report(gst::Stats& stats) const {
-  if (!progress_ && !element_.empty()) stats.Add(element_ + "_buffers", Count());
+BufferCounter::BufferCounter(std::string element)
+    : element_(std::move(element)), name_("buffer-counter:" + element_) {}
+
+void BufferCounter::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
+  probe_.Attach(
+      GST_BIN(bin), element_, "src", GST_PAD_PROBE_TYPE_BUFFER,
+      +[](GstPad*, GstPadProbeInfo*, gpointer data) -> GstPadProbeReturn {
+        static_cast<std::atomic<std::uint64_t>*>(data)->fetch_add(1, std::memory_order_relaxed);
+        return GST_PAD_PROBE_OK;
+      },
+      &count_);
 }
+
+void BufferCounter::Report(gst::Stats& stats) const { stats.Add(element_ + "_buffers", count()); }
 
 KeyframeOnGap::KeyframeOnGap(std::string element, std::chrono::milliseconds gap)
     : element_(std::move(element)),
@@ -105,13 +92,10 @@ KeyframeOnGap::KeyframeOnGap(std::string element, std::chrono::milliseconds gap)
 }
 
 void KeyframeOnGap::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
-  GstElement* element = gst_bin_get_by_name(GST_BIN(bin), element_.c_str());
-  if (element == nullptr) throw std::runtime_error("encoder '" + element_ + "' is not in the pipeline");
-  force_idr_signal_ = g_signal_lookup("force-IDR", G_OBJECT_TYPE(element)) != 0;
-  pad_ = gst_element_get_static_pad(element, "sink");
-  gst_object_unref(element);
-  if (pad_ == nullptr) throw std::runtime_error("encoder '" + element_ + "' has no sink pad");
-  probe_ = gst_pad_add_probe(pad_, GST_PAD_PROBE_TYPE_BUFFER, &KeyframeOnGap::OnBuffer, this, nullptr);
+  probe_.Attach(GST_BIN(bin), element_, "sink", GST_PAD_PROBE_TYPE_BUFFER, &KeyframeOnGap::OnBuffer, this);
+  GstElement* encoder = gst_pad_get_parent_element(probe_.pad());
+  force_idr_signal_ = encoder != nullptr && g_signal_lookup("force-IDR", G_OBJECT_TYPE(encoder)) != 0;
+  if (encoder != nullptr) gst_object_unref(encoder);
 }
 
 GstPadProbeReturn KeyframeOnGap::OnBuffer(GstPad* pad, GstPadProbeInfo* info, gpointer self) {
@@ -161,14 +145,6 @@ GstPadProbeReturn KeyframeOnGap::OnBuffer(GstPad* pad, GstPadProbeInfo* info, gp
   spdlog::info("{}: input resumed after {:.1f} s; requested a keyframe", component->element_,
                static_cast<double>(pts - last) / GST_SECOND);
   return GST_PAD_PROBE_OK;
-}
-
-void KeyframeOnGap::OnReleased() {
-  if (pad_ == nullptr) return;
-  if (probe_ != 0) gst_pad_remove_probe(pad_, probe_);
-  probe_ = 0;
-  gst_object_unref(pad_);
-  pad_ = nullptr;
 }
 
 void KeyframeOnGap::Report(gst::Stats& stats) const {

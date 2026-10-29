@@ -31,6 +31,7 @@
 #include "dsf/ds/blocks.h"
 #include "dsf/ds/meta.h"
 #include "dsf/gst/component.h"
+#include "dsf/gst/probe.h"
 
 namespace dsf::ds {
 
@@ -85,14 +86,13 @@ class MetaTap : public gst::Component {
   std::vector<ObjectExtractor> object_extractors_;
   ImageFilter image_filter_;
   std::unique_ptr<Encoder> encoder_;  // OnCreated 加载库并创建上下文，OnReleased 释放
-  GstPad* pad_ = nullptr;
-  gulong probe_ = 0;
   std::atomic<std::uint64_t> frames_{0};
   std::atomic<bool> warned_missing_{false};
   std::atomic<std::uint64_t> images_{0};
   std::atomic<std::uint64_t> image_failures_{0};
   std::atomic<std::uint64_t> encode_batches_{0};
   std::atomic<std::uint64_t> encode_us_{0};
+  gst::PadProbe probe_;
 };
 
 // 运行环境中的 DeepStream 版本（读取 SDK 的 version 文件），读不到返回 "unknown"。

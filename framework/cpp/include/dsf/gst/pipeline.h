@@ -33,9 +33,9 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <set>
-#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -44,6 +44,7 @@
 #include <gst/gst.h>
 
 #include "dsf/gst/graph.h"
+#include "dsf/gst/probe.h"
 
 namespace dsf::gst {
 
@@ -58,15 +59,16 @@ enum class FinishReason {
   kBuildError,  // 建图失败
   kStartError,  // 无法进入 PLAYING
   kRunError,    // 运行期错误或组件回调失败
-  kTimeout,     // 启动超时
+  kStartupTimeout,  // 启动超时
 };
 
 const char* ToString(FinishReason reason);
 
 struct Result {
-  bool success = false;
   FinishReason reason = FinishReason::kBuildError;
   std::string error;
+  // 只有自然结束与请求停止后正常排空算成功。
+  bool ok() const { return reason == FinishReason::kEos || reason == FinishReason::kStopped; }
 };
 
 struct Options {
@@ -135,6 +137,7 @@ class Pipeline {
  private:
   enum class State { kReady, kStarting, kPlaying, kDraining, kFinished };
 
+  void Start();  // 建图到请求 PLAYING；任何一步失败都经 Finish 记录结果并返回
   void Finish(Result result);
   void HandleMessage(GstMessage* message);
   void NotifyPlaying();
@@ -147,6 +150,8 @@ class Pipeline {
   std::string ForEach(const char* stage, const std::function<void(Component&)>& call,
                       bool reverse = false);
   void Cleanup();
+  void ClosePosted();     // 丢弃并拒绝之后的 Post 任务
+  void DestroySources();  // 销毁并释放 sources_
   GSource* Attach(GSource* source, GSourceFunc callback);
   void Destroy(GSource** source);
 
@@ -176,9 +181,8 @@ class Pipeline {
   std::optional<Result> run_error_;  // 触发排空的第一条运行期错误（drain_on_error）
   Options options_;
   struct SinkWatch {
-    GstPad* pad;
-    gulong probe;
     std::atomic<bool> eos{false};
+    PadProbe probe;
   };
   std::vector<std::unique_ptr<SinkWatch>> sink_watches_;
   std::atomic<std::size_t> sinks_at_eos_{0};

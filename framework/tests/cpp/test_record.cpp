@@ -207,7 +207,7 @@ TEST(drain_stop_records_every_encoded_frame) {
   options.handle_signals = false;
   options.stop_timeout = std::chrono::seconds(10);
   const gst::Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(recorder.Healthy());
   int recorded = 0;
   for (const Segment& segment : events.finished) recorded += FramesIn(segment.final_path);
@@ -250,7 +250,7 @@ TEST(eos_fallback_closes_the_segment_when_upstream_swallows_eos) {
   options_pipeline.handle_signals = false;
   options_pipeline.stop_timeout = std::chrono::seconds(5);
   const gst::Result result = pipeline.Run(options_pipeline);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(recorder.Healthy());
   CHECK_EQ(events.finished.size(), 1u);  // 兜底封装了已经收到的帧
   CHECK(FramesIn(events.finished.front().final_path) > 0);
@@ -438,7 +438,7 @@ TEST(recorder_closes_segments_at_eos) {
   gst::Pipeline pipeline("record-eos", RecordingGraph(75, false));
   pipeline.Add(recorder);
   const gst::Result result = pipeline.Run();
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(recorder.Healthy());
   CHECK(events.finished.size() >= 2);
   CHECK_EQ(events.started.size(), events.finished.size());
@@ -463,7 +463,7 @@ TEST(recorder_reports_segments_it_cannot_finalize) {
   SegmentRecorder recorder({dir.path.string(), "cam", "raw", "rec"}, callbacks);
   gst::Pipeline pipeline("record-rename-fails", RecordingGraph(45, false));
   pipeline.Add(recorder);
-  CHECK(pipeline.Run().success);  // 管线本身正常结束，失败由录像器的健康状态报告
+  CHECK(pipeline.Run().ok());  // 管线本身正常结束，失败由录像器的健康状态报告
   CHECK(!started.empty());
   CHECK_EQ(finished, 0);
   CHECK_EQ(recorder.failures(), static_cast<std::uint64_t>(started.size()));
@@ -484,7 +484,7 @@ TEST(recorder_prunes_after_each_segment) {
   gst::Pipeline pipeline("record-prune", RecordingGraph(75, false));
   pipeline.Add(recorder);
   const gst::Result result = pipeline.Run();
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(recorder.Healthy());
   CHECK(events.finished.size() >= 2);
   int files = 0;
@@ -535,7 +535,7 @@ GapRun RecordAcrossGap(const fs::path& root, int key_interval, bool request_keyf
   pipeline.Add(gap);
   if (request_keyframe) pipeline.Add(keyframes);
   pipeline.Add(recorder);
-  CHECK(pipeline.Run().success);
+  CHECK(pipeline.Run().ok());
   CHECK(recorder.Healthy());
   gst::Stats stats;
   recorder.Report(stats);
@@ -637,7 +637,7 @@ TEST(keyframe_on_gap_emits_the_encoders_force_idr_signal) {
     std::vector<int>& at_;
   } probe(received, signalled);
   pipeline.Add(probe);
-  CHECK(pipeline.Run().success);
+  CHECK(pipeline.Run().ok());
   CHECK_EQ(received.load(), 30);
   CHECK_EQ(signalled.size(), std::size_t{1});
   if (signalled.size() == 1) CHECK_EQ(signalled[0], 15);
@@ -660,7 +660,7 @@ TEST(recorder_finishes_last_segment_on_drain_stop) {
   gst::Options options;
   options.handle_signals = false;
   const gst::Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK_EQ(std::string(gst::ToString(result.reason)), std::string("stopped"));
   CHECK(recorder.Healthy());
   CHECK(!events.finished.empty());

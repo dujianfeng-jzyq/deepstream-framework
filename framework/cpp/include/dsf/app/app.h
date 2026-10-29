@@ -96,19 +96,19 @@ class Assembly {
   // 发布器在管线启动前 Start，管线结束后 Stop（录像的最后一个 finished 事件因此能发出）。
   publish::Publisher& AddPublisher(std::unique_ptr<publish::Publisher> publisher);
 
-  // 就绪心跳：progress 返回单调递增的处理计数，计数增长时更新就绪文件。
+  // 就绪计数：progress 返回单调递增的处理计数，供就绪文件与看门狗使用（见 ReadinessHeartbeat）。
   // DeepStream 管线应使用 MetaTap::frames()：mux 之后一个 buffer 是一个批次，帧数随源而变，
-  // 多路时某一路断流批次仍会推送；按真实帧计数才反映输入在供帧。都不调用时，主循环运行即视为就绪
-  // （适用于车辆停止时不出帧这类按需产帧的源，配合 options().startup_timeout = 0）。
-  void ReadyWhen(std::function<std::uint64_t()> progress) { ready_progress_ = std::move(progress); }
-  // 不经过 nvstreammux 的普通 GStreamer 管线：按经过该元件的 buffer 计数。
-  void ReadyWhenFramesReach(const std::string& element) { ready_element_ = element; }
+  // 多路时某一路断流批次仍会推送；按真实帧计数才反映输入在供帧。不指定时没有计数，主循环运行即视为
+  // 就绪（适用于车辆停止时不出帧这类按需产帧的源，配合 options().startup_timeout = 0）。
+  // 只能指定一个计数来源，重复指定抛 std::logic_error。
+  void ReadyWhen(std::function<std::uint64_t()> progress);
+  // 不经过 nvstreammux 的普通 GStreamer 管线：登记一个 BufferCounter，按经过该元件的 buffer 计数。
+  void ReadyWhenFramesReach(const std::string& element);
 
   gst::Requirements Requirements() const;
 
   const std::vector<std::unique_ptr<gst::Component>>& components() const { return components_; }
   const std::vector<std::unique_ptr<publish::Publisher>>& publishers() const { return publishers_; }
-  const std::string& ready_element() const { return ready_element_; }
   const std::function<std::uint64_t()>& ready_progress() const { return ready_progress_; }
 
  private:
@@ -117,7 +117,6 @@ class Assembly {
   gst::Options options_;
   std::vector<std::unique_ptr<gst::Component>> components_;
   std::vector<std::unique_ptr<publish::Publisher>> publishers_;
-  std::string ready_element_;
   std::function<std::uint64_t()> ready_progress_;
 };
 

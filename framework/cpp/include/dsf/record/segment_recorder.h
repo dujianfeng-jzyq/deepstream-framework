@@ -22,6 +22,7 @@
 #include "dsf/gst/component.h"
 #include "dsf/gst/graph.h"
 #include "dsf/gst/pipeline.h"
+#include "dsf/gst/probe.h"
 
 namespace dsf::record {
 
@@ -150,8 +151,7 @@ class SegmentRecorder : public gst::Component {
   std::vector<GstClockTime> gap_ends_;
   GstElement* sink_ = nullptr;
   gulong handler_ = 0;
-  GstPad* input_ = nullptr;
-  gulong probe_ = 0;
+  gst::PadProbe input_;  // split_on_gap 时挂在录像入口上
   GstClockTime last_input_ = GST_CLOCK_TIME_NONE;  // 以下四项只在流线程访问
   GstClockTime last_duration_ = GST_CLOCK_TIME_NONE;
   bool awaiting_keyframe_ = false;  // 断流后丢弃关键帧之前的帧

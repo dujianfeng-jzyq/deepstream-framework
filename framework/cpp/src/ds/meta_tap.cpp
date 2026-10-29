@@ -153,27 +153,16 @@ void MetaTap::AddObjectExtractor(ObjectExtractor extractor) {
 void MetaTap::SetImageFilter(ImageFilter filter) { image_filter_ = std::move(filter); }
 
 void MetaTap::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
-  GstElement* element = gst_bin_get_by_name(GST_BIN(bin), options_.element.c_str());
-  if (element == nullptr) {
-    throw std::runtime_error("metadata tap element '" + options_.element + "' is not in the pipeline");
-  }
-  pad_ = gst_element_get_static_pad(element, "src");
-  gst_object_unref(element);
-  if (pad_ == nullptr) throw std::runtime_error("element '" + options_.element + "' has no src pad");
+  // 先挂探针：采集点不存在时在加载编码库、启动工作线程之前失败。OnCreated 时流线程尚未启动。
+  probe_.Attach(GST_BIN(bin), options_.element, "src", GST_PAD_PROBE_TYPE_BUFFER, &MetaTap::OnBuffer, this);
   if (options_.image.enabled) {
     encoder_ = std::make_unique<Encoder>(options_.gpu_id);
   }
   for (auto& async : async_) async->Start();
-  probe_ = gst_pad_add_probe(pad_, GST_PAD_PROBE_TYPE_BUFFER, &MetaTap::OnBuffer, this, nullptr);
 }
 
 void MetaTap::OnReleased() {
-  if (pad_ != nullptr) {
-    if (probe_ != 0) gst_pad_remove_probe(pad_, probe_);
-    probe_ = 0;
-    gst_object_unref(pad_);
-    pad_ = nullptr;
-  }
+  probe_.Remove();
   // 管线已置 NULL、流线程已停止，不会再有编码在进行。
   encoder_.reset();
   for (auto& async : async_) async->Stop();

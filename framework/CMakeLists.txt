@@ -11,7 +11,8 @@ target_link_libraries(dsf_config PRIVATE PkgConfig::DSF_YAML_CPP dsf_warnings)
 add_library(dsf_gst STATIC
   "${_src}/gst/introspect.cpp"
   "${_src}/gst/graph.cpp"
-  "${_src}/gst/pipeline.cpp")
+  "${_src}/gst/pipeline.cpp"
+  "${_src}/gst/probe.cpp")
 target_include_directories(dsf_gst PUBLIC "${_inc}")
 target_link_libraries(dsf_gst
   PUBLIC dsf_config PkgConfig::DSF_GSTREAMER

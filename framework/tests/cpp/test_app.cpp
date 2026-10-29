@@ -144,7 +144,7 @@ TEST(readiness_and_stats_run_before_playing) {
   } observer, disabled_observer;
   TempConfig config("frames: 1\n");
   const fs::path ready = config.dir / "ready";
-  ReadinessHeartbeat readiness("", nullptr, ready.string(), std::chrono::milliseconds(50));
+  ReadinessHeartbeat readiness(nullptr, ready.string(), std::chrono::milliseconds(50));
   StatsReporter stats(std::chrono::seconds(1), {&observer}, {});
   StatsReporter disabled_stats(std::chrono::seconds(0), {&disabled_observer}, {});
   dsf::gst::Pipeline pipeline("idle-ready", IdleLiveGraph());
@@ -167,7 +167,7 @@ TEST(readiness_and_stats_run_before_playing) {
   options.handle_signals = false;
   options.startup_timeout = std::chrono::milliseconds(0);
   const dsf::gst::Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(!observer.playing);
   CHECK(updates >= 2);
   CHECK(observer.reports > 0);
@@ -177,16 +177,18 @@ TEST(readiness_and_stats_run_before_playing) {
 
 TEST(counted_readiness_only_updates_when_progress_changes) {
   if (!dsf::gst::HasFactory("appsrc")) SKIP("GStreamer element missing: appsrc");
-  // 分别覆盖计数回调和元件探针；计数不变时不能退化成无条件心跳。
+  // 分别覆盖计数回调和 BufferCounter；计数不变时不能退化成无条件心跳。
   for (const bool use_callback : {true, false}) {
     TempConfig config("frames: 1\n");
     const fs::path ready = config.dir / "ready";
     std::uint64_t progress = 0;
-    std::function<std::uint64_t()> counter;
-    if (use_callback) counter = [&] { return progress; };
-    ReadinessHeartbeat readiness(use_callback ? "" : "src", counter, ready.string(),
-                                 std::chrono::milliseconds(50));
+    BufferCounter buffers("src");
+    std::function<std::uint64_t()> counter = [&] { return progress; };
+    if (!use_callback) counter = [&buffers] { return buffers.count(); };
+    ReadinessHeartbeat readiness(counter, ready.string(), std::chrono::milliseconds(50),
+                                 std::chrono::milliseconds(0), /*require_input=*/true);
     dsf::gst::Pipeline pipeline("counted-ready", IdleLiveGraph());
+    if (!use_callback) pipeline.Add(buffers);
     pipeline.Add(readiness);
     int phase = 0;
     int idle_checks = 0;
@@ -232,7 +234,7 @@ TEST(counted_readiness_only_updates_when_progress_changes) {
     options.handle_signals = false;
     options.startup_timeout = std::chrono::milliseconds(0);
     const dsf::gst::Result result = pipeline.Run(options);
-    CHECK(result.success);
+    CHECK(result.ok());
     CHECK_EQ(phase, 4);
     CHECK(quiet_while_idle);
     CHECK(counts_match);
@@ -244,7 +246,7 @@ TEST(counted_readiness_only_updates_when_progress_changes) {
 TEST(stalled_progress_stops_the_pipeline_and_reports_unhealthy) {
   if (!dsf::gst::HasFactory("appsrc")) SKIP("GStreamer element missing: appsrc");
   TempConfig config("frames: 1\n");
-  ReadinessHeartbeat readiness("", [] { return std::uint64_t{0}; }, (config.dir / "ready").string(),
+  ReadinessHeartbeat readiness([] { return std::uint64_t{0}; }, (config.dir / "ready").string(),
                                std::chrono::milliseconds(50), std::chrono::milliseconds(300));
   dsf::gst::Pipeline pipeline("stalled", IdleLiveGraph());
   pipeline.Add(readiness);
@@ -258,15 +260,15 @@ TEST(stalled_progress_stops_the_pipeline_and_reports_unhealthy) {
   options.startup_timeout = std::chrono::milliseconds(0);
   const auto begin = std::chrono::steady_clock::now();
   const dsf::gst::Result result = pipeline.Run(options);
-  CHECK(result.success);  // 排空停止，不是 guard 的强制停止
+  CHECK(result.ok());  // 排空停止，不是 guard 的强制停止
   CHECK(std::chrono::steady_clock::now() - begin < std::chrono::seconds(4));
   CHECK(!readiness.Healthy());
 
   // 没有设置时限，或计数在增长（运行时长超过时限）时不触发。
   std::uint64_t progress = 0;
-  ReadinessHeartbeat disabled("", [] { return std::uint64_t{0}; }, (config.dir / "ready2").string(),
+  ReadinessHeartbeat disabled([] { return std::uint64_t{0}; }, (config.dir / "ready2").string(),
                               std::chrono::milliseconds(50));
-  ReadinessHeartbeat advancing("", [&progress] { return ++progress; }, (config.dir / "ready3").string(),
+  ReadinessHeartbeat advancing([&progress] { return ++progress; }, (config.dir / "ready3").string(),
                                std::chrono::milliseconds(50), std::chrono::milliseconds(300));
   for (ReadinessHeartbeat* heartbeat : {&disabled, &advancing}) {
     dsf::gst::Pipeline idle("idle", IdleLiveGraph());
@@ -274,7 +276,7 @@ TEST(stalled_progress_stops_the_pipeline_and_reports_unhealthy) {
     dsf::gst::Timer stop;
     idle.Post([&] { stop = idle.Every(std::chrono::milliseconds(800), [&] { idle.RequestStop(); }); });
     const dsf::gst::Result idle_result = idle.Run(options);
-    CHECK(idle_result.success);
+    CHECK(idle_result.ok());
     CHECK_EQ(std::string(dsf::gst::ToString(idle_result.reason)), std::string("stopped"));
     CHECK(heartbeat->Healthy());
   }
@@ -286,7 +288,7 @@ TEST(readiness_without_required_input_stays_fresh_while_idle) {
   // 线阵、外触发等源可能长时间不产帧：应用活着就算就绪，文件记录计数与空闲时长；看门狗触发后不再更新。
   TempConfig config("frames: 1\n");
   const fs::path ready = config.dir / "ready";
-  ReadinessHeartbeat readiness("", [] { return std::uint64_t{0}; }, ready.string(), std::chrono::milliseconds(50),
+  ReadinessHeartbeat readiness([] { return std::uint64_t{0}; }, ready.string(), std::chrono::milliseconds(50),
                                std::chrono::milliseconds(1500), /*require_input=*/false);
   dsf::gst::Pipeline pipeline("idle-input", IdleLiveGraph());
   pipeline.Add(readiness);
@@ -316,11 +318,19 @@ TEST(readiness_without_required_input_stays_fresh_while_idle) {
   options.handle_signals = false;
   options.startup_timeout = std::chrono::milliseconds(0);
   const dsf::gst::Result result = pipeline.Run(options);
-  CHECK(result.success);  // 看门狗排空停止
+  CHECK(result.ok());  // 看门狗排空停止
   CHECK(updates >= 4);    // 计数不变也持续更新
   CHECK(content_ok);
   CHECK(quiet_after_stall);
   CHECK(!readiness.Healthy());
+}
+
+TEST(readiness_counter_has_a_single_source) {
+  Assembly assembly(Paths{});
+  assembly.ReadyWhenFramesReach("tap");
+  CHECK(assembly.ready_progress());
+  CHECK_EQ(assembly.components().size(), std::size_t{1});  // 登记了 BufferCounter
+  CHECK_THROWS(assembly.ReadyWhen([] { return std::uint64_t{0}; }), "already set");
 }
 
 TEST(readiness_section_is_read_by_the_framework) {

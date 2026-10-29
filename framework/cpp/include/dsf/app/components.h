@@ -12,6 +12,7 @@
 
 #include "dsf/gst/component.h"
 #include "dsf/gst/pipeline.h"
+#include "dsf/gst/probe.h"
 #include "dsf/publish/publisher.h"
 
 namespace dsf::app {
@@ -20,28 +21,26 @@ namespace dsf::app {
 std::string ReadyFilePath();
 
 // 就绪心跳：按 interval 更新就绪文件，不等 PLAYING（按需产帧的管线可能等待首帧才能完成状态切换）。
-// 计数来源二选一：progress（例如 MetaTap::frames()），或经过 element 的 buffer 数。
+// progress 是单调递增的处理计数（例如 MetaTap::frames()、BufferCounter::count()），为空表示没有计数。
 // require_input 为 true 时只在计数增长时更新（就绪 = 输入真的在供帧）；为 false 时主循环运行即更新，
-// 没有输入也算就绪（线阵、外触发等按需产帧的源）。有计数来源时文件内容为 "count=<计数> idle_s=<距上次
+// 没有输入也算就绪（线阵、外触发等按需产帧的源）。有计数时文件内容为 "count=<计数> idle_s=<距上次
 // 增长的秒数>"，否则为 "alive"；健康检查只看更新时间。结束时删除文件。
-// stall_timeout 为正且有计数来源时兼作看门狗：计数在时限内没有增长就请求排空停止、不再更新文件，
+// stall_timeout 为正且有计数时兼作看门狗：计数在时限内没有增长就请求排空停止、不再更新文件，
 // Healthy() 为 false。与 require_input 无关：按需产帧的源应关闭看门狗或给出足够长的时限。
+// 默认值与配置段 readiness / watchdog 的默认值一致。
 class ReadinessHeartbeat : public gst::Component {
  public:
-  ReadinessHeartbeat(std::string element, std::function<std::uint64_t()> progress, std::string path,
+  ReadinessHeartbeat(std::function<std::uint64_t()> progress, std::string path,
                      std::chrono::milliseconds interval = std::chrono::seconds(1),
                      std::chrono::milliseconds stall_timeout = std::chrono::milliseconds(0),
-                     bool require_input = true);
+                     bool require_input = false);
   std::string_view Name() const override { return "readiness"; }
   void OnCreated(gst::Pipeline& pipeline, GstElement* bin) override;
   void OnReleased() override;
   bool Healthy() const override { return !stalled_; }
-  void Report(gst::Stats& stats) const override;
 
  private:
-  void Touch(bool counting, std::uint64_t count, std::chrono::steady_clock::time_point now);
-  std::uint64_t Count() const;
-  std::string element_;
+  void Touch(std::uint64_t count, std::chrono::steady_clock::time_point now);
   std::function<std::uint64_t()> progress_;
   std::string path_;
   std::chrono::milliseconds interval_;
@@ -49,11 +48,26 @@ class ReadinessHeartbeat : public gst::Component {
   bool require_input_;
   std::chrono::steady_clock::time_point last_progress_;
   bool stalled_ = false;
-  GstPad* pad_ = nullptr;
-  gulong probe_ = 0;
-  std::atomic<std::uint64_t> buffers_{0};
   std::uint64_t last_ = 0;
   gst::Timer timer_;
+};
+
+// 经过 element 的 src pad 的 buffer 数（Assembly::ReadyWhenFramesReach 的计数来源），统计 <element>_buffers。
+class BufferCounter : public gst::Component {
+ public:
+  explicit BufferCounter(std::string element);
+  std::string_view Name() const override { return name_; }
+  void OnCreated(gst::Pipeline& pipeline, GstElement* bin) override;
+  void OnReleased() override { probe_.Remove(); }
+  void Report(gst::Stats& stats) const override;
+
+  std::uint64_t count() const { return count_.load(std::memory_order_relaxed); }
+
+ private:
+  std::string element_;
+  std::string name_;
+  std::atomic<std::uint64_t> count_{0};
+  gst::PadProbe probe_;
 };
 
 // 断流后的关键帧：直播源断流重连后，下一帧的时间戳比上一帧晚整个断流时长，编码器却照常延续当前
@@ -67,7 +81,7 @@ class KeyframeOnGap : public gst::Component {
   KeyframeOnGap(std::string element, std::chrono::milliseconds gap);
   std::string_view Name() const override { return name_; }
   void OnCreated(gst::Pipeline& pipeline, GstElement* bin) override;
-  void OnReleased() override;
+  void OnReleased() override { probe_.Remove(); }
   void Report(gst::Stats& stats) const override;
 
  private:
@@ -77,9 +91,8 @@ class KeyframeOnGap : public gst::Component {
   GstClockTime gap_;
   GstClockTime last_ = GST_CLOCK_TIME_NONE;  // 只在流线程访问
   std::atomic<std::uint64_t> forced_{0};
-  GstPad* pad_ = nullptr;
-  gulong probe_ = 0;
-  bool force_idr_signal_ = false;  // OnCreated 中确定，之后只读
+  bool force_idr_signal_ = false;  // OnCreated 中确定（流线程尚未启动），之后只读
+  gst::PadProbe probe_;
 };
 
 // 周期统计：汇总全部组件的 Report() 与各发布通道的计数写一行日志。主循环运行即开始，不等 PLAYING。

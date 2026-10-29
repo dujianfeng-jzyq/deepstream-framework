@@ -8,6 +8,7 @@
 #include "dsf/gst/graph.h"
 #include "dsf/gst/introspect.h"
 #include "dsf/gst/pipeline.h"
+#include "dsf/gst/probe.h"
 #include "dsf_test.h"
 
 using namespace dsf::gst;
@@ -179,7 +180,7 @@ TEST(pipeline_runs_to_eos_with_component_order) {
   pipeline.Add(first);
   pipeline.Add(second);
   const Result result = pipeline.Run();
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("eos"));
   const std::vector<std::string> expected = {"a:created", "b:created", "a:playing", "b:playing",
                                              "b:released", "a:released"};
@@ -202,7 +203,7 @@ TEST(drain_stop_finishes_as_stopped) {
   Options options;
   options.handle_signals = false;
   const Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
   CHECK(std::find(log.begin(), log.end(), "c:stopping") != log.end());
   CHECK(ticks >= 5);
@@ -243,7 +244,7 @@ TEST(drain_completes_when_eos_reaches_every_sink_and_components_are_done) {
   options.stop_timeout = std::chrono::seconds(3);
   const auto started = std::chrono::steady_clock::now();
   const Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
   CHECK(swallow.drained);  // EOS 早已到达 sink：只有等待组件收尾，结束时它才会是 true
   CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
@@ -305,7 +306,7 @@ TEST(runtime_error_drains_first_when_drain_on_error_is_set) {
   options.drain_on_error = true;
   const auto started = std::chrono::steady_clock::now();
   const Result result = pipeline.Run(options);
-  CHECK(!result.success);
+  CHECK(!result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("run-error"));
   CHECK(result.error.find("connection lost") != std::string::npos);
   CHECK(result.error.find("(then") == std::string::npos);  // 排空完成，没有附加原因
@@ -378,7 +379,7 @@ TEST(plugin_timers_on_the_default_context_fire) {
   options.stop_timeout = std::chrono::seconds(5);
   const Result result = pipeline.Run(options);
   g_source_remove(id);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(state.fired >= 5);
 }
 
@@ -389,7 +390,7 @@ TEST(positive_startup_timeout_fails_without_frames) {
   options.handle_signals = false;
   options.startup_timeout = std::chrono::milliseconds(300);
   const Result result = pipeline.Run(options);
-  CHECK(!result.success);
+  CHECK(!result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("startup-timeout"));
 }
 
@@ -401,7 +402,7 @@ TEST(negative_startup_timeout_is_rejected) {
   Options options;
   options.startup_timeout = std::chrono::milliseconds(-1);
   const Result result = pipeline.Run(options);
-  CHECK(!result.success);
+  CHECK(!result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("start-error"));
   CHECK(log == std::vector<std::string>{"c:released"});
 }
@@ -425,7 +426,7 @@ TEST(zero_startup_timeout_waits_for_frames_and_stops_cleanly) {
   options.startup_timeout = std::chrono::milliseconds(0);
   options.stop_timeout = std::chrono::seconds(3);
   const Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
   CHECK(std::find(log.begin(), log.end(), "c:playing") == log.end());
   CHECK(std::find(log.begin(), log.end(), "c:stopping") != log.end());
@@ -461,7 +462,7 @@ TEST(zero_startup_timeout_plays_once_frames_arrive) {
   options.startup_timeout = std::chrono::milliseconds(0);
   options.stop_timeout = std::chrono::seconds(3);
   const Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK(component.playing);
   CHECK(ticks >= 5);
 }
@@ -475,7 +476,7 @@ TEST(private_context_pipelines_run_in_parallel) {
   std::thread other([&] { rb = b.Run(options); });
   ra = a.Run(options);
   other.join();
-  CHECK(ra.success && rb.success);
+  CHECK(ra.ok() && rb.ok());
 }
 
 TEST(immediate_stop_is_forced_failure) {
@@ -488,7 +489,7 @@ TEST(immediate_stop_is_forced_failure) {
   options.handle_signals = false;
   const Result result = pipeline.Run(options);
   stopper.join();
-  CHECK(!result.success);
+  CHECK(!result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("forced"));
 }
 
@@ -500,7 +501,7 @@ TEST(component_failure_does_not_skip_cleanup) {
   pipeline.Add(failing);
   pipeline.Add(other);
   const Result result = pipeline.Run();
-  CHECK(!result.success);
+  CHECK(!result.ok());
   CHECK(result.error.find("f: boom") != std::string::npos);
   CHECK(std::find(log.begin(), log.end(), "o:released") != log.end());
   CHECK(std::find(log.begin(), log.end(), "f:released") != log.end());
@@ -513,7 +514,7 @@ TEST(runtime_errors_and_build_errors_are_classified) {
   CHECK_EQ(std::string(ToString(build.Run().reason)), std::string("build-error"));
 
   Pipeline launch("launch", Pipeline::Launch("videotestsrc num-buffers=3 ! fakesink"));
-  CHECK(launch.Run().success);
+  CHECK(launch.Run().ok());
 }
 
 TEST(sometimes_pads_are_linked_when_they_appear) {
@@ -525,7 +526,7 @@ TEST(sometimes_pads_are_linked_when_they_appear) {
   graph.Chain({source, decode, convert, graph.Add("fakesink", "sink")});
   Pipeline pipeline("delayed", graph);
   const Result result = pipeline.Run();
-  CHECK(result.success);
+  CHECK(result.ok());
 }
 
 TEST(link_failure_with_unlinked_static_pad_is_a_build_error) {
@@ -547,7 +548,7 @@ TEST(tasks_posted_before_run_execute_on_the_private_context) {
   options.private_context = true;
   // 任务若留在默认 context 上就永不执行，live 管线停不下来（由 CTest 超时判为失败）。
   const Result result = pipeline.Run(options);
-  CHECK(result.success);
+  CHECK(result.ok());
   CHECK_EQ(std::string(ToString(result.reason)), std::string("stopped"));
   CHECK(ran_on == std::this_thread::get_id());
 }
@@ -559,7 +560,27 @@ TEST(request_pads_by_template_and_tee_branches) {
   graph.Link(graph.Branch(tee), graph.Add("fakesink", "a"));
   graph.Link(graph.Branch(tee), graph.Add("fakesink", "b"));
   Pipeline pipeline("tee", graph);
-  CHECK(pipeline.Run().success);
+  CHECK(pipeline.Run().ok());
+}
+
+TEST(pad_probe_attaches_by_name_and_removes_once) {
+  Graph graph;
+  graph.Chain({graph.Add("fakesrc", "src"), graph.Add("fakesink", "sink")});
+  GstElement* bin = graph.Instantiate("probe");
+  const GstPadProbeCallback pass = [](GstPad*, GstPadProbeInfo*, gpointer) { return GST_PAD_PROBE_OK; };
+  PadProbe probe;
+  CHECK_THROWS(probe.Attach(GST_BIN(bin), "missing", "src", GST_PAD_PROBE_TYPE_BUFFER, pass, nullptr),
+               "element 'missing' is not in the pipeline");
+  CHECK_THROWS(probe.Attach(GST_BIN(bin), "src", "video", GST_PAD_PROBE_TYPE_BUFFER, pass, nullptr),
+               "element 'src' has no video pad");
+  CHECK(probe.pad() == nullptr);
+  probe.Attach(GST_BIN(bin), "src", "src", GST_PAD_PROBE_TYPE_BUFFER, pass, nullptr);
+  CHECK(probe.pad() != nullptr);
+  CHECK_EQ(std::string(GST_PAD_NAME(probe.pad())), std::string("src"));
+  probe.Remove();
+  probe.Remove();
+  CHECK(probe.pad() == nullptr);
+  gst_object_unref(bin);
 }
 
 DSF_TEST_MAIN()
