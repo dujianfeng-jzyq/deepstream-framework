@@ -375,6 +375,18 @@ TEST(framework_sections_match_the_shared_table) {
   if (declared != expected) throw dsf_test::Failure("framework_sections.txt differs from the C++ reader: " + text);
 }
 
+TEST(stats_line_reports_channel_counts_and_backlog) {
+  struct FakeChannel : dsf::publish::Channel {
+    using Channel::TryPublish;
+    bool TryPublish(dsf::publish::Fields /*fields*/) override { return true; }
+    dsf::publish::ChannelStats Stats() const override { return {5, 1, 0, 7}; }
+    const std::string& target() const override { return name; }
+    std::string name = "events";
+  } channel;
+  StatsReporter stats(std::chrono::seconds(0), {}, {&channel});
+  CHECK_EQ(stats.Line(), std::string("events:published=5 events:dropped=1 events:failed=0 events:queued=7"));
+}
+
 TEST(readiness_counter_has_a_single_source) {
   Assembly assembly(Paths{});
   assembly.ReadyWhenFramesReach("tap");

@@ -224,6 +224,9 @@ class RenderTest(ProjectTestCase):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
             render.render(self.root, "test", quiet=True)
         self.assertIn("note: images come from the release package", errors.getvalue())
+        # 与包内相同的镜像不提示：每个 profile 都写明 DEEPSTREAM_IMAGE，否则每次安装都会出现这条提示。
+        profile.write_text("x-build:\n  DEEPSTREAM_IMAGE: nvcr.io/nvidia/deepstream:8.0-samples-multiarch\n")
+        self.assertEqual(self.plan().notes, [])
 
     def test_write_replaces_outputs_and_reports_stale_files(self):
         stale = self.root / "generated/config/old.yaml"

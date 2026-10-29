@@ -171,6 +171,7 @@ std::string StatsReporter::Line() const {
     stats.Add(prefix + "published", counts.published);
     stats.Add(prefix + "dropped", counts.dropped);
     stats.Add(prefix + "failed", counts.failed);
+    stats.Add(prefix + "queued", counts.queued);  // 积压：持续增长说明后端或消费端跟不上
   }
   return stats.Text();
 }

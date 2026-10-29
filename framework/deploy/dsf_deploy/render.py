@@ -281,7 +281,8 @@ def _resolve_variables(root: Path, profile_name: str, profile: dict) -> tuple[di
     if released:
         _require_fitting(root, profile_name, profile, variables.get("TARGET_PLATFORM", ""),
                          variables.get("DEEPSTREAM_VERSION", ""))
-        ignored = sorted(k for k in overrides if k in RELEASE_IMAGE_KEYS)
+        # 与包内相同的值（本项目每个 profile 都写明 DEEPSTREAM_IMAGE）不必提示；不同时才值得告诉用户。
+        ignored = sorted(k for k, v in overrides.items() if k in RELEASE_IMAGE_KEYS and v != variables.get(k))
         if ignored:
             notes.append(f"images come from the release package; ignoring x-build {', '.join(ignored)}")
         overrides = {k: v for k, v in overrides.items() if k not in RELEASE_IMAGE_KEYS}

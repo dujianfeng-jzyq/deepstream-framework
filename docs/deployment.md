@@ -126,6 +126,8 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 - 构建只由渲染出的 `.env` 决定：脚本忽略 shell 中的 `COMPOSE_FILE`、`COMPOSE_PROJECT_NAME`、`COMPOSE_PROFILES` 等变量（它们优先于 `.env`）。
 - `release.env`：项目公共输入加本次发布事实（版本、镜像、平台、建议 profile、源码版本）。`package-files.json`：全部文件的 SHA-256（完整性校验，不是签名）。
 
+版本号：开发阶段一直用 `project.env` 中的版本发版（测试包同名覆盖），不为测试改版本号。正式发布时先提交版本号（`chore(release): <版本>`，改 `APPS_VERSION`，base 有变化时同时改 `BASE_VERSION`），再在干净的工作区构建与打包：发布包的 `SOURCE_REVISION` 因此是不带 `-dirty` 的提交号，可以追溯到确切的源码。
+
 ## 6. 安装
 
 ```bash

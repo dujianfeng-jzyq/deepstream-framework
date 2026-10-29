@@ -217,7 +217,7 @@ channel.TryPublish(dsf::ds::Serialize(dsf::ds::DetectionMessage(frame)));   // �
 channel.TryPublish(dsf::ds::DetectionEntry(frame));   // payload + 帧带图片时的 image 字段（JPEG 原始字节）
 ```
 
-一个连接、一个后台线程、每个通道独立的有界队列；消息入队后立即发送 `XADD <stream> MAXLEN ~ <n> * <field> <value> ...`（字段值二进制安全，图片不做 base64），有积压时每轮最多 `batch_size` 条、`batch_bytes` 字节（至少一条）以 pipelining 合并发送。`ChannelSpec::max_bytes` 限制队列积压的总字节数（0 不限，空队列总能放下一条），带图片的通道应设置。`MAXLEN ~` 按 Stream 内部节点（默认 100 条）裁剪，实际长度可能略多于设定值。
+一个连接、一个后台线程、每个通道独立的有界队列；消息入队后立即发送 `XADD <stream> MAXLEN ~ <n> * <field> <value> ...`（字段值二进制安全，图片不做 base64），有积压时每轮最多 `batch_size` 条、`batch_bytes` 字节（至少一条）以 pipelining 合并发送。`ChannelSpec::max_bytes` 限制队列积压的总字节数（0 不限，空队列总能放下一条），带图片的通道应设置。统计日志按通道输出 `<target>:published`、`:dropped`、`:failed` 与 `:queued`（当前积压条数，持续增长说明 Redis 或消费端跟不上）。`MAXLEN ~` 按 Stream 内部节点（默认 100 条）裁剪，实际长度可能略多于设定值。
 
 带图片的检测记录读取方式（redis-py，`decode_responses=False`）：
 
