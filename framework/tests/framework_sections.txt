@@ -1,0 +1,10 @@
+# 框架读取的公共配置段：每行一个键路径，后面是读取它的运行时（cpp、python）。
+# C++ 入口（FrameworkOptions::Read）与 Python Service（FrameworkOptions.read）各有一个测试与本表对照：
+# 一边新增或删除键时测试失败，提醒同时决定另一边是否跟进，并更新 docs/framework.md §2 的表。
+logging.level             cpp python
+logging.console           cpp python
+logging.file              cpp python
+logging.directory         cpp python
+logging.stats_interval_s  cpp
+watchdog.stall_timeout_s  cpp python
+readiness.require_input   cpp

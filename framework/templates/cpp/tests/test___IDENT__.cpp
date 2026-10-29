@@ -22,9 +22,7 @@ std::string Rendered() {
 TEST(template_loads_and_builds) {
   const auto document = dsf::config::Document::LoadText(Rendered(), "__NAME__.yaml");
   dsf::config::Reader root = document.Root();
-  (void)dsf::app::LogOptions::Read(root.Section("logging"));  // 日志、看门狗与就绪段由框架读取
-  (void)dsf::app::WatchdogOptions::Read(root.Section("watchdog"));
-  (void)dsf::app::ReadinessOptions::Read(root.Section("readiness"));
+  (void)dsf::app::FrameworkOptions::Read(root);  // 日志、看门狗与就绪段由框架读取
   const auto config = __IDENT__::Load(root);
   root.Finish();
   dsf::gst::Graph graph;

@@ -11,7 +11,8 @@
     sys.exit(Service("my-service", "说明").run(load, main))
 
 框架负责：命令行（--config、--check-config、--version）、路径（CONTAINER_* 环境变量）、
-logging 段与日志格式、SIGINT/SIGTERM、就绪文件（DSF_READY_FILE，默认 /tmp/dsf.ready）。
+logging 与 watchdog 段（FrameworkOptions）与日志格式、SIGINT/SIGTERM、就绪文件（DSF_READY_FILE，
+默认 /tmp/dsf.ready）。
 就绪文件只在 service.sleep()/service.alive() 中更新：主循环停止推进时健康检查随之失败。
 sleep() 的等待本身算作推进：长等待分段更新就绪文件，不会被健康检查或看门狗当成卡住。
 watchdog.stall_timeout_s 为正时，主循环超过时限没有推进则进程以失败退出，交给容器的重启策略：
@@ -69,6 +70,29 @@ def payload_version(paths: Paths) -> str:
         return Path(paths.workspace, "VERSION").read_text(encoding="utf-8").strip() or "unknown"
     except OSError:
         return "unknown"
+
+
+@dataclass(frozen=True)
+class FrameworkOptions:
+    """框架读取的公共配置段。键与规则同 C++ 应用；logging.stats_interval_s 与 readiness 只有 C++ 应用有，
+    对照表见 docs/framework.md §2（framework/tests/framework_sections.txt 由两边的测试对照）。"""
+    level: str = "info"
+    console: bool = True
+    file: bool = False
+    directory: str = ""  # 文件日志目录，应位于数据目录下
+    stall_timeout_s: int = 0  # 0 表示关闭看门狗
+
+    @classmethod
+    def read(cls, root: Reader) -> "FrameworkOptions":
+        section = root.section("logging")
+        level = section.get("level", "info", one_of(*LEVELS))
+        console = section.get("console", True)
+        file = section.get("file", False)
+        directory = section.get("directory", "")
+        if file and not directory:
+            section.fail("directory", "is required when file logging is enabled")
+        stall_timeout_s = root.section("watchdog").get("stall_timeout_s", 0, at_least(0))
+        return cls(level, console, file, directory, stall_timeout_s)
 
 
 class _Formatter(logging.Formatter):
@@ -136,9 +160,7 @@ class Service:
         config_path = args.config or f"{self.paths.config}/{self.name}.yaml"
         try:
             root = Reader.load(config_path)
-            logging_section = root.section("logging")
-            level = logging_section.get("level", "info", one_of(*LEVELS))
-            stall_timeout = root.section("watchdog").get("stall_timeout_s", 0, at_least(0))
+            options = FrameworkOptions.read(root)
             config = load(root)
             root.finish()
         except ConfigError as error:
@@ -150,9 +172,11 @@ class Service:
             print("configuration is valid")
             return EXIT_OK
 
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(_Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"))
-        logging.basicConfig(level=_PYTHON_LEVELS[level], handlers=[handler], force=True)
+        try:
+            self._configure_logging(options)
+        except OSError as error:
+            print(f"{self.name}: cannot configure logging: {error}", file=sys.stderr)
+            return EXIT_FAILURE
         self.log.info("%s payload=%s", self.name, payload_version(self.paths))
         self.log.info("config(%s): %s", config_path, root.describe())
         for warning in root.warnings():
@@ -162,10 +186,11 @@ class Service:
             signal.signal(signum, lambda number, _frame: self._on_signal(number))
         self._ready.unlink(missing_ok=True)
         self._last_alive = time.monotonic()
-        if stall_timeout > 0:
+        if options.stall_timeout_s > 0:
             # 分段间隔短于看门狗时限：再长的 sleep() 也不会被误判为卡住。
-            self._alive_interval = min(_ALIVE_INTERVAL_S, stall_timeout / 2)
-            threading.Thread(target=self._watch, args=(stall_timeout,), name="watchdog", daemon=True).start()
+            self._alive_interval = min(_ALIVE_INTERVAL_S, options.stall_timeout_s / 2)
+            threading.Thread(target=self._watch, args=(options.stall_timeout_s,), name="watchdog",
+                             daemon=True).start()
         try:
             main(config, self)
         except Exception:  # 服务异常退出：记录完整堆栈，交给容器重启策略
@@ -178,6 +203,19 @@ class Service:
         else:
             self.log.info("stopped")
         return EXIT_OK
+
+    def _configure_logging(self, options: FrameworkOptions) -> None:
+        handlers: list[logging.Handler] = []
+        # 两种输出都关闭时仍保留控制台：完全没有日志的进程在现场无法排查（与 C++ 应用一致）。
+        if options.console or not options.file:
+            handlers.append(logging.StreamHandler(sys.stdout))
+        if options.file:
+            Path(options.directory).mkdir(parents=True, exist_ok=True)
+            handlers.append(logging.FileHandler(Path(options.directory, f"{self.name}.log"), encoding="utf-8"))
+        formatter = _Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+        for handler in handlers:
+            handler.setFormatter(formatter)
+        logging.basicConfig(level=_PYTHON_LEVELS[options.level], handlers=handlers, force=True)
 
     def _on_signal(self, signum: int) -> None:
         # 信号处理在主线程的任意字节码之间执行：这里写日志可能重入正在进行的 stdout 写入

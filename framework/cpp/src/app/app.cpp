@@ -110,6 +110,14 @@ ReadinessOptions ReadinessOptions::Read(config::Reader reader) {
   return options;
 }
 
+FrameworkOptions FrameworkOptions::Read(config::Reader root) {
+  FrameworkOptions options;
+  options.logging = LogOptions::Read(root.Section("logging"));
+  options.watchdog = WatchdogOptions::Read(root.Section("watchdog"));
+  options.readiness = ReadinessOptions::Read(root.Section("readiness"));
+  return options;
+}
+
 void ValidateLogging(const LogOptions& options) {
   if (!ParseLevel(options.level)) throw std::invalid_argument("unknown log level: " + options.level);
   if (options.file && options.directory.empty()) {
@@ -272,18 +280,14 @@ int Run(int argc, char** argv, const Definition& definition) {
   // 读取配置并组装。到这里为止没有任何副作用：预检与诊断只走到这一步。
   const std::string config_path =
       line.config_path.empty() ? paths.config + "/" + info.name + ".yaml" : line.config_path;
-  LogOptions logging;
-  WatchdogOptions watchdog;
-  ReadinessOptions ready;
+  FrameworkOptions framework;
   std::string summary;
   std::vector<std::string> warnings;
   Assembly assembly(paths);
   try {
     const config::Document document = config::Document::LoadFile(config_path);
     config::Reader root = document.Root();
-    logging = LogOptions::Read(root.Section("logging"));
-    watchdog = WatchdogOptions::Read(root.Section("watchdog"));
-    ready = ReadinessOptions::Read(root.Section("readiness"));
+    framework = FrameworkOptions::Read(root);
     definition.load(root);
     root.Finish();
     summary = root.Describe();
@@ -318,7 +322,7 @@ int Run(int argc, char** argv, const Definition& definition) {
 
   // ---- 运行 ----
   try {
-    ConfigureLogging(logging, info.name);
+    ConfigureLogging(framework.logging, info.name);
   } catch (const std::exception& error) {
     std::cerr << info.name << ": cannot configure logging: " << error.what() << "\n";
     return kExitFailure;
@@ -340,9 +344,10 @@ int Run(int argc, char** argv, const Definition& definition) {
     for (const publish::Channel* channel : publisher->Channels()) channels.push_back(channel);
   }
   ReadinessHeartbeat readiness(assembly.ready_progress(), ReadyFilePath(), std::chrono::seconds(1),
-                               std::chrono::seconds(watchdog.stall_timeout_s), ready.require_input);
+                               std::chrono::seconds(framework.watchdog.stall_timeout_s),
+                               framework.readiness.require_input);
   reported.push_back(&readiness);
-  StatsReporter stats(std::chrono::seconds(logging.stats_interval_s), reported, channels);
+  StatsReporter stats(std::chrono::seconds(framework.logging.stats_interval_s), reported, channels);
 
   gst::Pipeline pipeline(info.name, assembly.graph());
   for (const auto& component : assembly.components()) pipeline.Add(*component);

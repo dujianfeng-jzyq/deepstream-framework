@@ -57,6 +57,18 @@ TEST(source_validation) {
   CHECK_THROWS(Sources("sources:\n  - id: ../x\n    type: test\n"), "single path component");
   CHECK_THROWS(Sources("sources: []\n"), "at least 1");
   CHECK_THROWS(Sources("sources:\n  - id: a\n    type: test\n    output: {width: 10}\n"), "set together");
+  // 只读取与类型相关的段：与类型不符的段说明配置抄错了，读取时报错。
+  CHECK_THROWS(Sources("sources:\n  - id: a\n    type: file\n    uri: /a.mp4\n    rtsp: {password: p}\n"),
+               "sources[0].rtsp: is only used by rtsp sources");
+  CHECK_THROWS(Sources("sources:\n  - id: a\n    type: rtsp\n    uri: rtsp://u@h/s\n    capture: {width: 640}\n"),
+               "sources[0].capture: is only used by v4l2 and test sources");
+  CHECK_THROWS(Sources("sources:\n  - id: a\n    type: rtsp\n    uri: rtsp://u@h/s\n    file: {loop: false}\n"),
+               "sources[0].file: is only used by file sources");
+  CHECK_THROWS(Sources("sources:\n  - id: a\n    type: test\n    uri: rtsp://h/s\n"),
+               "sources[0].uri: is only used by uri, rtsp and file sources");
+  CHECK_THROWS(Sources("sources:\n  - id: a\n    type: test\n    capture: {device: /dev/video1}\n"),
+               "sources[0].capture.device: is only used by v4l2 sources");
+  CHECK_THROWS(Sources("sources:\n  - id: a\n    type: v4l\n"), "is not one of");
   CHECK_EQ(InjectPassword("rtsp://h/s", ""), std::string("rtsp://h/s"));
   CHECK_EQ(InjectPassword("rtsp://u@h:554/s", "abc123"), std::string("rtsp://u:abc123@h:554/s"));
   // 任意字符都可以：编码后地址只有一个分隔用的 @，GStreamer 解析时解码回原口令。
@@ -68,6 +80,20 @@ TEST(source_validation) {
   CHECK_EQ(InjectPassword("rtsp://h/s", "", true), std::string("rtsp://h/s"));
   CHECK_THROWS(InjectPassword("rtsp://u:x@h/s", "p"), "already contains");
   CHECK_THROWS(InjectPassword("rtsp://h/a@b", "p"), "no user name");  // 路径中的 @ 不是用户名分隔符
+}
+
+TEST(v4l2_source_reads_capture) {
+  const auto sources = Sources(
+      "sources:\n  - id: cam\n    type: v4l2\n"
+      "    capture: {device: /dev/video2, format: UYVY, width: 1920, height: 1080, framerate: 30}\n");
+  CHECK(sources[0].type == SourceType::kV4l2);
+  CHECK_EQ(std::string(ToString(sources[0].type)), std::string("v4l2"));
+  CHECK(sources[0].live);
+  Graph graph;
+  AddSource(graph, sources[0], "src0");
+  CHECK_EQ(Property(graph, "src0", "device"), std::string("/dev/video2"));
+  CHECK_EQ(Property(graph, "src0_raw", "caps"),
+           std::string("video/x-raw,format=UYVY,width=1920,height=1080,framerate=30/1"));
 }
 
 TEST(file_and_test_sources) {
@@ -89,10 +115,10 @@ TEST(mux_infer_and_outputs_build_expected_graph) {
   Graph graph;
   SourceSpec test;
   test.id = "t";
-  test.type = "test";
-  test.width = 320;
-  test.height = 240;
-  test.framerate = 25;
+  test.type = SourceType::kTest;
+  test.capture.width = 320;
+  test.capture.height = 240;
+  test.capture.framerate = 25;
   Element mux = AddMux(graph, MuxSpec{}, 2, true);
   LinkToMux(graph, AddSource(graph, test, "src0"), mux, 0);
   LinkToMux(graph, AddSource(graph, test, "src1"), mux, 1);

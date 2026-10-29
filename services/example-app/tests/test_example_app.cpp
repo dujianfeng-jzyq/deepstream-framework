@@ -61,9 +61,7 @@ TEST(template_matches_the_reader) {
   const std::string text = Template();
   const Document document = Document::LoadText(text, "example-app.yaml");
   dsf::config::Reader root = document.Root();
-  (void)dsf::app::LogOptions::Read(root.Section("logging"));  // 日志、看门狗与就绪段由框架读取
-  (void)dsf::app::WatchdogOptions::Read(root.Section("watchdog"));
-  (void)dsf::app::ReadinessOptions::Read(root.Section("readiness"));
+  (void)dsf::app::FrameworkOptions::Read(root);  // 日志、看门狗与就绪段由框架读取
   (void)example_app::Load(root);
   root.Finish();  // 模板没有读取代码不认识的键
   const auto declared = root.DeclaredPaths();

@@ -49,11 +49,22 @@ int main(int argc, char** argv) { return dsf::app::Main<MyApp>(argc, argv); }
 
 退出码：0 成功，1 失败，2 用法错误。运行模式下的顺序：配置日志 → 插件能力检查 → 启动发布器 → 运行管线 → 停止发布器（排空）→ 汇总组件健康状态。组件 `Healthy()` 为 false（例如录像没有完整收尾）时以 1 退出。
 
-配置中的 `logging` 段由框架读取：`level`（trace/debug/info/warn/error/critical/off）、`console`、`file`、`directory`、`stats_interval_s`（组件统计日志周期，0 关闭）。
+配置中的 `logging`、`watchdog`、`readiness` 段由框架读取（`FrameworkOptions::Read`），应用不再读取它们。Python 服务（§9）读取其中的一部分，规则相同：
 
-`watchdog` 段也由框架读取：`stall_timeout_s`（默认 0 关闭）。为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器不会自行恢复。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。看门狗从管线创建起计时，不等 PLAYING：直播源可能晚于应用上线时，应用可把 `startup_timeout` 设为 0，让未连上的源与运行中断流一样由看门狗把守，而不是每次启动超时都退出重启（example-app 即如此）。
+| 键 | 默认 | C++ 应用 | Python 服务 |
+|---|---|---|---|
+| `logging.level` | `info` | ✓ | ✓（trace 按 debug 输出） |
+| `logging.console` / `logging.file` | `true` / `false` | ✓ | ✓ |
+| `logging.directory` | 空 | ✓ | ✓ |
+| `logging.stats_interval_s` | 60 | ✓ | — |
+| `watchdog.stall_timeout_s` | 0 | ✓ | ✓ |
+| `readiness.require_input` | `false` | ✓ | — |
 
-`readiness` 段也由框架读取：`require_input`（默认 false）。默认时就绪（健康检查）表示应用活着：主循环在运行且看门狗没有触发，没有输入也算就绪——线阵相机、外触发等源在启动后可能长时间不产帧，这是正常状态，不应让健康检查失败、安装等待超时。输入是否在供帧由看门狗把守（持续供帧的源设 `stall_timeout_s`，按需产帧的源设 0 或足够长），并记录在就绪文件中（`count=<计数> idle_s=<距上次增长的秒数>`），安装器据此提示还没有收到输入的服务。设为 true 时就绪还要求就绪计数在健康检查周期（30 秒）内增长过，健康状态因此直接反映输入是否在供帧。
+`level` 取 trace/debug/info/warn/error/critical/off；`file: true` 时日志写入 `<directory>/<名称>.log`，此时 `directory` 必填，两种输出都关闭时仍保留控制台。`stats_interval_s` 是组件统计日志的周期（0 关闭），Python 服务没有组件统计；`readiness` 依赖就绪计数，Python 服务的就绪即主循环在推进（§9）。标“—”的键在 Python 服务中按未知键拒绝。`framework/tests/framework_sections.txt` 记录同一张表，两边的测试与它对照：一边增删键时测试失败，提醒同时决定另一边是否跟进。
+
+`watchdog.stall_timeout_s` 为正时，就绪计数（`ReadyWhen` / `ReadyWhenFramesReach`）超过该时长没有增长，应用记录原因、排空停止并以 1 退出，由容器的重启策略恢复。Docker 只在进程退出时重启容器，`unhealthy` 不会触发重启：输入长时间断流、管线卡住时，没有看门狗的容器不会自行恢复。时限应明显长于源的正常重连时间；没有登记计数来源时主循环运行即算推进，看门狗不会触发。看门狗从管线创建起计时，不等 PLAYING：直播源可能晚于应用上线时，应用可把 `startup_timeout` 设为 0，让未连上的源与运行中断流一样由看门狗把守，而不是每次启动超时都退出重启（example-app 即如此）。
+
+`readiness.require_input` 为 false（默认）时，就绪（健康检查）表示应用活着：主循环在运行且看门狗没有触发，没有输入也算就绪——线阵相机、外触发等源在启动后可能长时间不产帧，这是正常状态，不应让健康检查失败、安装等待超时。输入是否在供帧由看门狗把守（持续供帧的源设 `stall_timeout_s`，按需产帧的源设 0 或足够长），并记录在就绪文件中（`count=<计数> idle_s=<距上次增长的秒数>`），安装器据此提示还没有收到输入的服务。设为 true 时就绪还要求就绪计数在健康检查周期（30 秒）内增长过，健康状态因此直接反映输入是否在供帧。
 
 ## 3. 配置读取
 
@@ -115,12 +126,19 @@ sources:
   - id: gate-1                 # 合法路径段；消息 source_id 与录像目录名
     type: rtsp                 # rtsp | file | uri | v4l2 | test
     uri: rtsp://admin@10.0.0.5/stream1
-    rtsp: {password: "...", latency_ms: 200, tcp: true, reconnect_interval_s: 5}
-    file: {loop: true}         # type: file
-    capture: {device: /dev/video0, format: UYVY, width: 1920, height: 1080, framerate: 30}  # v4l2/test
+    rtsp: {password: "...", latency_ms: 200, tcp: true, reconnect_interval_s: 5}   # 只用于 rtsp
     output: {width: 1920, height: 1080}   # 规范化尺寸，0 保持原尺寸
     properties: {drop-on-latency: true}   # 可选，透传给 nvurisrcbin / v4l2src / videotestsrc
+  - id: replay
+    type: file
+    uri: /data/videos/a.mp4    # uri / rtsp / file 必填；file 可写绝对路径
+    file: {loop: true}         # 只用于 file
+  - id: line-scan
+    type: v4l2
+    capture: {device: /dev/video0, format: UYVY, width: 1920, height: 1080, framerate: 30}  # 只用于 v4l2 / test
 ```
+
+只读取与 `type` 相关的段：`rtsp` 只用于 rtsp，`file` 只用于 file，`capture` 只用于 v4l2 与 test（其中 `device` 只用于 v4l2），`uri` 不用于 v4l2 与 test。写了无关的段说明配置与类型不符，读取时报错（例如 `sources[0].capture: is only used by v4l2 and test sources`），而不是悄悄忽略。test 源的 `capture` 默认 1280x720@25。
 
 `rtsp.password` 单独配置，摘要与诊断中打码，实例化时按百分号编码注入到 `uri` 的用户名之后（`InjectPassword`），可以含 `@`、`/`、`#`、`%` 等任意字符；`uri` 中不要再写口令。
 
@@ -247,7 +265,7 @@ def main(port, service: Service):
 sys.exit(Service("my-service", "说明").run(load, main))
 ```
 
-`Service` 负责 `--config`、`--check-config`、`--version`、`logging.level`、`watchdog.stall_timeout_s`、SIGINT/SIGTERM 与就绪文件。看门狗为正时，主循环超过时限没有调用 `sleep()` / `alive()`，进程记录原因后直接以 1 退出（卡住的主循环无法自行排空）。`sleep()` 的等待本身算作推进：再长的等待也会定期更新就绪文件，不会被健康检查或看门狗当成卡住。服务的 `main.py` 须支持无副作用的 `--version`（`Service` 已处理），镜像自检在原始 base 中执行它，以发现未声明的顶层依赖。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `fail` / `warn` / `finish`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
+`Service` 负责 `--config`、`--check-config`、`--version`、`logging` 与 `watchdog` 段（`FrameworkOptions`，见 §2 的对照表）、SIGINT/SIGTERM 与就绪文件。看门狗为正时，主循环超过时限没有调用 `sleep()` / `alive()`，进程记录原因后直接以 1 退出（卡住的主循环无法自行排空）。`sleep()` 的等待本身算作推进：再长的等待也会定期更新就绪文件，不会被健康检查或看门狗当成卡住。服务的 `main.py` 须支持无副作用的 `--version`（`Service` 已处理），镜像自检在原始 base 中执行它，以发现未声明的顶层依赖。`Reader` 的规则与 C++ 一致（`get` / `required` / `secret` / `section` / `items` / `fail` / `warn` / `finish` / `declared_paths`）：未加引号的标量按读取时要求的类型解析，`password: 123456` 读成字符串即为 `"123456"`；加引号的标量只能读成字符串。第三方依赖写进单元的 `requirements.txt`。
 
 ## 10. 新增应用
 

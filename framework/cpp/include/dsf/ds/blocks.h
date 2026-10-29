@@ -25,24 +25,40 @@ using gst::Graph;
 
 // ---- 视频源 ----
 
+enum class SourceType { kUri, kRtsp, kFile, kV4l2, kTest };
+
+// 配置中的类型名：uri | rtsp | file | v4l2 | test。
+const char* ToString(SourceType type);
+
+// 一路源。子段与配置一一对应，只读取与 type 相关的段：rtsp 只用于 rtsp，file 只用于 file，
+// capture 只用于 v4l2 与 test（其中 device 只用于 v4l2），uri 不用于 v4l2 与 test；
+// 写了无关的段说明配置与类型不符，读取时报错而不是悄悄忽略。
 struct SourceSpec {
-  std::string id;      // 源标识：消息、录像目录与日志中使用，必须是合法路径段
-  std::string type;    // uri | rtsp | file | v4l2 | test
-  std::string uri;     // uri/rtsp/file：nvurisrcbin 的 uri；file 也可写绝对路径
-  bool live = true;    // 由 type 推导：file 与 uri(file://) 为 false
-  // rtsp
-  std::string password;  // 单独配置，编码后注入到 uri 的用户名之后，不出现在日志与诊断中
-  int latency_ms = 200;
-  bool tcp = true;
-  int reconnect_interval_s = 5;
-  // file
-  bool loop = true;
-  // v4l2 / test
-  std::string device = "/dev/video0";
-  std::string raw_format;  // v4l2：相机输出格式，空表示由协商决定
-  int width = 0;
-  int height = 0;
-  int framerate = 0;
+  struct Rtsp {
+    std::string password;  // 单独配置，编码后注入到 uri 的用户名之后，不出现在日志与诊断中
+    int latency_ms = 200;
+    bool tcp = true;
+    int reconnect_interval_s = 5;
+  };
+  struct File {
+    bool loop = true;
+  };
+  // 原始画面参数；0 或空表示由协商决定（test 读取时默认 1280x720@25）。
+  struct Capture {
+    std::string device = "/dev/video0";  // 只用于 v4l2
+    std::string format;
+    int width = 0;
+    int height = 0;
+    int framerate = 0;
+  };
+
+  std::string id;  // 源标识：消息、录像目录与日志中使用，必须是合法路径段
+  SourceType type = SourceType::kUri;
+  std::string uri;   // uri/rtsp/file：nvurisrcbin 的 uri；file 也可写绝对路径
+  bool live = true;  // 由 type 推导：file 与 uri(file://) 为 false
+  Rtsp rtsp;
+  File file;
+  Capture capture;
   // 规范化输出尺寸；0 表示保持源尺寸
   int output_width = 0;
   int output_height = 0;

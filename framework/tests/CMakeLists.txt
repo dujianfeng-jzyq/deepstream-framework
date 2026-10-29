@@ -9,6 +9,10 @@ dsf_add_test(dsf_test_record SOURCES "${_cpp}/test_record.cpp" LIBRARIES dsf_rec
 dsf_add_test(dsf_test_publish SOURCES "${_cpp}/test_publish.cpp"
              LIBRARIES dsf_publish PkgConfig::DSF_HIREDIS TIMEOUT 60)
 dsf_add_test(dsf_test_app SOURCES "${_cpp}/test_app.cpp" LIBRARIES dsf::framework TIMEOUT 60)
+if(TARGET dsf_test_app)
+  target_compile_definitions(dsf_test_app PRIVATE
+    DSF_FRAMEWORK_SECTIONS="${CMAKE_CURRENT_SOURCE_DIR}/framework_sections.txt")
+endif()
 
 # Python：部署工具、服务运行时、engine 工具、仓库约定。
 file(GLOB _python_tests "${CMAKE_CURRENT_SOURCE_DIR}/python/test_*.py")

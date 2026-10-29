@@ -1,5 +1,6 @@
 // dsf::app：命令行、日志、自检与完整入口流程（不需要 DeepStream 插件的软件应用）。
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -348,6 +349,30 @@ TEST(check_config_prints_config_warnings) {
   CHECK_EQ(code, 0);
   CHECK(captured.str().find("soft-app: warning: " + config.path.string() + ": frames: is unusual") !=
         std::string::npos);
+}
+
+TEST(framework_sections_match_the_shared_table) {
+  std::vector<std::string> expected;
+  std::ifstream table(DSF_FRAMEWORK_SECTIONS);
+  CHECK(table.good());
+  for (std::string line; std::getline(table, line);) {
+    if (line.empty() || line[0] == '#') continue;
+    std::istringstream fields(line);
+    std::string path;
+    fields >> path;
+    for (std::string runtime; fields >> runtime;) {
+      if (runtime == "cpp") expected.push_back(path);
+    }
+  }
+  const auto document = dsf::config::Document::LoadText("{}\n", "t.yaml");
+  dsf::config::Reader root = document.Root();
+  (void)FrameworkOptions::Read(root);
+  std::vector<std::string> declared = root.DeclaredPaths();
+  std::sort(expected.begin(), expected.end());
+  std::sort(declared.begin(), declared.end());
+  std::string text;
+  for (const auto& path : declared) text += path + " ";
+  if (declared != expected) throw dsf_test::Failure("framework_sections.txt differs from the C++ reader: " + text);
 }
 
 TEST(readiness_counter_has_a_single_source) {

@@ -209,5 +209,9 @@ class Reader:
 
         walk(self._state.document, "")
 
+    def declared_paths(self) -> list[str]:
+        """读取代码声明过的全部叶子路径（包括取了默认值的），按名称排序。"""
+        return sorted(self._state.leaves)
+
     def describe(self) -> str:
         return " ".join(f"{path}={value}" for path, value in self._state.described)

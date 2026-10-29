@@ -1,6 +1,7 @@
 """dsf Python 运行时：配置读取规则与服务入口约定。"""
 
 import io
+import logging
 import os
 import signal
 import subprocess
@@ -13,7 +14,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from dsf.config import ConfigError, Reader, at_least, one_of
-from dsf.service import Service
+from dsf.service import FrameworkOptions, Service
+
+SECTIONS = Path(__file__).resolve().parents[1] / "framework_sections.txt"
 
 
 def reader(text: str) -> Reader:
@@ -119,6 +122,41 @@ class ServiceTest(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 self.assertEqual(Service("svc").run(load, main, ["--bogus"]), 2)
             del os.environ["DSF_READY_FILE"]
+
+    def test_framework_sections_match_the_shared_table(self):
+        expected = []
+        for line in SECTIONS.read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.startswith("#"):
+                path, *runtimes = line.split()
+                if "python" in runtimes:
+                    expected.append(path)
+        root = reader("{}")
+        FrameworkOptions.read(root)
+        self.assertEqual(root.declared_paths(), sorted(expected))
+
+    def test_file_logging_follows_the_cpp_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "svc.yaml")
+            logs = Path(directory, "logs")
+            config.write_text("logging:\n  file: true\n")
+            with redirect_stderr(io.StringIO()) as errors:
+                code = Service("svc").run(lambda root: None, lambda *_: None, ["--config", str(config)])
+            self.assertEqual(code, 1)
+            self.assertIn("logging.directory: is required when file logging is enabled", errors.getvalue())
+
+            config.write_text(f"logging:\n  console: false\n  file: true\n  directory: {logs}\n")
+            ready = Path(directory, "ready")
+            os.environ["DSF_READY_FILE"] = str(ready)
+            try:
+                with redirect_stdout(io.StringIO()) as output:
+                    code = Service("svc").run(lambda root: None, lambda _config, service: service.log.info("hello"),
+                                              ["--config", str(config)])
+            finally:
+                del os.environ["DSF_READY_FILE"]
+                logging.shutdown()
+            self.assertEqual(code, 0)
+            self.assertEqual(output.getvalue(), "")  # console: false 时只写文件
+            self.assertIn("[INFO] [svc] hello", Path(logs, "svc.log").read_text(encoding="utf-8"))
 
     def test_check_config_prints_config_warnings(self):
         with tempfile.TemporaryDirectory() as directory:

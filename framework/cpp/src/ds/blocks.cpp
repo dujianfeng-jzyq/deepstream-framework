@@ -5,6 +5,7 @@
 #include <cmath>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace dsf::ds {
 namespace {
@@ -43,47 +44,80 @@ std::string RawCaps(const std::string& format, int width, int height, int framer
 
 // ---- 源 ----
 
+namespace {
+
+constexpr std::pair<SourceType, const char*> kSourceTypes[] = {
+    {SourceType::kUri, "uri"},   {SourceType::kRtsp, "rtsp"}, {SourceType::kFile, "file"},
+    {SourceType::kV4l2, "v4l2"}, {SourceType::kTest, "test"},
+};
+
+// key 只对 owners 类型的源有意义：其他类型写了它就报错。
+void OnlyFor(const Reader& reader, std::string_view key, bool used, const std::string& owners) {
+  if (!used && reader.Has(key)) reader.Fail(key, "is only used by " + owners + " sources");
+}
+
+}  // namespace
+
+const char* ToString(SourceType type) {
+  for (const auto& [value, name] : kSourceTypes) {
+    if (value == type) return name;
+  }
+  return "unknown";
+}
+
 SourceSpec SourceSpec::Read(Reader reader) {
   SourceSpec spec;
   spec.id = reader.Required<std::string>("id", config::PathComponent());
-  spec.type = reader.Get<std::string>("type", "uri",
-                                      config::OneOf({"uri", "rtsp", "file", "v4l2", "test"}));
-  spec.uri = reader.Get<std::string>("uri", "");
-  if ((spec.type == "uri" || spec.type == "rtsp" || spec.type == "file") && spec.uri.empty()) {
-    reader.Fail("uri", "is required for source type " + spec.type);
+  std::vector<std::string> names;
+  for (const auto& [value, name] : kSourceTypes) names.push_back(name);
+  const std::string type = reader.Get<std::string>("type", "uri", config::OneOf(names));
+  for (const auto& [value, name] : kSourceTypes) {
+    if (type == name) spec.type = value;
   }
+  const bool from_uri =
+      spec.type == SourceType::kUri || spec.type == SourceType::kRtsp || spec.type == SourceType::kFile;
+  const bool raw = spec.type == SourceType::kV4l2 || spec.type == SourceType::kTest;
+  OnlyFor(reader, "uri", from_uri, "uri, rtsp and file");
+  OnlyFor(reader, "rtsp", spec.type == SourceType::kRtsp, "rtsp");
+  OnlyFor(reader, "file", spec.type == SourceType::kFile, "file");
+  OnlyFor(reader, "capture", raw, "v4l2 and test");
 
-  Reader rtsp = reader.Section("rtsp");
-  spec.password = rtsp.Secret("password");
-  spec.latency_ms = rtsp.Get("latency_ms", 200, config::AtLeast(0));
-  spec.tcp = rtsp.Get("tcp", true);
-  spec.reconnect_interval_s = rtsp.Get("reconnect_interval_s", 5, config::AtLeast(0));
-  if (spec.type == "rtsp") {
+  if (from_uri) spec.uri = reader.Required<std::string>("uri", config::NonEmpty());
+
+  if (spec.type == SourceType::kRtsp) {
+    Reader rtsp = reader.Section("rtsp");
+    spec.rtsp.password = rtsp.Secret("password");
+    spec.rtsp.latency_ms = rtsp.Get("latency_ms", 200, config::AtLeast(0));
+    spec.rtsp.tcp = rtsp.Get("tcp", true);
+    spec.rtsp.reconnect_interval_s = rtsp.Get("reconnect_interval_s", 5, config::AtLeast(0));
     if (!StartsWith(spec.uri, "rtsp://") && !StartsWith(spec.uri, "rtsps://")) {
       reader.Fail("uri", "must start with rtsp:// or rtsps://");
     }
     try {
-      (void)InjectPassword(spec.uri, spec.password);
+      (void)InjectPassword(spec.uri, spec.rtsp.password);
     } catch (const std::invalid_argument& error) {
-      reader.Fail("rtsp.password", error.what());
+      rtsp.Fail("password", error.what());
     }
-  } else if (!spec.password.empty()) {
-    reader.Fail("rtsp.password", "is only used by rtsp sources");
   }
 
-  spec.loop = reader.Section("file").Get("loop", true);
+  if (spec.type == SourceType::kFile) spec.file.loop = reader.Section("file").Get("loop", true);
 
-  Reader capture = reader.Section("capture");  // v4l2 与 test 的原始画面参数
-  spec.device = capture.Get<std::string>("device", "/dev/video0");
-  spec.raw_format = capture.Get<std::string>("format", "");
-  spec.width = capture.Get("width", spec.type == "test" ? 1280 : 0, config::AtLeast(0));
-  spec.height = capture.Get("height", spec.type == "test" ? 720 : 0, config::AtLeast(0));
-  spec.framerate = capture.Get("framerate", spec.type == "test" ? 25 : 0, config::AtLeast(0));
+  if (raw) {
+    const bool test = spec.type == SourceType::kTest;
+    Reader capture = reader.Section("capture");
+    OnlyFor(capture, "device", spec.type == SourceType::kV4l2, "v4l2");
+    if (!test) spec.capture.device = capture.Get<std::string>("device", "/dev/video0");
+    spec.capture.format = capture.Get<std::string>("format", "");
+    spec.capture.width = capture.Get("width", test ? 1280 : 0, config::AtLeast(0));
+    spec.capture.height = capture.Get("height", test ? 720 : 0, config::AtLeast(0));
+    spec.capture.framerate = capture.Get("framerate", test ? 25 : 0, config::AtLeast(0));
+  }
 
   ReadOutputSize(reader.Section("output"), &spec.output_width, &spec.output_height);
   spec.properties = reader.Props("properties");
 
-  spec.live = !(spec.type == "file" || (spec.type == "uri" && StartsWith(spec.uri, "file://")));
+  spec.live = !(spec.type == SourceType::kFile ||
+                (spec.type == SourceType::kUri && StartsWith(spec.uri, "file://")));
   return spec;
 }
 
@@ -130,41 +164,49 @@ std::string InjectPassword(const std::string& uri, const std::string& password, 
 }
 
 Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& name) {
-  Element head;
   Element tail;
-  if (spec.type == "v4l2" || spec.type == "test") {
-    if (spec.type == "v4l2") {
-      head = graph.Add("v4l2src", name);
-      head.Set("device", spec.device);
-    } else {
-      head = graph.Add("videotestsrc", name);
-      head.Set("is-live", true);
+  switch (spec.type) {
+    case SourceType::kV4l2:
+    case SourceType::kTest: {
+      Element head;
+      if (spec.type == SourceType::kV4l2) {
+        head = graph.Add("v4l2src", name);
+        head.Set("device", spec.capture.device);
+      } else {
+        head = graph.Add("videotestsrc", name);
+        head.Set("is-live", true);
+      }
+      head.Apply(spec.properties);
+      const SourceSpec::Capture& capture = spec.capture;
+      tail = graph.Caps(RawCaps(capture.format, capture.width, capture.height, capture.framerate), name + "_raw");
+      graph.Link(head, tail);
+      break;
     }
-    head.Apply(spec.properties);
-    tail = graph.Caps(RawCaps(spec.raw_format, spec.width, spec.height, spec.framerate),
-                      name + "_raw");
-    graph.Link(head, tail);
-  } else {
-    head = graph.Add("nvurisrcbin", name);
-    // 解码器的输出 surface 池很小（最少解码所需 + 1），硬件编码器会持有输入帧直到编码完成；
-    // 当源侧转换走零拷贝直通时，编码器持有的就是解码器的 surface，池被耗尽后管线停在第 3 帧左右
-    // 且不报错（无 B 帧码流必现）。加 queue 无济于事：queue 只会多持有 surface。留出余量。
-    head.Set("num-extra-surfaces", 8);
-    std::string uri = spec.uri;
-    if (spec.type == "file" && StartsWith(uri, "/")) uri = "file://" + uri;
-    if (spec.type == "rtsp") {
-      // 口令只在实例化时注入；诊断输出中整个地址打码。
-      head.SetSecret("uri", InjectPassword(uri, spec.password));
-      head.Set("latency", spec.latency_ms);
-      head.Set("rtsp-reconnect-interval", spec.reconnect_interval_s);
-      head.Set("rtsp-reconnect-attempts", -1);  // 现场断流是常态：一直重连，由监控发现长时间断流
-      if (spec.tcp) head.Set("select-rtp-protocol", 4);  // GstRTSPLowerTrans: TCP
-    } else {
-      head.Set("uri", uri);
-      if (spec.type == "file") head.Set("file-loop", spec.loop);
+    case SourceType::kUri:
+    case SourceType::kRtsp:
+    case SourceType::kFile: {
+      Element head = graph.Add("nvurisrcbin", name);
+      // 解码器的输出 surface 池很小（最少解码所需 + 1），硬件编码器会持有输入帧直到编码完成；
+      // 当源侧转换走零拷贝直通时，编码器持有的就是解码器的 surface，池被耗尽后管线停在第 3 帧左右
+      // 且不报错（无 B 帧码流必现）。加 queue 无济于事：queue 只会多持有 surface。留出余量。
+      head.Set("num-extra-surfaces", 8);
+      if (spec.type == SourceType::kRtsp) {
+        // 口令只在实例化时注入；诊断输出中整个地址打码。
+        head.SetSecret("uri", InjectPassword(spec.uri, spec.rtsp.password));
+        head.Set("latency", spec.rtsp.latency_ms);
+        head.Set("rtsp-reconnect-interval", spec.rtsp.reconnect_interval_s);
+        head.Set("rtsp-reconnect-attempts", -1);  // 现场断流是常态：一直重连，由监控发现长时间断流
+        if (spec.rtsp.tcp) head.Set("select-rtp-protocol", 4);  // GstRTSPLowerTrans: TCP
+      } else if (spec.type == SourceType::kFile) {
+        head.Set("uri", StartsWith(spec.uri, "/") ? "file://" + spec.uri : spec.uri);
+        head.Set("file-loop", spec.file.loop);
+      } else {
+        head.Set("uri", spec.uri);
+      }
+      head.Apply(spec.properties);
+      tail = head;
+      break;
     }
-    head.Apply(spec.properties);
-    tail = head;
   }
   // 下游统一为 NVMM NV12：mux 之后的处理不再关心输入是哪种源。
   Element convert = graph.Add("nvvideoconvert", name + "_conv");

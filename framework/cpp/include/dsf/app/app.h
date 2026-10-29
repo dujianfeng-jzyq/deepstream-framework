@@ -75,6 +75,16 @@ struct ReadinessOptions {
   static ReadinessOptions Read(config::Reader reader);
 };
 
+// 框架读取的公共配置段：logging、watchdog、readiness。Python Service 读取其中的一部分，
+// 两者的对照表见 docs/framework.md §2（framework/tests/framework_sections.txt 由两边的测试对照）。
+struct FrameworkOptions {
+  LogOptions logging;
+  WatchdogOptions watchdog;
+  ReadinessOptions readiness;
+
+  static FrameworkOptions Read(config::Reader root);
+};
+
 // 装配：应用在 Build 中向这里添加图、组件与发布器。
 class Assembly {
  public:
