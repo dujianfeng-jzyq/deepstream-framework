@@ -12,6 +12,10 @@ services:
   # 非 root 用户访问 /dev/nvhost-*、编解码器等 Jetson 设备；runtime: nvidia 由单元自己声明。
   example-app:
     group_add: [video]
+    # CUDA 默认在首次调用时才加载 GPU 代码：前几帧到达时推理、转换、OSD 加载约 4.5 秒，期间直播源的帧
+    # 被丢弃，每次启动都在录像中留下断流。启动时全部加载，代价是启动慢约 5 秒（实测 Orin，JetPack 6.2）。
+    environment:
+      CUDA_MODULE_LOADING: EAGER
   model-engine-builder:
     group_add: [video]
   # host 网络下监听会直接暴露到现场网络：Redis 只绑定回环地址。
