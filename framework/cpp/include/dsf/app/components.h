@@ -58,8 +58,10 @@ class ReadinessHeartbeat : public gst::Component {
 
 // 断流后的关键帧：直播源断流重连后，下一帧的时间戳比上一帧晚整个断流时长，编码器却照常延续当前
 // GOP。挂在编码器（element）的输入上，相邻两帧的时间戳相差超过 gap 时，在这一帧之前向编码器发送
-// GstForceKeyUnit，使它从关键帧开始：录像器据此在断流处干净地切分分段（见 RecorderOptions），
-// RTSP 观看端也不必等到下一个周期关键帧才能恢复画面。编码器须支持该事件（GstVideoEncoder 子类都支持）。
+// 关键帧请求，使它从关键帧开始：录像器据此在断流处干净地切分分段（见 RecorderOptions），
+// RTSP 观看端也不必等到下一个周期关键帧才能恢复画面。请求同时以三种方式发出，编码器响应其中之一即可：
+// 标准的 GstForceKeyUnit 事件、DeepStream 的 nv-enc-force-idr 事件（dGPU 的 nvv4l2h26xenc），以及
+// 编码器的 force-IDR 动作信号（Jetson 的 nvv4l2h26xenc，它不响应前两种事件；存在时才发出）。
 class KeyframeOnGap : public gst::Component {
  public:
   KeyframeOnGap(std::string element, std::chrono::milliseconds gap);
@@ -77,6 +79,7 @@ class KeyframeOnGap : public gst::Component {
   std::atomic<std::uint64_t> forced_{0};
   GstPad* pad_ = nullptr;
   gulong probe_ = 0;
+  bool force_idr_signal_ = false;  // OnCreated 中确定，之后只读
 };
 
 // 周期统计：汇总全部组件的 Report() 与各发布通道的计数写一行日志。主循环运行即开始，不等 PLAYING。

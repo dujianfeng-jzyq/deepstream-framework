@@ -107,6 +107,7 @@ KeyframeOnGap::KeyframeOnGap(std::string element, std::chrono::milliseconds gap)
 void KeyframeOnGap::OnCreated(gst::Pipeline& /*pipeline*/, GstElement* bin) {
   GstElement* element = gst_bin_get_by_name(GST_BIN(bin), element_.c_str());
   if (element == nullptr) throw std::runtime_error("encoder '" + element_ + "' is not in the pipeline");
+  force_idr_signal_ = g_signal_lookup("force-IDR", G_OBJECT_TYPE(element)) != 0;
   pad_ = gst_element_get_static_pad(element, "sink");
   gst_object_unref(element);
   if (pad_ == nullptr) throw std::runtime_error("encoder '" + element_ + "' has no sink pad");
@@ -149,6 +150,14 @@ GstPadProbeReturn KeyframeOnGap::OnBuffer(GstPad* pad, GstPadProbeInfo* info, gp
                                         nullptr);
   g_free(stream_id);
   gst_pad_send_event(pad, gst_event_new_custom(kNvEncForceIdr, idr));
+  // Jetson 的 nvv4l2h26xenc 两种事件都不响应（实测 AGX Orin，JetPack 6.2），只认动作信号：
+  // 它标记编码器接下来收到的一帧，此刻这一帧尚未进入编码器。
+  if (component->force_idr_signal_) {
+    if (GstElement* encoder = gst_pad_get_parent_element(pad)) {
+      g_signal_emit_by_name(encoder, "force-IDR");
+      gst_object_unref(encoder);
+    }
+  }
   spdlog::info("{}: input resumed after {:.1f} s; requested a keyframe", component->element_,
                static_cast<double>(pts - last) / GST_SECOND);
   return GST_PAD_PROBE_OK;

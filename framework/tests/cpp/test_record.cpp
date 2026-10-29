@@ -573,6 +573,76 @@ TEST(recorder_drops_frames_before_the_first_keyframe_after_a_gap) {
   CHECK_EQ(FramesIn(run.finished[1].first.final_path), 10);
 }
 
+namespace {
+
+// 模拟 Jetson 的 nvv4l2h26xenc：identity 的子类，带 force-IDR 动作信号。注册为元件 dsftestidrenc。
+void RegisterIdrSignalElement() {
+  static const bool registered = [] {
+    GstElementFactory* factory = gst_element_factory_find("identity");
+    GstPluginFeature* loaded = gst_plugin_feature_load(GST_PLUGIN_FEATURE(factory));
+    const GType parent = gst_element_factory_get_element_type(GST_ELEMENT_FACTORY(loaded));
+    gst_object_unref(loaded);
+    gst_object_unref(factory);
+    GTypeQuery query;
+    g_type_query(parent, &query);
+    const GType type = g_type_register_static_simple(
+        parent, "DsfTestIdrSignalEncoder", query.class_size,
+        +[](gpointer klass, gpointer) {
+          g_signal_new("force-IDR", G_TYPE_FROM_CLASS(klass),
+                       static_cast<GSignalFlags>(G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION), 0, nullptr, nullptr,
+                       nullptr, G_TYPE_NONE, 0);
+        },
+        query.instance_size, nullptr, static_cast<GTypeFlags>(0));
+    return gst_element_register(nullptr, "dsftestidrenc", GST_RANK_NONE, type) == TRUE;
+  }();
+  CHECK(registered);
+}
+
+}  // namespace
+
+TEST(keyframe_on_gap_emits_the_encoders_force_idr_signal) {
+  RegisterIdrSignalElement();
+  gst::Graph graph;
+  graph.Chain({graph.Add("videotestsrc", "src").Set("num-buffers", 30),
+               graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"), graph.Add("identity", "gap"),
+               graph.Add("dsftestidrenc", "enc"), graph.Add("fakesink")});
+  TimestampGap gap(GST_SECOND / 2, 3 * GST_SECOND);
+  app::KeyframeOnGap keyframes("enc", std::chrono::milliseconds(1000));
+  gst::Pipeline pipeline("idr-signal", graph);
+  pipeline.Add(gap);
+  pipeline.Add(keyframes);
+  // 记录信号发出时编码器已经收到的帧数：应在断流后的第一帧（第 16 帧）进入编码器之前。
+  std::atomic<int> received{0};
+  std::vector<int> signalled;
+  struct Probe : gst::Component {
+    explicit Probe(std::atomic<int>& count, std::vector<int>& at) : count_(count), at_(at) {}
+    std::string_view Name() const override { return "idr-probe"; }
+    void OnCreated(gst::Pipeline& owner, GstElement* /*bin*/) override {
+      GstElement* encoder = owner.Element("enc");
+      g_signal_connect(encoder, "force-IDR", G_CALLBACK(+[](GstElement*, gpointer self) {
+                         auto* probe = static_cast<Probe*>(self);
+                         probe->at_.push_back(probe->count_.load());
+                       }),
+                       this);
+      GstPad* pad = gst_element_get_static_pad(encoder, "src");
+      gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                        +[](GstPad*, GstPadProbeInfo*, gpointer data) {
+                          ++*static_cast<std::atomic<int>*>(data);
+                          return GST_PAD_PROBE_OK;
+                        },
+                        &count_, nullptr);
+      gst_object_unref(pad);
+    }
+    std::atomic<int>& count_;
+    std::vector<int>& at_;
+  } probe(received, signalled);
+  pipeline.Add(probe);
+  CHECK(pipeline.Run().success);
+  CHECK_EQ(received.load(), 30);
+  CHECK_EQ(signalled.size(), std::size_t{1});
+  if (signalled.size() == 1) CHECK_EQ(signalled[0], 15);
+}
+
 TEST(recorder_finishes_last_segment_on_drain_stop) {
   RequireRecordingPlugins();
   TempDir dir;
