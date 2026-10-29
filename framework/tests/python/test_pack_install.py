@@ -242,8 +242,14 @@ class PackInstallTest(ProjectTestCase):
         target.containers = [("demo-app-1", str(self.root)), ("demo-redis-1", str(self.root))]
         for dry_run in (True, False):
             with self.subTest(dry_run=dry_run), \
-                    self.assertRaisesRegex(DeployError, f"started from {self.root}; installing here"):
+                    self.assertRaisesRegex(DeployError, f"started from {self.root}; installing here.*\n"
+                                                        f"  stop them first: cd {self.root} && docker compose down$"):
                 self.install(package, target, dry_run=dry_run)
+        target.containers = [("demo-app-1", "")]  # 容器缺少启动目录的标签：只能按工程名停止
+        with self.assertRaisesRegex(DeployError, "started from \\(unknown directory\\);.*\n"
+                                                 "  stop them first: docker compose -p demo down$"):
+            self.install(package, target, dry_run=True)
+        target.containers = [("demo-app-1", str(self.root))]
         self.assertFalse(self.install_dir.exists())
         self.assertFalse([call for call in target.calls if call[0] in ("compose", "load", "volume-rm")])
         self.install(package)

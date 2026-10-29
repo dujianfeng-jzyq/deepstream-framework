@@ -272,12 +272,15 @@ def _check_configs(services: dict, stage: Path, release: dict[str, str], docker:
 def _check_other_directories(project: str, install_dir: Path, docker: Docker) -> None:
     """同名 Compose 工程的容器由其他目录启动（例如开发仓库）时，在这里 up 会接管并重建它们，
     而那个目录的服务会被悄悄替换。只允许本安装目录启动的容器。"""
-    others = sorted({directory or "(unknown directory)" for _, directory in docker.project_containers(project)
+    others = sorted({directory for _, directory in docker.project_containers(project)
                      if not directory or Path(os.path.realpath(directory)) != install_dir})
     if others:
+        # 不知道启动目录时（容器缺少 Compose 的标签）只能按工程名停止，那个目录的 Compose 文件不参与。
+        commands = [f"cd {directory} && docker compose down" if directory else f"docker compose -p {project} down"
+                    for directory in others]
         raise DeployError(f"the Compose project {project} already has containers started from "
-                          f"{', '.join(others)}; installing here would take them over.\n"
-                          "  stop them first: cd <that directory> && docker compose down")
+                          f"{', '.join(d or '(unknown directory)' for d in others)}; installing here would take "
+                          "them over.\n" + "\n".join(f"  stop them first: {command}" for command in commands))
 
 
 def prepare(options: Options, docker: Docker) -> Plan:
