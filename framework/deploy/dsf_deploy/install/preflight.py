@@ -3,8 +3,8 @@
 顺序不可调换：
   1. 读取 release.env，核对平台与包完整性
   2. 检查安装目标路径与同名工程是否已由其他目录启动，之后才读取旧的 profile 与现场答案
-  3. 选择 profile、收集现场答案（提问默认值含该 profile 的 x-build；宿主没有 PyYAML 时
-     为此提前加载包内的 base），检查清洁安装范围与退役文件冲突
+  3. 选择 profile、收集现场答案（提问默认值含该 profile 的 x-build，在 base 中读取，
+     需要时为此提前加载包内的 base），检查清洁安装范围与退役文件冲突
   4. 加载镜像（不影响正在运行的旧容器），在临时目录渲染新配置，按最终 Compose
      检查并准备可写挂载，核对镜像平台，用新载荷执行各服务的 --check-config
 预检中任何失败都不会停止旧服务或改动安装目录。
@@ -150,11 +150,6 @@ def _check_clean_scope(install_dir: Path, package_root: Path) -> None:
         raise DeployError(f"{install_dir} does not look like an installation; remove it by hand if intended")
 
 
-def _host_has_yaml() -> bool:
-    import importlib.util
-    return importlib.util.find_spec("yaml") is not None
-
-
 def _load_images(package_root: Path, docker: Docker, loaded: set[str], only: str | None = None) -> None:
     """加载包内镜像（不影响正在运行的旧容器）；only 只加载该镜像，已加载的归档不重复加载。"""
     archives = sorted((package_root / "images").glob("*.tar"))
@@ -169,24 +164,32 @@ def _load_images(package_root: Path, docker: Docker, loaded: set[str], only: str
 
 def _run_deploy_tool(root: Path, args: list[str], base_image: str, docker: Docker, *, writable: bool,
                      package_root: Path, loaded: set[str]) -> str:
-    """宿主没有 PyYAML 时用 base 镜像（自带 python3-yaml）运行部署工具，只挂载 root，不挂载荷卷。"""
+    """在 base 镜像（自带 python3-yaml）中运行需要 PyYAML 的部署命令。安装宿主因此只需要标准库，
+    渲染结果也不随宿主的 Python 与 PyYAML 版本变化：每个现场使用同一套解释器与库。
+    只挂载 root，不挂载载荷卷；HOME 取宿主用户的家目录，渲染展开 ~ 时与宿主一致。"""
     if not docker.image_exists(base_image):
         _load_images(package_root, docker, loaded, only=base_image)
     if not docker.image_exists(base_image):
-        raise DeployError(f"this host has no PyYAML and the base image {base_image} is missing; "
-                          "install python3-yaml or use a package built with --with-base")
-    result = docker.run(["--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
-                         "-v", f"{root}:{root}{'' if writable else ':ro'}", "-w", str(root),
-                         "--entrypoint", "python3", base_image, str(root / "framework/deploy/dsf-deploy.py"),
-                         *args, "--root", str(root)], capture=True)
+        raise DeployError(f"the base image {base_image} is missing; it renders the configuration and runs the "
+                          "services: use a package built with --with-base or load the base image first")
+    try:
+        result = docker.run(["--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+                             "-e", f"HOME={Path.home()}",
+                             "-v", f"{root}:{root}{'' if writable else ':ro'}", "-w", str(root),
+                             "--entrypoint", "python3", base_image, str(root / "framework/deploy/dsf-deploy.py"),
+                             *args, "--root", str(root)], capture=True)
+    except DeployError as error:
+        # 用户要看的是部署工具自己的错误（例如模板中未定义的变量），不是 docker run 的命令行。
+        _, _, detail = str(error).partition("\n")
+        raise DeployError(detail.strip().removeprefix("error: ") or str(error)) from error
+    if result.stderr:
+        sys.stderr.write(result.stderr)  # 渲染的提示（note: ...）
     return result.stdout
 
 
 def _profile_variables(root: Path, profile: str, base_image: str, docker: Docker, package_root: Path,
                        loaded: set[str]) -> dict[str, str]:
     """root 中 profile 的 x-build；root 是发布包或旧安装目录。"""
-    if _host_has_yaml():
-        return render.profile_variables(root, profile)
     output = _run_deploy_tool(root, ["profile-variables", "--profile", profile], base_image, docker,
                               writable=False, package_root=package_root, loaded=loaded)
     return json.loads(output)
@@ -206,10 +209,7 @@ def _previous_inherited(options: Options, install_dir: Path, profile: str, base_
 
 def _render_in_stage(stage: Path, profile: str, base_image: str, docker: Docker, package_root: Path,
                      loaded: set[str]) -> None:
-    """优先在宿主渲染；宿主没有 PyYAML 时在 base 镜像中渲染。"""
-    if _host_has_yaml():
-        render.render(stage, profile, quiet=True)
-        return
+    """在 base 镜像中渲染（见 _run_deploy_tool）。"""
     _run_deploy_tool(stage, ["render", "--profile", profile, "--quiet"], base_image, docker,
                      writable=True, package_root=package_root, loaded=loaded)
 

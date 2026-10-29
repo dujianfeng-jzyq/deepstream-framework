@@ -2,14 +2,19 @@
 
 假 Docker 记录所有调用并模拟镜像、卷与服务状态；只有 `docker compose config` 委托给真实 CLI
 （只解析文件，不需要 Docker 守护进程）。没有 docker CLI 的环境里相关测试 SKIP。
+安装器在 base 镜像中运行的部署命令（docker run … dsf-deploy.py …）由假 Docker 在进程内执行，
+失败时与真实 Docker 一样抛出带 stderr 的 DeployError。
 """
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from dsf_deploy import layout, naming
@@ -132,6 +137,16 @@ class FakeDocker(Docker):
 
     def run(self, args, capture=False):
         self._record("run", *args)
+        script = next((i for i, arg in enumerate(args) if arg.endswith("dsf-deploy.py")), None)
+        if script is not None:
+            from dsf_deploy import cli
+            from dsf_deploy.errors import DeployError
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = cli.main(args[script + 1:])
+            if code != 0:
+                raise DeployError(f"command failed ({code}): docker run {' '.join(args)}\n{stderr.getvalue()}")
+            return subprocess.CompletedProcess(args, 0, stdout.getvalue(), stderr.getvalue())
         if "--env-file" in args:  # 文件在预检的临时目录中，调用返回后即被删除
             env_file = Path(args[args.index("--env-file") + 1])
             self.env_files.append((env_file.stat().st_mode & 0o777, env_file.read_text()))

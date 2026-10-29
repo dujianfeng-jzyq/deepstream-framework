@@ -170,7 +170,7 @@ _PLATFORM_LINE = re.compile(r"^x-platform:\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*(?:#.
 
 def fitting_profiles(root: Path, platform: str) -> list[tuple[str, str]]:
     """x-platform 与 platform 相符（或没有声明）的 profile 名与说明，供安装时选择。
-    不解析 YAML（安装宿主可能没有 PyYAML）：只读顶层的 x-platform 行；完整的检查（含 DeepStream
+    不解析 YAML（安装宿主没有 PyYAML，选择 profile 时 base 可能尚未加载）：只读顶层的 x-platform 行；完整的检查（含 DeepStream
     版本）在渲染时进行，仍在停服之前。"""
     result = []
     for name, summary in list_profiles(root):

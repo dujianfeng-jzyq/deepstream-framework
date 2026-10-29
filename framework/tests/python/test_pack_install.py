@@ -24,22 +24,6 @@ def answers(install_dir: Path) -> dict:
     return read(install_dir / layout.SITE_ENV, unquote=unquote_answer)
 
 
-class ToolDocker(FakeDocker):
-    """在进程内执行本应在 base 镜像中运行的部署工具，模拟宿主没有 PyYAML 的安装。"""
-
-    def run(self, args, capture=False):
-        script = next((i for i, arg in enumerate(args) if arg.endswith("dsf-deploy.py")), None)
-        if script is None:
-            return super().run(args, capture)
-        self._record("run", *args)
-        output = io.StringIO()
-        with redirect_stdout(output):
-            code = cli.main(args[script + 1:])
-        if code != 0:
-            raise DeployError(f"deploy tool failed: {args[script + 1:]}")
-        return subprocess.CompletedProcess(args, 0, output.getvalue(), "")
-
-
 @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
 class PackInstallTest(ProjectTestCase):
     def setUp(self):
@@ -67,9 +51,10 @@ class PackInstallTest(ProjectTestCase):
             tar.extractall(target)
         return target / archive.name[: -len(".tar.gz")]
 
-    def install(self, package, target=None, **options):
+    def install(self, package, target=None, images=None, **options):
+        """images：目标机上已有的镜像（镜像名 → 平台），默认没有。"""
         target = target or FakeDocker()
-        target.images = {}
+        target.images = dict(images or {})
         options.setdefault("install_dir", self.install_dir)
         options.setdefault("interactive", False)
         options.setdefault("ready_timeout", 5)
@@ -363,24 +348,50 @@ class PackInstallTest(ProjectTestCase):
         self.install(package, profile="other")  # profile 不变时答案原样沿用
         self.assertEqual(answers(self.install_dir), {"SITE_NAME": "custom"})
 
-    def test_host_without_pyyaml_uses_the_base_image(self):
+    def test_rendering_runs_in_the_base_image(self):
         self.set_profile_build("test", {"CAMERA_ID": "profile-cam"})
         package = self.pack(with_base=True)
         prompts = []
-        with self.press_enter(prompts), mock.patch.object(preflight, "_host_has_yaml", lambda: False):
-            target, _ = self.install(package, target=ToolDocker(), interactive=True, profile="test")
+        with self.press_enter(prompts):
+            target, _ = self.install(package, interactive=True, profile="test")
         self.assertTrue(any("[profile-cam]" in text for text in prompts), prompts)
         self.assertIn("camera: profile-cam", (self.install_dir / "generated/config/app.yaml").read_text())
         # 提问前只提前加载 base，之后统一加载时不重复
         loads = [i for i, call in enumerate(target.calls) if call[0] == "load"]
         base = [i for i in loads if target.calls[i][1] == naming.image_tar_name(self.base)]
-        tools = {i: next(call[j + 1] for j, arg in enumerate(call) if arg.endswith("dsf-deploy.py"))
-                 for i, call in enumerate(target.calls)
-                 if call[0] == "run" and any(arg.endswith("dsf-deploy.py") for arg in call)}
-        self.assertEqual(list(tools.values()), ["profile-variables", "render"])
+        runs = {i: call for i, call in enumerate(target.calls)
+                if call[0] == "run" and any(arg.endswith("dsf-deploy.py") for arg in call)}
+        tools = [next(call[j + 1] for j, arg in enumerate(call) if arg.endswith("dsf-deploy.py"))
+                 for call in runs.values()]
+        self.assertEqual(tools, ["profile-variables", "render"])
         self.assertEqual(len(base), 1)
-        self.assertLess(base[0], min(tools))
+        self.assertLess(base[0], min(runs))
         self.assertEqual(len(loads), len(list((package / "images").glob("*.tar"))))
+        for call in runs.values():
+            # 离线、以安装用户运行；HOME 与宿主一致，渲染展开 ~ 的结果不随容器变化
+            self.assertIn(self.base, call)
+            self.assertEqual(call[call.index("--network") + 1], "none")
+            self.assertEqual(call[call.index("--user") + 1], f"{os.getuid()}:{os.getgid()}")
+            self.assertIn(f"HOME={Path.home()}", call)
+
+    def test_package_without_base_renders_with_the_installed_base(self):
+        package = self.pack()  # 升级的常态：base 没有变化，包里不带
+        with self.assertRaisesRegex(DeployError, "the base image .* is missing; .*--with-base"):
+            self.install(package)
+        self.assertFalse(self.install_dir.exists())  # 预检失败：什么都没有写
+        target, _ = self.install(package, images={self.base: self.platform})
+        self.assertIn("camera:", (self.install_dir / "generated/config/app.yaml").read_text())
+        self.assertNotIn(["load", naming.image_tar_name(self.base)], target.calls)
+
+    def test_deploy_tool_errors_are_reported_without_the_docker_command(self):
+        docker = FakeDocker()
+        docker.images[self.base] = self.platform
+        with self.assertRaises(DeployError) as caught:
+            preflight._run_deploy_tool(self.root, ["render", "--profile", "missing"], self.base, docker,
+                                       writable=False, package_root=self.root, loaded=set())
+        self.assertIn("unknown profile 'missing'", str(caught.exception))
+        self.assertNotIn("docker run", str(caught.exception))
+        self.assertFalse(str(caught.exception).startswith("error:"))
 
     def test_integrity_and_platform_are_checked_first(self):
         package = self.pack(with_base=True)
