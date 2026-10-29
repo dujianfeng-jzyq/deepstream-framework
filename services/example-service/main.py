@@ -29,10 +29,10 @@ class Config:
 def load(root: Reader) -> Config:
     redis = root.section("redis")
     return Config(
-        host=redis.get("host", "127.0.0.1", non_empty),
+        host=redis.get("host", "127.0.0.1", non_empty()),
         port=redis.get("port", 6379, at_least(1)),
         password=redis.secret("password"),
-        stream=redis.required("stream", str, non_empty),
+        stream=redis.required("stream", str, non_empty()),
         detection_stream=redis.get("detection_stream", ""),
     )
 

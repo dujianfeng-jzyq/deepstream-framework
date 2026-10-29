@@ -20,6 +20,7 @@ constexpr auto kNvEncForceIdr = static_cast<GstEventType>(
 }  // namespace
 
 std::string ReadyFilePath() {
+  // 容器内由 framework/compose/defaults.yaml 设置；默认值供容器外运行，与它一致（test_repository 检查）。
   const char* value = std::getenv("DSF_READY_FILE");
   return value != nullptr && *value != '\0' ? value : "/tmp/dsf.ready";
 }

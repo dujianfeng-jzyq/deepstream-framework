@@ -62,6 +62,7 @@ class Paths:
 
 
 def ready_file() -> Path:
+    # 容器内由 framework/compose/defaults.yaml 设置；默认值供容器外运行，与它一致（test_repository 检查）。
     return Path(os.environ.get("DSF_READY_FILE") or "/tmp/dsf.ready")
 
 

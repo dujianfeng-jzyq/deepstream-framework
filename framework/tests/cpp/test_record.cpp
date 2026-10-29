@@ -256,6 +256,27 @@ TEST(eos_fallback_closes_the_segment_when_upstream_swallows_eos) {
   CHECK(FramesIn(events.finished.front().final_path) > 0);
 }
 
+TEST(recording_events_carry_the_recorder_identity) {
+  record::RecorderOptions options{"/data/rec", "gate-1", "osd", "rec_0"};
+  Segment segment{"gate-1-osd-20261005T163012.345-1", "/data/rec/a.mp4.tmp", "/data/rec/a-detected.mp4",
+                  1000, true};
+  const ds::RecordingEvent started = record::RecordingStarted(options, segment);
+  CHECK(started.type == ds::RecordingEvent::Type::kStarted);
+  CHECK_EQ(started.source_id, std::string("gate-1"));
+  CHECK_EQ(started.branch, std::string("osd"));
+  CHECK_EQ(started.segment_id, segment.id);
+  CHECK_EQ(started.start_ms, std::uint64_t{1000});
+  CHECK(started.path.empty());  // 开始时还没有可读的文件
+  const ds::RecordingEvent finished = record::RecordingFinished(options, segment, 61000);
+  CHECK(finished.type == ds::RecordingEvent::Type::kFinished);
+  CHECK_EQ(finished.end_ms, std::uint64_t{61000});
+  CHECK(finished.detected);
+  CHECK_EQ(finished.path, std::string("/data/rec/a-detected.mp4"));
+  const auto message = ds::RecordingMessage(finished);
+  CHECK_EQ(message["event_type"].get<std::string>(), std::string("recording_finished"));
+  CHECK_EQ(message["source_id"].get<std::string>(), std::string("gate-1"));
+}
+
 TEST(tracker_names_segments_and_never_overwrites) {
   TempDir dir;
   ScopedTimeZone zone("UTC0");

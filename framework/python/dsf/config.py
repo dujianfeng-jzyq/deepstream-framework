@@ -67,8 +67,8 @@ def at_least(minimum: float) -> Check:
     return lambda value: None if value >= minimum else f"must be at least {minimum}"
 
 
-def non_empty(value: Any) -> Optional[str]:
-    return None if value else "must not be empty"
+def non_empty() -> Check:
+    return lambda value: None if value else "must not be empty"
 
 
 class _State:

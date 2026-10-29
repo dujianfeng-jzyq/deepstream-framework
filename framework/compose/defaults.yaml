@@ -16,6 +16,7 @@ services:
       CONTAINER_DATA_PATH: ${CONTAINER_DATA_PATH}
       CONTAINER_MODELS_PATH: ${CONTAINER_MODELS_PATH}
       PYTHONPATH: ${CONTAINER_WORKSPACE}/python
+      # 就绪文件路径的唯一来源；应用在容器外运行时的默认值与它一致（test_repository 检查）。
       DSF_READY_FILE: /tmp/dsf.ready
       # 非 root 用户的 HOME 可能不可写；插件注册表缓存放到 /tmp。
       XDG_CACHE_HOME: /tmp/cache
@@ -26,8 +27,9 @@ services:
       - /etc/localtime:/etc/localtime:ro  # 时区与宿主一致，不依赖镜像中的 tzdata
     # 就绪 = 服务主循环（或帧处理）在 30 秒内推进过；容器 Up 不代表就绪。
     healthcheck:
-      # 路径取自容器的 DSF_READY_FILE，单元覆盖它时检查随之改变；Python 运行时的 sleep() 依赖这里的 30 秒。
-      test: ["CMD", "python3", "-c", "import os,sys,time; sys.exit(time.time() - os.stat(os.environ.get('DSF_READY_FILE') or '/tmp/dsf.ready').st_mtime > 30)"]
+      # 路径取自容器的 DSF_READY_FILE（上面的 environment 总会设置），单元覆盖它时检查随之改变；
+      # Python 运行时的 sleep() 依赖这里的 30 秒。
+      test: ["CMD", "python3", "-c", "import os,sys,time; sys.exit(time.time() - os.stat(os.environ['DSF_READY_FILE']).st_mtime > 30)"]
       interval: 10s
       timeout: 5s
       retries: 3

@@ -19,6 +19,7 @@
 
 #include <gst/gst.h>
 
+#include "dsf/ds/message.h"
 #include "dsf/gst/component.h"
 #include "dsf/gst/graph.h"
 #include "dsf/gst/pipeline.h"
@@ -159,6 +160,10 @@ class SegmentRecorder : public gst::Component {
   gst::Pipeline* pipeline_ = nullptr;  // OnCreated 到 OnReleased 之间有效
   gst::Timer fallback_;
 };
+
+// 分段事件对应的消息事件（dsf::ds::RecordingMessage 的输入）；source_id 与 branch 取自 options。
+ds::RecordingEvent RecordingStarted(const RecorderOptions& options, const Segment& segment);
+ds::RecordingEvent RecordingFinished(const RecorderOptions& options, const Segment& segment, std::uint64_t end_ms);
 
 // encoded（已编码的 H.264/H.265 流）→ parser → splitmuxsink(mp4mux)。
 // 返回 splitmuxsink；properties 透传给 splitmuxsink。

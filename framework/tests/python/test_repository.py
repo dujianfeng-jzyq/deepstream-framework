@@ -93,6 +93,15 @@ class RepositoryTest(unittest.TestCase):
             os.utime(ready, (time.time() - 60, time.time() - 60))
             self.assertEqual(check(), 1)
 
+    def test_ready_file_defaults_match_the_compose_environment(self):
+        compose = (FRAMEWORK / "compose/defaults.yaml").read_text(encoding="utf-8")
+        path = re.search(r"^\s*DSF_READY_FILE:\s*(\S+)\s*$", compose, re.M).group(1)
+        for source, pattern in (("cpp/src/app/components.cpp", r'"DSF_READY_FILE"\);.*?: "([^"]+)";'),
+                                ("python/dsf/service.py", r'"DSF_READY_FILE"\) or "([^"]+)"')):
+            match = re.search(pattern, (FRAMEWORK / source).read_text(encoding="utf-8"), re.S)
+            self.assertIsNotNone(match, source)
+            self.assertEqual(match.group(1), path, source)
+
     def test_business_services_use_the_base_image_and_readonly_payload(self):
         text = (FRAMEWORK / "compose/defaults.yaml").read_text()
         self.assertIn("image: ${BASE_IMAGE}", text)

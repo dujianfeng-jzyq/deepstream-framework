@@ -57,34 +57,22 @@ struct ExampleApp {
     // 每路源的录像器，供检测结果给当前分段打“出现过目标”的标记。
     std::vector<std::vector<dsf::record::SegmentRecorder*>> by_source(config.sources.size());
     for (const auto& slot : plan.recorders) {
-      const std::string source_id = config.sources[static_cast<std::size_t>(slot.source)].id;
-      const std::string branch = slot.branch;
-      const auto publish = [recordings, source_id, branch](dsf::ds::RecordingEvent event) {
-        if (recordings == nullptr) return;
-        event.source_id = source_id;
-        event.branch = branch;
-        recordings->TryPublish(dsf::ds::Serialize(dsf::ds::RecordingMessage(event)));
-      };
-      dsf::record::SegmentRecorder::Events events;
-      events.started = [publish](const dsf::record::Segment& segment) {
-        dsf::ds::RecordingEvent event;
-        event.segment_id = segment.id;
-        event.start_ms = segment.start_ms;
-        publish(event);
-      };
-      events.finished = [publish](const dsf::record::Segment& segment, std::uint64_t end_ms) {
-        dsf::ds::RecordingEvent event;
-        event.type = dsf::ds::RecordingEvent::Type::kFinished;
-        event.segment_id = segment.id;
-        event.start_ms = segment.start_ms;
-        event.end_ms = end_ms;
-        event.detected = segment.detected;
-        event.path = segment.final_path;
-        publish(event);
-      };
-      dsf::record::RecorderOptions options{config.recording.root, source_id, branch, slot.element};
+      const std::string& source_id = config.sources[static_cast<std::size_t>(slot.source)].id;
+      dsf::record::RecorderOptions options{config.recording.root, source_id, slot.branch, slot.element};
       options.retention = config.recording.retention;
       options.split_on_gap = std::chrono::milliseconds(config.recording.split_on_gap_ms);
+      dsf::record::SegmentRecorder::Events events;
+      if (recordings != nullptr) {
+        const auto publish = [recordings](const dsf::ds::RecordingEvent& event) {
+          recordings->TryPublish(dsf::ds::Serialize(dsf::ds::RecordingMessage(event)));
+        };
+        events.started = [publish, options](const dsf::record::Segment& segment) {
+          publish(dsf::record::RecordingStarted(options, segment));
+        };
+        events.finished = [publish, options](const dsf::record::Segment& segment, std::uint64_t end_ms) {
+          publish(dsf::record::RecordingFinished(options, segment, end_ms));
+        };
+      }
       auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(options, std::move(events));
       by_source[static_cast<std::size_t>(slot.source)].push_back(&recorder);
     }

@@ -41,7 +41,7 @@ class Element {
   template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T> && !std::is_same_v<T, bool>>>
   Element& Set(const std::string& property, T value) {
     if constexpr (std::is_floating_point_v<T>) {
-      return Store(property, FloatText(static_cast<double>(value)), false, {});
+      return Store(property, config::FormatNumber(static_cast<double>(value)), false, {});
     } else {
       return Store(property, std::to_string(value), false, {});
     }
@@ -62,7 +62,6 @@ class Element {
   friend class Graph;
   Element(Graph* graph, int index) : graph_(graph), index_(index) {}
   Element& Store(const std::string& property, std::string value, bool secret, std::string origin);
-  static std::string FloatText(double value);
   Graph* graph_ = nullptr;
   int index_ = -1;
 };

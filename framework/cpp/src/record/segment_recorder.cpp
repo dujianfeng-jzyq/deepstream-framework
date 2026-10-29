@@ -454,6 +454,25 @@ std::size_t SegmentRecorder::open_count() const {
   return tracker_.open_count();
 }
 
+ds::RecordingEvent RecordingStarted(const RecorderOptions& options, const Segment& segment) {
+  ds::RecordingEvent event;
+  event.type = ds::RecordingEvent::Type::kStarted;
+  event.source_id = options.source_id;
+  event.branch = options.branch;
+  event.segment_id = segment.id;
+  event.start_ms = segment.start_ms;
+  return event;
+}
+
+ds::RecordingEvent RecordingFinished(const RecorderOptions& options, const Segment& segment, std::uint64_t end_ms) {
+  ds::RecordingEvent event = RecordingStarted(options, segment);
+  event.type = ds::RecordingEvent::Type::kFinished;
+  event.end_ms = end_ms;
+  event.detected = segment.detected;
+  event.path = segment.final_path;
+  return event;
+}
+
 gst::Element AddSegmentSink(gst::Graph& graph, const gst::Endpoint& encoded,
                             const std::string& codec, int segment_seconds, const std::string& name,
                             const config::Properties& properties) {

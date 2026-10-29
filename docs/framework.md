@@ -235,6 +235,10 @@ auto sink = dsf::record::AddSegmentSink(graph, encoded, "h264", 60, "rec_0");
 dsf::record::RecorderOptions options{root, source_id, "osd", "rec_0"};
 options.retention = {1440, 60, 5ull << 30};  // max_files keep_files min_free_bytes；默认全 0 不清理
 options.split_on_gap = std::chrono::milliseconds(2000);       // 默认值；0 关闭
+dsf::record::SegmentRecorder::Events events;                  // 可选；started 在媒体线程，finished 在控制线程
+events.finished = [&channel, options](const dsf::record::Segment& segment, std::uint64_t end_ms) {
+  channel.TryPublish(dsf::ds::Serialize(dsf::ds::RecordingMessage(dsf::record::RecordingFinished(options, segment, end_ms))));
+};
 auto& recorder = assembly.Add<dsf::record::SegmentRecorder>(options, events);
 assembly.Add<dsf::app::KeyframeOnGap>("enc_0", std::chrono::milliseconds(1000));  // 录像所用的编码器
 recorder.MarkDetected();   // 任意线程：当前分段出现过目标

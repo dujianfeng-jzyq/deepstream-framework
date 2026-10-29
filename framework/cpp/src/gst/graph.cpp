@@ -3,9 +3,7 @@
 #include "dsf/gst/graph.h"
 
 #include <algorithm>
-#include <locale>
 #include <memory>
-#include <sstream>
 #include <stdexcept>
 
 namespace dsf::gst {
@@ -91,13 +89,6 @@ void FreeDelayedLink(gpointer data, GClosure* /*closure*/) {
   delete static_cast<DelayedLink*>(data);
 }
 
-std::string ToText(double value) {
-  std::ostringstream stream;
-  stream.imbue(std::locale::classic());
-  stream << value;
-  return stream.str();
-}
-
 }  // namespace
 
 // ---- Element ----
@@ -126,7 +117,6 @@ Element& Element::Set(const std::string& property, const char* value) {
 Element& Element::Set(const std::string& property, bool value) {
   return Store(property, value ? "true" : "false", false, {});
 }
-std::string Element::FloatText(double value) { return ToText(value); }
 Element& Element::SetSecret(const std::string& property, const std::string& value) {
   return Store(property, value, true, {});
 }

@@ -114,7 +114,7 @@ class Docker:
         """服务就绪文件（$DSF_READY_FILE）的内容；读不到返回空串。"""
         try:
             return self.compose(project_dir, ["exec", "-T", service, "sh", "-c",
-                                              'cat "${DSF_READY_FILE:-/tmp/dsf.ready}"'], capture=True).stdout
+                                              'cat "$DSF_READY_FILE"'], capture=True).stdout
         except DeployError:
             return ""
 

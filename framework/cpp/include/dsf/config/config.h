@@ -47,6 +47,10 @@ template <typename T>
 using CheckOf = Check<typename Identity<T>::type>;
 }  // namespace detail
 
+// 浮点数的文本形式，与进程 locale 无关（小数点总是 .）。配置摘要与图模型的属性文本都用它，
+// 读取（Get<double>）与属性转换按同样的规则解析。
+std::string FormatNumber(double value);
+
 Check<std::string> OneOf(std::vector<std::string> allowed);
 Check<std::string> NonEmpty();
 // 可作为单个路径段（目录名、文件名前缀）：非空、不含 / 与 \、不是 . 或 ..。

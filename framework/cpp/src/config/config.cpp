@@ -175,12 +175,7 @@ struct Scalar<double> {
     if (stream.fail() || !stream.eof() || !std::isfinite(result)) return std::nullopt;
     return result;
   }
-  static std::string Text(double value) {
-    std::ostringstream stream;
-    stream.imbue(std::locale::classic());
-    stream << value;
-    return stream.str();
-  }
+  static std::string Text(double value) { return FormatNumber(value); }
 };
 
 template <>
@@ -199,6 +194,13 @@ struct Scalar<bool> {
 };
 
 }  // namespace
+
+std::string FormatNumber(double value) {
+  std::ostringstream stream;
+  stream.imbue(std::locale::classic());
+  stream << value;
+  return stream.str();
+}
 
 // ---- 约束 ----
 
