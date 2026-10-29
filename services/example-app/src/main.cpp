@@ -4,8 +4,6 @@
 #include <chrono>
 #include <memory>
 
-#include <spdlog/spdlog.h>
-
 #include "config.h"
 #include "dsf/app/app.h"
 #include "dsf/app/components.h"
@@ -36,7 +34,6 @@ struct ExampleApp {
     // 相机可能晚于应用上线（例如断电后同时启动）：不设启动超时，未连上的源与运行中断流一样由
     // 看门狗（watchdog.stall_timeout_s）把守。否则每 30 秒退出重启一次，反复重新加载模型。
     assembly.options().startup_timeout = std::chrono::milliseconds(0);
-    for (const auto& warning : example_app::Warnings(config)) spdlog::warn("{}", warning);
     // 断流恢复后的第一帧编成关键帧：录像在断流处干净地切分，RTSP 观看端立即恢复画面。
     if (config.encoder.keyframe_on_gap_ms > 0) {
       const std::chrono::milliseconds gap(config.encoder.keyframe_on_gap_ms);

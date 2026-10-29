@@ -105,6 +105,11 @@ class Reader {
   std::string PathOf(std::string_view key) const;
 
   [[noreturn]] void Fail(std::string_view key, const std::string& reason) const;
+  // 合法但多半不是想要的配置（例如浏览器无法播放的编码）：登记警告，不中断读取。消息格式与 Fail 相同，
+  // 应用入口在 --check-config 与运行日志中输出。
+  void Warn(std::string_view key, const std::string& reason) const;
+  // 同一文档的全部读取器登记过的警告，按登记顺序。
+  std::vector<std::string> Warnings() const;
 
   // 只能在根读取器上调用：检查未读取的键，失败抛 Error。
   void Finish() const;

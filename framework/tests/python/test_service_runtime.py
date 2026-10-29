@@ -70,6 +70,16 @@ class ConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "mode: expected int"):
                 root.get("mode", 0)
 
+    def test_warnings_are_collected_with_full_path(self):
+        root = reader("a:\n  n: 3\n")
+        a = root.section("a")
+        a.get("n", 0)
+        self.assertEqual(root.warnings(), [])
+        a.warn("n", "is unusual")
+        root.warn("", "check the outputs")
+        root.finish()  # 警告不影响校验
+        self.assertEqual(root.warnings(), ["test.yaml: a.n: is unusual", "test.yaml: (top level): check the outputs"])
+
     def test_duplicate_keys_and_secrets(self):
         with self.assertRaisesRegex(Exception, "duplicate key"):
             reader("a: 1\na: 2\n")
@@ -109,6 +119,21 @@ class ServiceTest(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 self.assertEqual(Service("svc").run(load, main, ["--bogus"]), 2)
             del os.environ["DSF_READY_FILE"]
+
+    def test_check_config_prints_config_warnings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "svc.yaml")
+            config.write_text("value: 5\n")
+
+            def load(root):
+                value = root.get("value", 0)
+                root.warn("value", "is unusual")
+                return value
+
+            with redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+                code = Service("svc").run(load, lambda *_: None, ["--config", str(config), "--check-config"])
+            self.assertEqual((code, output.getvalue().strip()), (0, "configuration is valid"))
+            self.assertIn(f"svc: warning: {config}: value: is unusual", errors.getvalue())
 
     def test_sleep_refreshes_the_ready_file_during_long_waits(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -52,7 +52,7 @@ struct SourceSpec {
 };
 
 // 读取 sources 列表，检查 id 唯一。
-std::vector<SourceSpec> ReadSources(Reader& reader, const std::string& key = "sources");
+std::vector<SourceSpec> ReadSources(Reader reader, const std::string& key = "sources");
 
 // 返回 rtsp://user:password@host/... 形式的地址。口令按百分号编码（GStreamer 解析地址时解码），
 // 可以含任意字符；字母、数字与 -._~ 保持原样。password 为空时原样返回；write_empty 为 true 时
@@ -60,8 +60,8 @@ std::vector<SourceSpec> ReadSources(Reader& reader, const std::string& key = "so
 // 口令非空而地址没有用户名或已含口令时抛 std::invalid_argument。
 std::string InjectPassword(const std::string& uri, const std::string& password, bool write_empty = false);
 
-// 添加一路源并规范为 NVMM NV12（可选缩放）。prefix 用于元件命名（例如 "src0"）。
-Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& prefix);
+// 添加一路源并规范为 NVMM NV12（可选缩放）。name 是源元件名（例如 "src0"），块内其余元件以它为前缀。
+Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& name);
 
 // ---- 批处理 ----
 
@@ -87,13 +87,13 @@ void LinkToMux(Graph& graph, const gst::Endpoint& from, const Element& mux, int 
 struct InferSpec {
   std::string name;                // 元件名，也是日志与消息中的推理单元标识
   std::string plugin = "nvinfer";  // nvinfer | nvinferserver
-  std::string config_path;
+  std::string config_file;
   Properties properties;
 
   static InferSpec Read(Reader reader);
 };
 
-std::vector<InferSpec> ReadInferences(Reader& reader, const std::string& key = "inference");
+std::vector<InferSpec> ReadInferences(Reader reader, const std::string& key = "inference");
 Element AddInfer(Graph& graph, const gst::Endpoint& input, const InferSpec& spec);
 
 struct TrackerSpec {
@@ -161,6 +161,7 @@ struct TilerSpec {
   static TilerSpec Read(Reader reader);
 };
 
+// sources 为输入的源数，必须为正；rows/columns 为 0 时按它计算。
 Element AddTiler(Graph& graph, const gst::Endpoint& input, const TilerSpec& spec, int sources,
                  const std::string& name = "tiler");
 

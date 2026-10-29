@@ -87,7 +87,7 @@ SourceSpec SourceSpec::Read(Reader reader) {
   return spec;
 }
 
-std::vector<SourceSpec> ReadSources(Reader& reader, const std::string& key) {
+std::vector<SourceSpec> ReadSources(Reader reader, const std::string& key) {
   std::vector<SourceSpec> sources;
   std::set<std::string> ids;
   for (Reader item : reader.List(key, 1)) {
@@ -129,23 +129,23 @@ std::string InjectPassword(const std::string& uri, const std::string& password, 
   return uri.substr(0, start + at) + ":" + encoded + uri.substr(start + at);
 }
 
-Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& prefix) {
+Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& name) {
   Element head;
   Element tail;
   if (spec.type == "v4l2" || spec.type == "test") {
     if (spec.type == "v4l2") {
-      head = graph.Add("v4l2src", prefix);
+      head = graph.Add("v4l2src", name);
       head.Set("device", spec.device);
     } else {
-      head = graph.Add("videotestsrc", prefix);
+      head = graph.Add("videotestsrc", name);
       head.Set("is-live", true);
     }
     head.Apply(spec.properties);
     tail = graph.Caps(RawCaps(spec.raw_format, spec.width, spec.height, spec.framerate),
-                      prefix + "_raw");
+                      name + "_raw");
     graph.Link(head, tail);
   } else {
-    head = graph.Add("nvurisrcbin", prefix);
+    head = graph.Add("nvurisrcbin", name);
     // 解码器的输出 surface 池很小（最少解码所需 + 1），硬件编码器会持有输入帧直到编码完成；
     // 当源侧转换走零拷贝直通时，编码器持有的就是解码器的 surface，池被耗尽后管线停在第 3 帧左右
     // 且不报错（无 B 帧码流必现）。加 queue 无济于事：queue 只会多持有 surface。留出余量。
@@ -167,8 +167,8 @@ Element AddSource(Graph& graph, const SourceSpec& spec, const std::string& prefi
     tail = head;
   }
   // 下游统一为 NVMM NV12：mux 之后的处理不再关心输入是哪种源。
-  Element convert = graph.Add("nvvideoconvert", prefix + "_conv");
-  Element caps = graph.Caps(NvmmCaps(spec.output_width, spec.output_height), prefix + "_nvmm");
+  Element convert = graph.Add("nvvideoconvert", name + "_conv");
+  Element caps = graph.Caps(NvmmCaps(spec.output_width, spec.output_height), name + "_nvmm");
   graph.Link(tail, convert);
   graph.Link(convert, caps);
   return caps;
@@ -209,12 +209,12 @@ InferSpec InferSpec::Read(Reader reader) {
   InferSpec spec;
   spec.name = reader.Required<std::string>("name", config::PathComponent());
   spec.plugin = reader.Get<std::string>("plugin", "nvinfer", config::OneOf({"nvinfer", "nvinferserver"}));
-  spec.config_path = reader.Required<std::string>("config_path", config::NonEmpty());
+  spec.config_file = reader.Required<std::string>("config_file", config::NonEmpty());
   spec.properties = reader.Props("properties");
   return spec;
 }
 
-std::vector<InferSpec> ReadInferences(Reader& reader, const std::string& key) {
+std::vector<InferSpec> ReadInferences(Reader reader, const std::string& key) {
   std::vector<InferSpec> specs;
   std::set<std::string> names;
   for (Reader item : reader.List(key)) {
@@ -227,7 +227,7 @@ std::vector<InferSpec> ReadInferences(Reader& reader, const std::string& key) {
 
 Element AddInfer(Graph& graph, const gst::Endpoint& input, const InferSpec& spec) {
   Element infer = graph.Add(spec.plugin, spec.name);
-  infer.Set("config-file-path", spec.config_path).Apply(spec.properties);
+  infer.Set("config-file-path", spec.config_file).Apply(spec.properties);
   graph.Link(input, infer);
   return infer;
 }
@@ -338,6 +338,7 @@ TilerSpec TilerSpec::Read(Reader reader) {
 
 Element AddTiler(Graph& graph, const gst::Endpoint& input, const TilerSpec& spec, int sources,
                  const std::string& name) {
+  if (sources <= 0) throw std::invalid_argument("tiler source count must be positive");
   int rows = spec.rows;
   int columns = spec.columns;
   if (rows == 0) rows = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(sources))));

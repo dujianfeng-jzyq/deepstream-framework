@@ -100,6 +100,7 @@ TEST(mux_infer_and_outputs_build_expected_graph) {
   InferSpec sgie{"sgie", "nvinferserver", "/models/b.txt", {{"interval", "2", "inference[1].properties.interval"}}};
   Element tail = AddInfer(graph, AddInfer(graph, mux, pgie), sgie);
   tail = AddMetaTap(graph, tail, "meta");
+  CHECK_THROWS(AddTiler(graph, tail, TilerSpec{}, 0), "source count must be positive");
   Element tiler = AddTiler(graph, tail, TilerSpec{}, 3);
   EncoderSpec encoder;
   encoder.codec = "h265";

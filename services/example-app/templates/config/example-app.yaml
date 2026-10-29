@@ -46,7 +46,7 @@ mux:
 inference:
   - name: pgie
     plugin: nvinfer
-    config_path: ${CONTAINER_MODELS_PATH}/road-assets/deployment/config.txt
+    config_file: ${CONTAINER_MODELS_PATH}/road-assets/deployment/config.txt
 
 tracker:
   enabled: true

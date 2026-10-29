@@ -34,15 +34,6 @@ std::string PublishUrl(const std::string& url, const std::string& password) {
   return dsf::ds::InjectPassword(url, password, true);
 }
 
-std::vector<std::string> Warnings(const Config& config) {
-  std::vector<std::string> warnings;
-  if (config.rtsp_out.enabled && config.encoder.codec == "h265") {
-    warnings.push_back("rtsp_out is encoded as h265: RTSP players can show it, but most browsers cannot "
-                       "play it over WebRTC (MediaMTX page); use encoder.codec: h264 for browser viewing");
-  }
-  return warnings;
-}
-
 bool Config::live() const {
   for (const auto& source : sources) {
     if (source.live) return true;
@@ -144,6 +135,12 @@ Config Load(Reader& root) {
   if (!config.records() && !config.rtsp_out.enabled && !publishes) {
     root.Fail("", "enable at least one output: recording.raw, recording.osd, rtsp_out, "
                   "or redis with at least one inference entry");
+  }
+
+  // ---- 警告 ----
+  if (config.rtsp_out.enabled && config.encoder.codec == "h265") {
+    root.Warn("encoder.codec", "rtsp_out is encoded as h265: RTSP players can show it, but most browsers "
+                               "cannot play it over WebRTC (MediaMTX page); use h264 for browser viewing");
   }
   return config;
 }

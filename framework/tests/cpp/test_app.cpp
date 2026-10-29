@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <sstream>
 
 #include "dsf/app/app.h"
 #include "dsf/app/components.h"
@@ -42,6 +44,15 @@ struct SoftwareApp {
     auto tap = graph.Add("identity", "tap");
     graph.Chain({source, tap, graph.Add("fakesink", "sink")});
     assembly.ReadyWhenFramesReach("tap");
+  }
+};
+
+// 在 Load 中登记警告：入口在 --check-config 时输出到 stderr。
+struct WarningApp : SoftwareApp {
+  static Config Load(dsf::config::Reader& root) {
+    Config config = SoftwareApp::Load(root);
+    root.Warn("frames", "is unusual");
+    return config;
   }
 };
 
@@ -323,6 +334,20 @@ TEST(readiness_without_required_input_stays_fresh_while_idle) {
   CHECK(content_ok);
   CHECK(quiet_after_stall);
   CHECK(!readiness.Healthy());
+}
+
+TEST(check_config_prints_config_warnings) {
+  TempConfig config("frames: 5\n");
+  std::vector<std::string> args{"soft-app", "--check-config", "--config", config.path.string()};
+  std::vector<char*> argv;
+  for (auto& arg : args) argv.push_back(arg.data());
+  std::ostringstream captured;
+  std::streambuf* original = std::cerr.rdbuf(captured.rdbuf());
+  const int code = Main<WarningApp>(static_cast<int>(argv.size()), argv.data());
+  std::cerr.rdbuf(original);
+  CHECK_EQ(code, 0);
+  CHECK(captured.str().find("soft-app: warning: " + config.path.string() + ": frames: is unusual") !=
+        std::string::npos);
 }
 
 TEST(readiness_counter_has_a_single_source) {

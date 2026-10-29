@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 
 #include "dsf/app/components.h"
@@ -23,6 +24,7 @@ std::string EnvOr(const char* name, const std::string& fallback) {
   return value != nullptr && *value != '\0' ? std::string(value) : fallback;
 }
 
+// 配置中的日志级别名与 spdlog 级别的唯一对照表。
 const std::vector<std::pair<std::string, spdlog::level::level_enum>>& Levels() {
   static const std::vector<std::pair<std::string, spdlog::level::level_enum>> levels = {
       {"trace", spdlog::level::trace}, {"debug", spdlog::level::debug},
@@ -31,6 +33,19 @@ const std::vector<std::pair<std::string, spdlog::level::level_enum>>& Levels() {
       {"off", spdlog::level::off},
   };
   return levels;
+}
+
+std::vector<std::string> LevelNames() {
+  std::vector<std::string> names;
+  for (const auto& [name, level] : Levels()) names.push_back(name);
+  return names;
+}
+
+std::optional<spdlog::level::level_enum> ParseLevel(const std::string& name) {
+  for (const auto& [level_name, level] : Levels()) {
+    if (level_name == name) return level;
+  }
+  return std::nullopt;
 }
 
 std::string Trim(std::string text) {
@@ -72,9 +87,7 @@ Paths Paths::FromEnvironment() {
 
 LogOptions LogOptions::Read(config::Reader reader) {
   LogOptions options;
-  std::vector<std::string> names;
-  for (const auto& [name, level] : Levels()) names.push_back(name);
-  options.level = reader.Get<std::string>("level", "info", config::OneOf(names));
+  options.level = reader.Get<std::string>("level", "info", config::OneOf(LevelNames()));
   options.console = reader.Get("console", true);
   options.file = reader.Get("file", false);
   options.directory = reader.Get<std::string>("directory", "");
@@ -98,9 +111,7 @@ ReadinessOptions ReadinessOptions::Read(config::Reader reader) {
 }
 
 void ValidateLogging(const LogOptions& options) {
-  bool known = false;
-  for (const auto& [name, level] : Levels()) known = known || name == options.level;
-  if (!known) throw std::invalid_argument("unknown log level: " + options.level);
+  if (!ParseLevel(options.level)) throw std::invalid_argument("unknown log level: " + options.level);
   if (options.file && options.directory.empty()) {
     throw std::invalid_argument("logging.directory is required when file logging is enabled");
   }
@@ -119,9 +130,7 @@ void ConfigureLogging(const LogOptions& options, const std::string& name) {
     sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(path.string()));
   }
   auto logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
-  for (const auto& [level_name, level] : Levels()) {
-    if (level_name == options.level) logger->set_level(level);
-  }
+  logger->set_level(*ParseLevel(options.level));
   logger->flush_on(spdlog::level::warn);  // 出问题时最后几行必须已经落地
   spdlog::set_default_logger(logger);
   spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
@@ -267,6 +276,7 @@ int Run(int argc, char** argv, const Definition& definition) {
   WatchdogOptions watchdog;
   ReadinessOptions ready;
   std::string summary;
+  std::vector<std::string> warnings;
   Assembly assembly(paths);
   try {
     const config::Document document = config::Document::LoadFile(config_path);
@@ -277,6 +287,7 @@ int Run(int argc, char** argv, const Definition& definition) {
     definition.load(root);
     root.Finish();
     summary = root.Describe();
+    warnings = root.Warnings();
     definition.build(assembly);
   } catch (const std::exception& error) {
     std::cerr << info.name << ": " << error.what() << "\n";
@@ -284,6 +295,9 @@ int Run(int argc, char** argv, const Definition& definition) {
   }
   const gst::Requirements requirements = assembly.Requirements();
 
+  if (line.mode != Mode::kRun) {
+    for (const std::string& warning : warnings) std::cerr << info.name << ": warning: " << warning << "\n";
+  }
   if (line.mode == Mode::kCheckConfig) {
     if (line.plugins) {
       try {
@@ -311,6 +325,7 @@ int Run(int argc, char** argv, const Definition& definition) {
   }
   spdlog::info("{}", BuildInfo(info, paths));
   spdlog::info("config({}): {}", config_path, summary);
+  for (const std::string& warning : warnings) spdlog::warn("{}", warning);
   try {
     requirements.Check();
   } catch (const std::exception& error) {

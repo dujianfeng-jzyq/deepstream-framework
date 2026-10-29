@@ -35,10 +35,11 @@ from .config import ConfigError, Reader, at_least, one_of
 
 EXIT_OK, EXIT_FAILURE, EXIT_USAGE = 0, 1, 2
 
-LEVELS = ("trace", "debug", "info", "warn", "error", "critical", "off")
+# 配置中的日志级别名（与 C++ 应用一致）到 logging 级别的唯一对照表；Python 没有 trace，按 debug 输出。
 _PYTHON_LEVELS = {"trace": logging.DEBUG, "debug": logging.DEBUG, "info": logging.INFO,
                   "warn": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL,
                   "off": logging.CRITICAL + 10}
+LEVELS = tuple(_PYTHON_LEVELS)
 # 健康检查要求就绪文件在 30 秒内更新过（framework/compose/defaults.yaml），sleep() 至少按这个间隔更新。
 _ALIVE_INTERVAL_S = 5.0
 
@@ -144,6 +145,8 @@ class Service:
             print(f"{self.name}: {error}", file=sys.stderr)
             return EXIT_FAILURE
         if args.check_config:
+            for warning in root.warnings():
+                print(f"{self.name}: warning: {warning}", file=sys.stderr)
             print("configuration is valid")
             return EXIT_OK
 
@@ -152,6 +155,8 @@ class Service:
         logging.basicConfig(level=_PYTHON_LEVELS[level], handlers=[handler], force=True)
         self.log.info("%s payload=%s", self.name, payload_version(self.paths))
         self.log.info("config(%s): %s", config_path, root.describe())
+        for warning in root.warnings():
+            self.log.warning("%s", warning)
 
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, lambda number, _frame: self._on_signal(number))

@@ -61,11 +61,9 @@ struct Config {
   bool records() const { return recording.raw || recording.osd; }
 };
 
-// 读取并校验跨字段规则；失败抛 dsf::config::Error。
+// 读取并校验跨字段规则；失败抛 dsf::config::Error。合法但多半不是想要的组合
+// （例如 h265 的 RTSP 输出在浏览器 WebRTC 中无法播放）登记为 root.Warn，由框架输出。
 Config Load(dsf::config::Reader& root);
-
-// 合法但多半不是想要的组合（例如 h265 的 RTSP 输出在浏览器 WebRTC 中无法播放）；由 main 记录。
-std::vector<std::string> Warnings(const Config& config);
 
 // 推流地址：口令编码后写在用户名之后（dsf::ds::InjectPassword）。口令为空时也写出 "user:"：
 // MediaMTX 的推流用户口令为空时接受任意口令，但只认带凭据的客户端。

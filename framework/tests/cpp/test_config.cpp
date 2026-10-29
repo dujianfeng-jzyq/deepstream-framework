@@ -39,6 +39,21 @@ TEST(required_and_constraints_report_full_path) {
   CHECK_THROWS(root.Required<std::string>("id"), "id: is required");
 }
 
+TEST(warnings_are_collected_with_full_path) {
+  const Document document = Load("a:\n  n: 3\n");
+  Reader root = document.Root();
+  Reader a = root.Section("a");
+  CHECK_EQ(a.Get("n", 0), 3);
+  CHECK(root.Warnings().empty());
+  a.Warn("n", "is unusual");
+  root.Warn("", "check the outputs");
+  root.Finish();  // 警告不影响校验
+  const auto warnings = root.Warnings();
+  CHECK_EQ(warnings.size(), std::size_t{2});
+  CHECK_EQ(warnings[0], std::string("test.yaml: a.n: is unusual"));
+  CHECK_EQ(warnings[1], std::string("test.yaml: (top level): check the outputs"));
+}
+
 TEST(type_errors_are_rejected) {
   const Document document = Load("n: abc\nq: \"12\"\nb: maybe\nd: .nan\nl: [1]\n");
   Reader root = document.Root();

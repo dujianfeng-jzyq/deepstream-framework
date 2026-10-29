@@ -78,6 +78,7 @@ class _State:
         self.leaves: set[str] = set()
         self.containers: set[str] = set()
         self.described: list[tuple[str, str]] = []
+        self.warnings: list[str] = []
 
 
 class Reader:
@@ -108,9 +109,19 @@ class Reader:
     def path_of(self, key: str) -> str:
         return f"{self._path}.{key}" if self._path else key
 
-    def fail(self, key: str, reason: str):
+    def _message(self, key: str, reason: str) -> str:
         path = self.path_of(key) if key else (self._path or "(top level)")
-        raise ConfigError(f"{self._state.origin}: {path}: {reason}")
+        return f"{self._state.origin}: {path}: {reason}"
+
+    def fail(self, key: str, reason: str):
+        raise ConfigError(self._message(key, reason))
+
+    def warn(self, key: str, reason: str) -> None:
+        """合法但多半不是想要的配置：登记警告，不中断读取；Service 在 --check-config 与运行日志中输出。"""
+        self._state.warnings.append(self._message(key, reason))
+
+    def warnings(self) -> list[str]:
+        return list(self._state.warnings)
 
     def _child(self, key: str) -> Any:
         if self._node is None:

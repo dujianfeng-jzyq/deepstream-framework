@@ -32,6 +32,13 @@ example_app::Config Load(const std::string& text) {
   return config;
 }
 
+std::vector<std::string> WarningsOf(const std::string& text) {
+  const Document document = Document::LoadText(text, "example-app.yaml");
+  dsf::config::Reader root = document.Root();
+  (void)example_app::Load(root);
+  return root.Warnings();
+}
+
 std::string Replace(std::string text, const std::string& from, const std::string& to) {
   const auto position = text.find(from);
   if (position == std::string::npos) throw std::runtime_error("template has no " + from);
@@ -162,15 +169,16 @@ TEST(rtsp_output_path_must_be_a_mediamtx_path) {
 }
 
 TEST(h265_rtsp_output_warns_about_browser_playback) {
-  CHECK(example_app::Warnings(Load(Template())).empty());
-  const auto warnings = example_app::Warnings(Load(Replace(Template(), "  codec: h264", "  codec: h265")));
+  CHECK(WarningsOf(Template()).empty());
+  const auto warnings = WarningsOf(Replace(Template(), "  codec: h264", "  codec: h265"));
   CHECK_EQ(warnings.size(), 1u);
+  CHECK(warnings[0].find("example-app.yaml: encoder.codec: ") == 0);
   CHECK(warnings[0].find("WebRTC") != std::string::npos);
 }
 
 TEST(cross_field_rules) {
   const std::string base = Template();
-  CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",
+  CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/deployment/config.txt",
                             "inference: []")),
                "tracker.enabled: requires at least one inference");
   std::string no_output = Replace(base, "  osd: true\n\nrtsp_out:\n  enabled: true",
@@ -182,7 +190,7 @@ TEST(cross_field_rules) {
                                    "  osd: false\n\nrtsp_out:\n  enabled: false");
   redis_only = Replace(redis_only, "tracker:\n  enabled: true", "tracker:\n  enabled: false");
   CHECK(Load(redis_only).redis.enabled);
-  CHECK_THROWS(Load(Replace(redis_only, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_path: x/road-assets/deployment/config.txt",
+  CHECK_THROWS(Load(Replace(redis_only, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/deployment/config.txt",
                             "inference: []")),
                "or redis with at least one inference entry");
   CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");

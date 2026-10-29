@@ -50,9 +50,13 @@ std::string LeafOf(const std::string& path) {
   return dot == std::string::npos ? path : path.substr(dot + 1);
 }
 
+std::string Message(const std::string& origin, const std::string& path, const std::string& reason) {
+  return origin + ": " + (path.empty() ? std::string("(top level)") : path) + ": " + reason;
+}
+
 [[noreturn]] void Throw(const std::string& origin, const std::string& path,
                         const std::string& reason) {
-  throw Error(origin + ": " + (path.empty() ? std::string("(top level)") : path) + ": " + reason);
+  throw Error(Message(origin, path, reason));
 }
 
 Value Convert(const YAML::Node& node, const std::string& origin, const std::string& path) {
@@ -293,6 +297,7 @@ struct Reader::State {
   std::set<std::string> declared_set;
   std::set<std::string> known;  // 叶子与容器，用于提示"这里能写什么"
   std::vector<std::pair<std::string, std::string>> described;
+  std::vector<std::string> warnings;
   bool finished = false;
 };
 
@@ -314,6 +319,12 @@ std::string Reader::PathOf(std::string_view key) const {
 void Reader::Fail(std::string_view key, const std::string& reason) const {
   Throw(state_->origin, PathOf(key), reason);
 }
+
+void Reader::Warn(std::string_view key, const std::string& reason) const {
+  state_->warnings.push_back(Message(state_->origin, PathOf(key), reason));
+}
+
+std::vector<std::string> Reader::Warnings() const { return state_->warnings; }
 
 const Value* Reader::Child(std::string_view key) const {
   if (node_ == nullptr) return nullptr;

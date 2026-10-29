@@ -19,5 +19,5 @@ mux:
   width: 1280
   height: 720
 
-# 推理链：每项 {name, plugin, config_path, properties}，按顺序串接。
+# 推理链：每项 {name, plugin, config_file, properties}，按顺序串接。
 inference: []
