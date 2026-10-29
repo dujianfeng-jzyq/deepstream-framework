@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 
 from dsf_deploy import layout, project
-from dsf_deploy.envfile import DeployError
+from dsf_deploy.errors import DeployError
 
 ROOT = Path(__file__).resolve().parents[3]
 

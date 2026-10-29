@@ -91,7 +91,7 @@ class FakeDocker(Docker):
     def _record(self, *argv: str) -> None:
         self.calls.append(list(argv))
         if self.fail_on and self.fail_on in " ".join(argv):
-            from dsf_deploy.envfile import DeployError
+            from dsf_deploy.errors import DeployError
             raise DeployError(f"simulated failure: {' '.join(argv)}")
 
     def image_exists(self, image):

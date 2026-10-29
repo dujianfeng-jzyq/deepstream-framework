@@ -22,10 +22,7 @@ struct App {
     __IDENT__::BuildGraph(config, assembly.graph());
     dsf::ds::SourceRegistry sources;
     for (const auto& source : config.sources) sources.Add(source.id);
-    dsf::ds::MetaTap::Options options;
-    options.element = __IDENT__::kMetaTap;
-    options.width = config.mux.width;
-    options.height = config.mux.height;
+    const auto options = dsf::ds::MetaTap::Options::ForMux(__IDENT__::kMetaTap, config.mux);
     auto& tap = assembly.Add<dsf::ds::MetaTap>(options, sources);
     // 业务逻辑从这里开始：BatchRecord 是纯数据，可以复制到其他线程处理。
     tap.OnBatch([](const dsf::ds::BatchRecord& batch) {

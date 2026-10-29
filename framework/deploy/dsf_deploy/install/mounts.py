@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from .. import layout
-from ..envfile import DeployError
+from ..errors import DeployError
 
 ENGINE_BUILDER = "model-engine-builder"
 

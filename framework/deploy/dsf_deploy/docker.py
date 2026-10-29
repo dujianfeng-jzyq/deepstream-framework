@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .envfile import DeployError
+from .errors import DeployError
 
 # 安装时 Compose 文件只由安装目录的 .env 决定，调用 shell 中的这些变量会让预检与执行看到不同的定义。
 COMPOSE_SELECTORS = ("COMPOSE_FILE", "COMPOSE_ENV_FILES", "COMPOSE_DISABLE_ENV_FILE",

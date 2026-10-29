@@ -23,7 +23,7 @@ from typing import Callable
 
 from .. import envfile, inventory, layout, naming, pack, render, site
 from ..docker import Docker
-from ..envfile import DeployError
+from ..errors import DeployError
 from . import mounts, targets
 
 
@@ -208,7 +208,7 @@ def _render_in_stage(stage: Path, profile: str, base_image: str, docker: Docker,
                      loaded: set[str]) -> None:
     """优先在宿主渲染；宿主没有 PyYAML 时在 base 镜像中渲染。"""
     if _host_has_yaml():
-        render.write_plan(stage, render.build_plan(stage, profile))
+        render.render(stage, profile, quiet=True)
         return
     _run_deploy_tool(stage, ["render", "--profile", profile, "--quiet"], base_image, docker,
                      writable=True, package_root=package_root, loaded=loaded)

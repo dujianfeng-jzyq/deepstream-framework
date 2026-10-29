@@ -89,13 +89,9 @@ struct ExampleApp {
       by_source[static_cast<std::size_t>(slot.source)].push_back(&recorder);
     }
 
-    dsf::ds::MetaTap::Options options;
-    options.element = example_app::kMetaTap;
-    options.width = config.mux.width;
-    options.height = config.mux.height;
+    auto options = dsf::ds::MetaTap::Options::ForMux(example_app::kMetaTap, config.mux);
     options.analytics = config.analytics.enabled;
     options.image = config.redis.image;  // 默认对有目标的帧编码
-    options.gpu_id = config.mux.gpu_id;
     auto& tap = assembly.Add<dsf::ds::MetaTap>(options, sources);
     if (!config.inference.empty()) {
       const bool only_on_detection = config.redis.only_on_detection;

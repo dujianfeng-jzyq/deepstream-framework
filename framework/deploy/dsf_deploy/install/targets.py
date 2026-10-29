@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .. import layout
-from ..envfile import DeployError
+from ..errors import DeployError
 
 CONTROL_FILES = (layout.ENV, layout.SITE_ENV, layout.PROJECT_ENV, layout.RELEASE_ENV, layout.MANAGED,
                  layout.COMPOSE_ROOT, layout.SITE_FIELDS)

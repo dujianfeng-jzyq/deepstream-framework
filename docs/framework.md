@@ -177,7 +177,8 @@ class Component {
 ## 6. 元数据（需要 SDK）
 
 ```cpp
-auto& tap = assembly.Add<dsf::ds::MetaTap>(options, sources);   // options.element = AddMetaTap 的名字
+auto options = dsf::ds::MetaTap::Options::ForMux("meta", mux);  // AddMetaTap 的名字；框坐标空间与 GPU 取自 mux
+auto& tap = assembly.Add<dsf::ds::MetaTap>(options, sources);
 tap.OnBatch([&](const dsf::ds::BatchRecord& batch) { ... });    // 媒体线程，必须快
 tap.OnBatchAsync([&](const dsf::ds::BatchRecord& batch) { ... }, 64);  // 工作线程，队列满时丢弃并计数
 tap.AddObjectExtractor([](const NvDsObjectMeta& meta, dsf::ds::ObjectRecord& out) {
@@ -189,7 +190,6 @@ tap.AddObjectExtractor([](const NvDsObjectMeta& meta, dsf::ds::ObjectRecord& out
 
 ```cpp
 options.image = dsf::ds::ImageSpec::Read(reader.Section("image"));   // enabled quality width height properties
-options.gpu_id = mux.gpu_id;
 dsf::ds::AddMetaTap(graph, tail, "meta", options.image);             // 同一个 ImageSpec：在采集点前插入 queue
 tap.SetImageFilter([](const dsf::ds::FrameRecord& f) { return !f.objects.empty(); });  // 可选，默认即此规则
 ```

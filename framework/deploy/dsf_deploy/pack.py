@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import envfile, inventory, layout, naming, render
 from .docker import Docker
-from .envfile import DeployError
+from .errors import DeployError
 
 NON_DEPENDENCY_IMAGES = ("DEEPSTREAM_IMAGE", "BASE_IMAGE", "APPS_IMAGE")
 PACKAGE_FORMAT = "1"

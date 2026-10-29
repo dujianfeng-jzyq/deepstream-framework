@@ -13,7 +13,8 @@ from unittest import mock
 
 from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
 from dsf_deploy import cli, inventory, layout, naming, pack, render, site
-from dsf_deploy.envfile import DeployError, read, unquote_answer
+from dsf_deploy.envfile import read, unquote_answer
+from dsf_deploy.errors import DeployError
 from dsf_deploy.install import Options, install, preflight, ready
 from dsf_deploy.install.apply import apply
 
@@ -125,7 +126,7 @@ class PackInstallTest(ProjectTestCase):
         git("init", "-q")
         git("add", "-A")
         git("commit", "-q", "-m", "initial")
-        revision = render.source_revision(self.root)
+        revision = naming.source_revision(self.root)
         self.assertRegex(revision, r"^[0-9a-f]{12}$")
         with self.assertRaisesRegex(DeployError, "built from source \\(unknown\\) but the source is now"):
             self.pack()  # 镜像没有记录版本：可能是旧构建

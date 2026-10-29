@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from . import layout
-from .envfile import DeployError
+from .errors import DeployError
 
 NAME = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
 TEMPLATES = Path(__file__).resolve().parents[2] / "templates"

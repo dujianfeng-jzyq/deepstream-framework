@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import envfile
-from .envfile import DeployError
+from .errors import DeployError
 
 SECRET_MARKERS = ("PASSWORD", "PASSWD", "TOKEN", "SECRET")
 CLEAR = "CLEAR"  # 提问时输入它把可留空的字段清空

@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from . import layout
-from .envfile import DeployError
+from .errors import DeployError
 
 # 安装目录中不由清单管理的发布包内容。
 UNMANAGED_PREFIXES = ("images/",)

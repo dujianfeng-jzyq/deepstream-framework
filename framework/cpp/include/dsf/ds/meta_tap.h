@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gst/gst.h>
@@ -50,6 +51,16 @@ class MetaTap : public gst::Component {
     bool analytics = false;   // 采集 nvdsanalytics 结果（帧级计数与目标状态）
     ImageSpec image;          // 整帧图片编码；默认关闭
     int gpu_id = 0;           // 编码使用的 GPU（与 mux 的 gpu_id 一致）
+
+    // 采集点接在 mux 之后时的选项：框坐标空间与编码 GPU 取自 mux，不必逐项抄写。
+    static Options ForMux(std::string element, const MuxSpec& mux) {
+      Options options;
+      options.element = std::move(element);
+      options.width = mux.width;
+      options.height = mux.height;
+      options.gpu_id = mux.gpu_id;
+      return options;
+    }
   };
 
   MetaTap(Options options, SourceRegistry sources);

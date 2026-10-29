@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import pack, project, render
-from .envfile import DeployError
+from .errors import DeployError
 from .install import Options, install
 
 
@@ -63,8 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "pack":
             pack.pack(_root(args.root), args.profile, args.with_base)
         elif args.command == "install":
-            install(Options(Path(args.package), args.install_dir, args.profile, args.ask,
-                            args.clean_install, args.dry_run, args.ready_timeout))
+            install(Options(package=Path(args.package), install_dir=args.install_dir, profile=args.profile,
+                            ask=args.ask, clean=args.clean_install, dry_run=args.dry_run,
+                            ready_timeout=args.ready_timeout))
         elif args.command == "init":
             root = _root(args.root)
             project.init_project(root, args.name, args.data_path)

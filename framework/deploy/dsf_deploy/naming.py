@@ -1,12 +1,15 @@
-"""镜像、发布包与平台的命名规则。名称只在这里派生，Compose 与安装器只消费结果。"""
+"""镜像、发布包与平台的命名规则，以及镜像标签中记录的源码版本。名称只在这里派生，
+Compose 与安装器只消费结果。"""
 
 from __future__ import annotations
 
 import hashlib
 import platform
 import re
+import subprocess
+from pathlib import Path
 
-from .envfile import DeployError
+from .errors import DeployError
 
 _VERSION = re.compile(r"^\d+(\.\d+)*$")
 _ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
@@ -39,6 +42,21 @@ def image_names(project: str, ds_version: str, apps_version: str, base_version: 
         "BASE_IMAGE": f"{project}/deepstream{segment}-base:{base_version}-{base_digest}",
         "APPS_IMAGE": f"{project}/deepstream{segment}-apps:{apps_version}",
     }
+
+
+def source_revision(root: Path) -> str:
+    """源码版本：git 提交号，工作区有未提交的改动（含未跟踪文件）时加 -dirty；不是 git 仓库返回空串。
+    构建时写进 apps 镜像的标签，打包时与当前源码比对，防止发布与源码不符的旧镜像。"""
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise OSError(result.stderr.strip())
+        return result.stdout.strip()
+    try:
+        revision = git("rev-parse", "--short=12", "HEAD")
+        return revision + ("-dirty" if git("status", "--porcelain") else "")
+    except OSError:  # 没有 git，或不是仓库（例如发布包、构建上下文中的副本）
+        return ""
 
 
 def package_name(project: str, apps_version: str, ds_version: str) -> str:

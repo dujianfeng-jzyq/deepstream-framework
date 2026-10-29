@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from ..docker import Docker
-from ..envfile import DeployError
+from ..errors import DeployError
 
 LOG_TAIL = 200          # 失败时读取每个未就绪服务的最近日志行数
 NOTABLE_LINES = 3       # 从中摘出的告警与错误条数

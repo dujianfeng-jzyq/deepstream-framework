@@ -3,7 +3,7 @@
 import io
 import os
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 from pathlib import Path
 
@@ -11,7 +11,8 @@ from deploy_support import IMAGE_BUILD, PROFILE, ProjectTestCase, docker_cli_ava
 from dsf import yamlio
 from dsf_deploy import layout, naming, render, site
 from dsf_deploy.docker import Docker
-from dsf_deploy.envfile import DeployError, parse, quote_compose, read_compose, unquote_compose
+from dsf_deploy.envfile import parse, quote_compose, read_compose, unquote_compose
+from dsf_deploy.errors import DeployError
 
 
 class RenderTest(ProjectTestCase):
@@ -59,7 +60,8 @@ class RenderTest(ProjectTestCase):
         with self.assertRaisesRegex(DeployError, "unknown files"):
             self.plan()
         profile.write_text(IMAGE_BUILD + "  PROJECT_NAME: other\n")
-        self.assertEqual(self.plan().variables["PROJECT_NAME"], "demo")  # 身份不可覆盖
+        with self.assertRaisesRegex(DeployError, "x-build cannot set PROJECT_NAME"):  # 身份不可覆盖
+            self.plan()
 
     def test_network_mode_covers_every_service(self):
         profile = self.root / "profiles/test.yaml"
@@ -214,9 +216,14 @@ class RenderTest(ProjectTestCase):
                        "DEEPSTREAM_IMAGE=nvcr.io/nvidia/deepstream:8.0-samples-multiarch\n")  # 来自 release.env
         profile = self.root / "profiles/test.yaml"
         profile.write_text("x-build:\n  DEEPSTREAM_IMAGE: other:7.1\n")
-        values = self.plan().variables
-        self.assertEqual(values["BASE_IMAGE"], "demo/base:fixed")
-        self.assertEqual(values["DEEPSTREAM_IMAGE"], "nvcr.io/nvidia/deepstream:8.0-samples-multiarch")
+        plan = self.plan()
+        self.assertEqual(plan.variables["BASE_IMAGE"], "demo/base:fixed")
+        self.assertEqual(plan.variables["DEEPSTREAM_IMAGE"], "nvcr.io/nvidia/deepstream:8.0-samples-multiarch")
+        # 计算渲染计划不输出任何东西：提示随计划返回，由 render() 输出（安装器同样经过它）。
+        self.assertEqual(plan.notes, ["images come from the release package; ignoring x-build DEEPSTREAM_IMAGE"])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            render.render(self.root, "test", quiet=True)
+        self.assertIn("note: images come from the release package", errors.getvalue())
 
     def test_write_replaces_outputs_and_reports_stale_files(self):
         stale = self.root / "generated/config/old.yaml"
