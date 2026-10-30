@@ -106,7 +106,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 `model-engine-builder` 运行 `tools/prepare_model_engines.py --models-path /models`：
 
 - 扫描 `*.txt`，`[property]` 段同时含 `onnx-file` 与 `model-engine-file` 的就是待构建配置；输出路径完全遵循 `model-engine-file`（相对路径以配置目录为基准）。业务服务只读加载，nvinfer 不会把 engine 写到配置指定的路径，因此必须预构建。
-- 计算能力先由 `nvidia-smi` 查询，不支持该查询时（例如部分 Jetson）经 `libcuda` 的驱动 API 读取，两者格式相同；都读不到时失败，`--compute-cap` 可显式指定。
+- 计算能力经 `libcuda` 的驱动 API 读取（NVIDIA runtime 在 x86 与 Jetson 上都提供），设备编号与 `trtexec --device`、nvinfer 的 `gpu-id` 一致；TensorRT 版本与每块 GPU 的计算能力每次运行只探测一次，在任何构建之前完成。读不到时失败，`--compute-cap` 可显式指定。
 - 指纹记录 ONNX 哈希、TensorRT 版本、GPU 计算能力、`network-mode`/`batch-size`/`int8-calib-file`、trtexec 参数，以及 engine 自身的哈希；engine 非空且指纹完全一致才复用，二者不配套时一定重建。
 - `network-mode=2` 自动加 `--fp16`，`=1` 加 `--int8`（有校准文件时加 `--calib`）。其他参数写在配置旁的 `<配置名>.trtexec`（例如动态形状），计入指纹。
 - 同一 engine 的检查与构建用文件锁串行化；构建写到同目录临时文件，成功后原子替换，失败保留旧 engine。

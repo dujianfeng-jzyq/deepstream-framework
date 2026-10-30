@@ -199,31 +199,17 @@ class ComputeCapabilityTest(unittest.TestCase):
     def setUp(self):
         self.tool = load_tool()
 
-    def smi(self, stdout: str, returncode: int = 0):
-        return mock.patch.object(self.tool.subprocess, "run", return_value=subprocess.CompletedProcess(
-            [], returncode, stdout=stdout, stderr=""))
-
-    def test_nvidia_smi_answer_is_used_first(self):
-        with self.smi("8.9\n"), mock.patch.object(self.tool.ctypes, "CDLL", side_effect=AssertionError):
-            self.assertEqual(self.tool.compute_capability(0), "8.9")
-
-    def test_falls_back_to_libcuda_when_the_query_is_unsupported(self):
-        # 不支持查询的平台可能成功退出却输出占位符；它不能进入指纹。
-        for stdout, code in (("[N/A]\n", 0), ("", 6)):
-            with self.subTest(stdout=stdout), self.smi(stdout, code), \
-                    mock.patch.object(self.tool.ctypes, "CDLL", return_value=FakeCuda(8, 7)):
-                self.assertEqual(self.tool.compute_capability(0), "8.7")
-        with mock.patch.object(self.tool.subprocess, "run", side_effect=FileNotFoundError), \
-                mock.patch.object(self.tool.ctypes, "CDLL", return_value=FakeCuda(8, 7)):
+    def test_reads_the_driver_api(self):
+        with mock.patch.object(self.tool.ctypes, "CDLL", return_value=FakeCuda(8, 7)):
             self.assertEqual(self.tool.compute_capability(0), "8.7")
 
-    def test_fails_when_neither_source_answers(self):
+    def test_fails_when_the_driver_cannot_answer(self):
         for cuda in (OSError("libcuda.so.1: cannot open"), FakeCuda(8, 7, init_result=100)):
-            with self.subTest(cuda=cuda), self.smi("[N/A]\n"), \
+            with self.subTest(cuda=cuda), \
                     mock.patch.object(self.tool.ctypes, "CDLL",
                                       side_effect=cuda if isinstance(cuda, Exception) else None,
                                       return_value=cuda):
-                with self.assertRaisesRegex(self.tool.Failure, "nvidia-smi or libcuda"):
+                with self.assertRaisesRegex(self.tool.Failure, "libcuda"):
                     self.tool.compute_capability(0)
 
 

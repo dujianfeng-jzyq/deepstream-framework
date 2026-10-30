@@ -39,7 +39,6 @@ PRODUCT_PROPERTIES = ("network-mode", "batch-size", "int8-calib-file")
 # 只决定用哪块卡构建、不影响产物的参数；计算能力已单独计入指纹。
 IGNORED_ARG_PREFIXES = ("--device",)
 TRT_VERSION = re.compile(r"TensorRT\s+v(\d+)")
-COMPUTE_CAP = re.compile(r"^\d+\.\d+$")
 # CUDA 驱动 API 的 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR / _MINOR。
 CU_CC_MAJOR, CU_CC_MINOR = 75, 76
 
@@ -91,6 +90,10 @@ class ModelConfig:
     @property
     def buildable(self) -> bool:
         return bool(self.properties.get("onnx-file") and self.properties.get("model-engine-file"))
+
+    @property
+    def gpu_id(self) -> int:
+        return int(self.properties.get("gpu-id") or "0")
 
     def resolve(self, key: str) -> Path:
         value = Path(self.properties[key])
@@ -161,40 +164,22 @@ def trt_version(trtexec: Path) -> str:
     return f"trt{match.group(1)}"
 
 
-def _smi_compute_capability(device: int) -> str | None:
-    try:
-        result = subprocess.run(["nvidia-smi", f"--id={device}", "--query-gpu=compute_cap",
-                                 "--format=csv,noheader"], capture_output=True, text=True, check=False)
-    except OSError:
-        return None
-    lines = result.stdout.strip().splitlines()
-    value = lines[0].strip() if result.returncode == 0 and lines else ""
-    # 不支持该查询的平台可能输出 [N/A] 之类的占位符，不能进入指纹。
-    return value if COMPUTE_CAP.match(value) else None
-
-
-def _cuda_compute_capability(device: int) -> str | None:
-    """经 CUDA 驱动 API 读取：NVIDIA runtime 在容器中提供 libcuda，Jetson 的 nvidia-smi 不一定支持查询。"""
+def compute_capability(device: int) -> str:
+    """经 CUDA 驱动 API 读取（例如 8.9）。NVIDIA runtime 在 x86 与 Jetson 的容器中都提供 libcuda，
+    trtexec 本身也依赖它；设备编号与 trtexec --device、nvinfer gpu-id 一样按 CUDA 的顺序
+    （受 CUDA_VISIBLE_DEVICES 影响），nvidia-smi --id 按 PCI 顺序，多卡时可能指向另一块卡。"""
     try:
         cuda = ctypes.CDLL("libcuda.so.1")
-    except OSError:
-        return None
+    except OSError as error:
+        raise Failure(f"cannot load libcuda to read the compute capability of GPU {device}: {error}; "
+                      "the builder needs a GPU (runtime: nvidia)") from error
     handle, major, minor = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
-    if cuda.cuInit(0) != 0 or cuda.cuDeviceGet(ctypes.byref(handle), device) != 0:
-        return None
-    if cuda.cuDeviceGetAttribute(ctypes.byref(major), CU_CC_MAJOR, handle) != 0 or \
+    if cuda.cuInit(0) != 0 or cuda.cuDeviceGet(ctypes.byref(handle), device) != 0 or \
+            cuda.cuDeviceGetAttribute(ctypes.byref(major), CU_CC_MAJOR, handle) != 0 or \
             cuda.cuDeviceGetAttribute(ctypes.byref(minor), CU_CC_MINOR, handle) != 0:
-        return None
-    return f"{major.value}.{minor.value}"
-
-
-def compute_capability(device: int) -> str:
-    """先问 nvidia-smi，失败再问驱动；两者给出的格式相同（例如 8.9），指纹不随来源变化。"""
-    value = _smi_compute_capability(device) or _cuda_compute_capability(device)
-    if value is None:
-        raise Failure(f"cannot read the compute capability of GPU {device} from nvidia-smi or libcuda; "
+        raise Failure(f"cannot read the compute capability of GPU {device} from libcuda; "
                       "the builder needs a GPU (runtime: nvidia)")
-    return value
+    return f"{major.value}.{minor.value}"
 
 
 def build_args(config: ModelConfig, extra: list[str]) -> list[str]:
@@ -261,18 +246,17 @@ def engine_lock(engine: Path):
             fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def prepare(config: ModelConfig, trtexec: Path, extra: list[str], capability_override: str | None,
+def prepare(config: ModelConfig, trtexec: Path, trt: str, capability: str, extra: list[str],
             force: bool) -> bool:
-    """返回 True 表示这次构建了新 engine。"""
+    """trt 与 capability 是本次运行探测一次的 TensorRT 版本与该配置所用 GPU 的计算能力。
+    返回 True 表示这次构建了新 engine。"""
     onnx = config.resolve("onnx-file")
     engine = config.resolve("model-engine-file")
     mark = engine.with_name(engine.name + ".fingerprint")
     if not onnx.is_file():
         raise Failure(f"ONNX model not found: {onnx} (from {config.path})")
-    device = int(config.properties.get("gpu-id") or "0")
     args = build_args(config, extra)
-    expected = fingerprint(config, onnx, trt_version(trtexec),
-                           capability_override or compute_capability(device), args)
+    expected = fingerprint(config, onnx, trt, capability, args)
 
     with engine_lock(engine):
         if not force and ready(engine, mark, expected):
@@ -287,7 +271,7 @@ def prepare(config: ModelConfig, trtexec: Path, extra: list[str], capability_ove
             raise Failure(f"cannot write next to {engine}: {error} (is the mount writable?)") from error
         temporary = Path(name)
         try:
-            command = [str(trtexec), f"--onnx={onnx}", f"--saveEngine={temporary}", f"--device={device}", *args]
+            command = [str(trtexec), f"--onnx={onnx}", f"--saveEngine={temporary}", f"--device={config.gpu_id}", *args]
             log("run: " + shlex.join(command))
             if subprocess.run(command, check=False).returncode != 0:
                 raise Failure(f"trtexec failed for {config.path}; the previous engine is kept")
@@ -332,7 +316,11 @@ def main(argv: list[str] | None = None) -> int:
             log("no buildable nvinfer config found; nothing to do")
             return 0
         extra = [*shlex.split(os.environ.get("TRTEXEC_ARGS", "")), *args.trtexec_arg]
-        built = sum(prepare(c, trtexec, extra, args.compute_cap, args.force) for c in configs)
+        # 构建输入在一次运行中不变：每个 GPU 只探测一次，探测失败时尚未开始任何构建。
+        trt = trt_version(trtexec)
+        capabilities = {device: args.compute_cap or compute_capability(device)
+                        for device in sorted({c.gpu_id for c in configs})}
+        built = sum(prepare(c, trtexec, trt, capabilities[c.gpu_id], extra, args.force) for c in configs)
         log(f"done: built={built} reused={len(configs) - built}")
         return 0
     except Failure as error:

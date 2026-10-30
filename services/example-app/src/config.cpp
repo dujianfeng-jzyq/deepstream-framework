@@ -105,24 +105,20 @@ Config Load(Reader& root) {
   if (config.redis.image.enabled && config.inference.empty()) {
     root.Fail("redis.image.enabled", "requires at least one inference entry (images are taken on detections)");
   }
-  if (config.rtsp_out.enabled && config.rtsp_out.url.empty()) {
-    root.Fail("rtsp_out.url", "is required when rtsp_out is enabled");
-  }
   // 口令来自现场参数 MEDIAMTX_PUBLISH_PASSWORD，与 MediaMTX 共用：在预检中拦下它不接受的字符，
   // 而不是停服之后 MediaMTX 无法启动。
   if (config.rtsp_out.password.find_first_not_of(kMediaMtxCredential) != std::string::npos) {
     root.Fail("rtsp_out.password", "MediaMTX accepts only letters, digits and !$()*+.;<=>[]^_-@#&");
   }
-  // 推流路径来自 CAMERA_ID（模板中为 ${CAMERA_ID}-out）。中文或空格的相机编号能通过源 id 的检查，
-  // 推流却在启动时被 MediaMTX 拒绝：启动失败、容器重启、再失败，检测与录像都不会运行。
   if (config.rtsp_out.enabled) {
+    if (config.rtsp_out.url.empty()) root.Fail("rtsp_out.url", "is required when rtsp_out is enabled");
+    // 推流路径来自 CAMERA_ID（模板中为 ${CAMERA_ID}-out）。中文或空格的相机编号能通过源 id 的检查，
+    // 推流却在启动时被 MediaMTX 拒绝：启动失败、容器重启、再失败，检测与录像都不会运行。
     const std::string path = UrlPath(config.rtsp_out.url);
     if (path.empty() || path.find_first_not_of(kMediaMtxPath) != std::string::npos) {
       root.Fail("rtsp_out.url", "path '" + path + "' is not a valid MediaMTX path: use only letters, digits "
                 "and _.~-/: (the path usually comes from CAMERA_ID)");
     }
-  }
-  if (config.rtsp_out.enabled) {
     try {
       (void)PublishUrl(config.rtsp_out.url, config.rtsp_out.password);
     } catch (const std::invalid_argument& error) {
