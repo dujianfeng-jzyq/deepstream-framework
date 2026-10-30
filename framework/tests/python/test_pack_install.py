@@ -554,8 +554,8 @@ class ProfileChoiceTest(ProjectTestCase):
     def setUp(self):
         super().setUp()
         profiles = self.root / "profiles"
-        (profiles / "server.yaml").write_text("# profile：服务器\nx-platform: amd64\n")
-        (profiles / "jetson.yaml").write_text("# profile：Jetson\nx-platform: arm64\n")
+        (profiles / "server.yaml").write_text("# 服务器\nx-platform: amd64\n")
+        (profiles / "jetson.yaml").write_text("# Jetson\nx-platform: arm64\n")
         self.release = {"TARGET_PLATFORM": "arm64", "CONFIG_PROFILE": "jetson"}
         self.install_dir = self.tmp / "installed"
         self.install_dir.mkdir()

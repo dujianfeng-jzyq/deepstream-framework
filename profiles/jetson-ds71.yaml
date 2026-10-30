@@ -1,4 +1,4 @@
-# profile：Jetson（JetPack 6.1+），DeepStream 7.1，host 网络
+# Jetson（JetPack 6.1+），DeepStream 7.1，host 网络
 # host 网络让本方案不依赖 Docker bridge（部分 Jetson 内核缺少它所需的模块）；宿主的 Docker 配置见
 # docs/deployment.md。镜像须为 arm64：在 arm64 机器上构建，用 build-release.sh --with-base 打包。
 # Orin Nano 没有硬件编码器（NVENC）：在它上面关闭应用配置中的 rtsp_out 与录像。

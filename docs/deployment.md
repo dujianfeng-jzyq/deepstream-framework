@@ -98,7 +98,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 
 - 变量优先级：清单默认值 < `project.env` < `x-build` < `site.env`。显式的空答案只在可空字段上接受，且不回退到默认值。交互安装的提问默认值同样含 `project.env` 与所选 profile 的 `x-build`，回车保存的答案不会遮住 profile 的设置。
 - 模板中的 `${VAR}` 必须有定义；`x-app-<type>: {<文件名>: {...}}` 在替换后深合并（映射递归，列表与标量整体替换）。
-- profile 顶层只接受 `services`、`x-platform`、`x-build`、`x-network-mode`、`x-app-*`；`PROJECT_NAME` 不能被覆盖；现场参数不能占用身份、版本、镜像、挂载点等保留键。
+- profile 的第一行注释是它的说明，安装与渲染列出可选 profile 时原样显示。profile 顶层只接受 `services`、`x-platform`、`x-build`、`x-network-mode`、`x-app-*`；`PROJECT_NAME` 不能被覆盖；现场参数不能占用身份、版本、镜像、挂载点等保留键。
 - `x-platform: amd64|arm64`（可选）声明 profile 面向的平台。打包时镜像必须是这个平台；安装时只列出与发布包平台相符的 profile，`--profile` 不相符时在停服前失败；已安装的 profile 不在新包中或与平台不符时重新选择（非交互时用包内建议），例如 profile 改名后的升级。profile 的 `x-build` 带有 `DEEPSTREAM_IMAGE` 时，它的 DeepStream 版本也必须与发布包一致。本项目的 `project.env` 不设 `DEEPSTREAM_IMAGE` 默认值，每个 profile 必须写明（缺少时渲染报错），所以安装时总会核对版本；框架仍接受 `project.env` 中的默认值，派生项目用它时，没有写明镜像的 profile 不核对版本。
 - 渲染器派生 `DEEPSTREAM_VERSION`、`BASE_IMAGE`、`APPS_IMAGE`、挂载点、`HOST_UID/HOST_GID`、`CONFIG_PROFILE`、`COMPOSE_FILE`；`project.env` 中带有镜像名时（发布包安装）沿用包中的镜像名。
 - `x-network-mode: <mode>` 给所有未显式声明 `network_mode` 的服务（包括框架服务与以后新增的单元）设置该值，写入 `generated/network.compose.yaml`；显式声明的（如 `deepstream-apps` 的 `none`）保持不变，声明了 `networks` 的服务报错。模式为 `host` 时同时给这些服务加 `extra_hosts`，把每个服务名指向 `127.0.0.1`，服务之间照常用服务名访问；声明了 `ports` 的服务用 `ports: !reset []` 清空映射（host 网络下映射无效，Docker 会告警 “Published ports are discarded”），这需要 Docker Compose 2.24.4+。只要有一个服务留在默认网络，Compose 就会创建 bridge 网络，所以不要在 `services` 中逐个设置。

@@ -51,14 +51,13 @@ class Plan:
 
 
 def list_profiles(root: Path) -> list[tuple[str, str]]:
-    """profile 名与其第一行注释（去掉“profile：”前缀）。"""
+    """profile 名与其说明：文件中第一行注释的全文。"""
     result = []
     for path in sorted((root / layout.PROFILES).glob("*.yaml")):
         summary = ""
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip().startswith("#"):
                 summary = line.strip().lstrip("#").strip()
-                summary = summary.split("：", 1)[1].strip() if summary.startswith("profile：") else summary
                 break
         result.append((path.stem, summary))
     return result

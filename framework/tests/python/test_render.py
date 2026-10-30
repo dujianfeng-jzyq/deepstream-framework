@@ -197,8 +197,8 @@ class RenderTest(ProjectTestCase):
 
     def test_fitting_profiles_read_the_platform_without_yaml(self):
         profiles = self.root / "profiles"
-        (profiles / "a.yaml").write_text("# profile：甲\nx-platform: amd64\n")
-        (profiles / "b.yaml").write_text("# profile：乙\nx-platform: 'arm64'  # Jetson\nservices: {}\n")
+        (profiles / "a.yaml").write_text("# 甲\nx-platform: amd64\n")
+        (profiles / "b.yaml").write_text("# 乙\nx-platform: 'arm64'  # Jetson\nservices: {}\n")
         # 安装宿主可能没有 PyYAML：列出可选 profile 时不能解析 YAML。
         with mock.patch.object(render, "_yaml", side_effect=AssertionError("parsed YAML")):
             self.assertEqual(render.fitting_profiles(self.root, "amd64"), [("a", "甲"), ("test", "测试方案")])
