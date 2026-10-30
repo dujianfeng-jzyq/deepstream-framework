@@ -259,9 +259,9 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
     """计算全部渲染结果，不写文件。"""
     profile_name = selected_profile(root, requested_profile)
     profile = _load_profile(root, profile_name)
-    variables, notes = _resolve_variables(root, profile_name, profile)
+    variables, notes, released = _resolve_variables(root, profile_name, profile)
     files = _render_templates(root, profile_name, profile, variables)
-    compose_files = _compose_files(root, profile_name, profile, files)
+    compose_files = _compose_files(root, profile_name, profile, released, files)
     variables["CONFIG_PROFILE"] = profile_name
     variables["COMPOSE_FILE"] = ":".join(compose_files)
     # Compose 按自己的 dotenv 规则读取 .env：值一律加引号，现场口令中的 $、#、引号保持原样。
@@ -270,8 +270,10 @@ def build_plan(root: Path, requested_profile: str | None = None) -> Plan:
     return Plan(profile_name, variables, files, notes)
 
 
-def _resolve_variables(root: Path, profile_name: str, profile: dict) -> tuple[dict[str, str], list[str]]:
-    """按优先级合并变量（见模块说明），派生镜像名与固定挂载点。返回变量与给用户的提示。"""
+def _resolve_variables(root: Path, profile_name: str,
+                       profile: dict) -> tuple[dict[str, str], list[str], bool]:
+    """按优先级合并变量（见模块说明），派生镜像名与固定挂载点。返回变量、给用户的提示，
+    以及这是否是发布包派生的安装。"""
     variables = envfile.read(root / layout.PROJECT_ENV)
     envfile.require(variables, "PROJECT_NAME", layout.PROJECT_ENV)
     # project.env 带有镜像名，说明这是发布包派生的安装：镜像由包决定，不再重新派生。
@@ -298,7 +300,7 @@ def _resolve_variables(root: Path, profile_name: str, profile: dict) -> tuple[di
     # 业务容器以渲染用户运行，写进数据目录的文件归现场用户所有。
     variables["HOST_UID"] = str(os.getuid())
     variables["HOST_GID"] = str(os.getgid())
-    return variables, notes
+    return variables, notes, released
 
 
 def _require_fitting(root: Path, profile_name: str, profile: dict, platform: str, ds_version: str) -> None:
@@ -362,9 +364,12 @@ def _render_templates(root: Path, profile_name: str, profile: dict, variables: d
     return files
 
 
-def _compose_files(root: Path, profile_name: str, profile: dict, files: dict[str, str]) -> list[str]:
-    """COMPOSE_FILE 的顺序：根定义、各单元、profile；有 x-network-mode 时最后加生成的网络覆盖（写入 files）。"""
-    compose_files = [layout.COMPOSE_ROOT]
+def _compose_files(root: Path, profile_name: str, profile: dict, released: bool,
+                   files: dict[str, str]) -> list[str]:
+    """COMPOSE_FILE 的顺序：根定义、构建定义（只在开发机）、各单元、profile；有 x-network-mode 时
+    最后加生成的网络覆盖（写入 files）。安装的项目没有构建定义：镜像只来自发布包，任何 Compose
+    命令都不会尝试构建（包中也没有 Dockerfile）。"""
+    compose_files = [layout.COMPOSE_ROOT] + ([] if released else [layout.BUILD_COMPOSE])
     compose_files += [str(unit.relative_to(root) / layout.UNIT_COMPOSE) for unit in units(root)]
     compose_files.append(f"{layout.PROFILES}/{profile_name}.yaml")
     mode = profile.get("x-network-mode")

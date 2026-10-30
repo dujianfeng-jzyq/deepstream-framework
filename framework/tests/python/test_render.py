@@ -31,7 +31,7 @@ class RenderTest(ProjectTestCase):
         self.assertEqual(values["CONTAINER_DATA_PATH"], "/data")
         self.assertEqual(values["HOST_UID"], str(os.getuid()))
         self.assertEqual(values["COMPOSE_FILE"],
-                         "docker-compose.yaml:services/app/compose.yaml:profiles/test.yaml")
+                         f"docker-compose.yaml:{layout.BUILD_COMPOSE}:services/app/compose.yaml:profiles/test.yaml")
 
     def test_templates_are_substituted_and_overridden(self):
         content = self.plan().files["generated/config/app.yaml"]
@@ -221,6 +221,8 @@ class RenderTest(ProjectTestCase):
         self.assertEqual(plan.variables["DEEPSTREAM_IMAGE"], "nvcr.io/nvidia/deepstream:8.0-samples-multiarch")
         # 计算渲染计划不输出任何东西：提示随计划返回，由 render() 输出（安装器同样经过它）。
         self.assertEqual(plan.notes, ["images come from the release package; ignoring x-build DEEPSTREAM_IMAGE"])
+        # 安装的项目没有构建定义：镜像只来自发布包。
+        self.assertEqual(plan.variables["COMPOSE_FILE"], "docker-compose.yaml:services/app/compose.yaml:profiles/test.yaml")
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
             render.render(self.root, "test", quiet=True)
         self.assertIn("note: images come from the release package", errors.getvalue())

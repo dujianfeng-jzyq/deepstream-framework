@@ -28,6 +28,7 @@ class ProfilesTest(unittest.TestCase):
             shutil.copy2(ROOT / layout.PROJECT_ENV, stage / layout.PROJECT_ENV)
             (stage / render.BASE_DOCKERFILE).parent.mkdir(parents=True)
             shutil.copy2(ROOT / render.BASE_DOCKERFILE, stage / render.BASE_DOCKERFILE)
+            shutil.copy2(ROOT / layout.BUILD_COMPOSE, stage / layout.BUILD_COMPOSE)
             for name in profiles:
                 with self.subTest(profile=name):
                     plan = render.build_plan(stage, name)

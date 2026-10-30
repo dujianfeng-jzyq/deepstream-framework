@@ -1,36 +1,20 @@
 # 框架级服务：base 运行环境、载荷播种与 engine 预构建。
-# 服务单元的定义在 services/*/compose.yaml，平台差异在 profiles/<name>.yaml；
-# 渲染器按这个顺序把它们写进 .env 的 COMPOSE_FILE，直接使用 docker compose 即可。
+# 服务单元的定义在 services/*/compose.yaml，平台差异在 profiles/<name>.yaml，镜像的构建定义在
+# framework/docker/build.compose.yaml（只在开发机）；渲染器按顺序把它们写进 .env 的 COMPOSE_FILE，
+# 直接使用 docker compose 即可。
 
 name: ${PROJECT_NAME}
 
 services:
-  # 构建目标与运行时父镜像；启动后立即成功退出，使 `docker compose up -d --build` 可用。
+  # 构建目标与运行时父镜像；启动后立即成功退出，使开发机上 `docker compose up -d --build` 可用。
   deepstream-base:
     image: ${BASE_IMAGE}
-    build:
-      context: .
-      dockerfile: framework/docker/base.Dockerfile
-      args:
-        DEEPSTREAM_IMAGE: ${DEEPSTREAM_IMAGE}
-        BASE_APT_PACKAGES: ${BASE_APT_PACKAGES}
     entrypoint: ["/bin/true"]
     restart: "no"
 
   # 载荷镜像：只向空的 app-files 卷播种程序，然后退出。
-  # additional_contexts 把 FROM ${BASE_IMAGE} 绑定到本次 base 构建结果（构建依赖，不是运行依赖）。
   deepstream-apps:
     image: ${APPS_IMAGE}
-    build:
-      context: .
-      dockerfile: framework/docker/apps.Dockerfile
-      additional_contexts:
-        - "${BASE_IMAGE}=service:deepstream-base"
-      args:
-        BASE_IMAGE: ${BASE_IMAGE}
-        APPS_VERSION: ${APPS_VERSION}
-        PIP_INDEX_URL: ${PIP_INDEX_URL}
-        SOURCE_REVISION: ${SOURCE_REVISION:-}  # 打包时与当前源码比对；发布包的 .env 中没有它
     network_mode: none
     restart: "no"
     volumes:

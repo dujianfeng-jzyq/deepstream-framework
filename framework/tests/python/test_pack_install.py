@@ -91,7 +91,7 @@ class PackInstallTest(ProjectTestCase):
         self.assertIn("services/app/templates/config/app.yaml", files)
         self.assertIn("models/m/deployment/config.txt", files)
         for excluded in ("services/app/src/main.cpp", "models/m/deployment/x.engine", "site.env", ".env",
-                         "generated/config/app.yaml", "framework/docker/base.Dockerfile"):
+                         "generated/config/app.yaml", "framework/docker/base.Dockerfile", layout.BUILD_COMPOSE):
             self.assertNotIn(excluded, files)
         saved = sorted(call[1] for call in self.docker.calls if call[0] == "save")
         self.assertEqual(saved, sorted([self.apps, "redis:7.4.2-alpine"]))  # 依赖镜像按约定收集、缺失时拉取
@@ -158,6 +158,9 @@ class PackInstallTest(ProjectTestCase):
         self.assertIn("services/app/compose.yaml", managed)
         self.assertNotIn("install.sh", managed)
         self.assertTrue(self.data.is_dir())  # 数据目录按最终 Compose 准备
+        # 安装的项目没有构建定义：docker compose run/up 不会尝试构建包中没有的 Dockerfile。
+        services = target.compose_config(root, env_file=root / layout.ENV)["services"]
+        self.assertEqual([name for name, service in services.items() if "build" in service], [])
         # 预检用新载荷、关闭网络执行带标签服务的 --check-config
         check = next(call for call in target.calls if call[0] == "run" and "--check-config" in call)
         self.assertIn("--network", check)

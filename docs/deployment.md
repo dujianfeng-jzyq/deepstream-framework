@@ -29,11 +29,14 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 渲染器把 Compose 文件按顺序写进 `.env` 的 `COMPOSE_FILE`：
 
 ```text
-docker-compose.yaml               框架级：deepstream-base、deepstream-apps（播种）、model-engine-builder
-services/<unit>/compose.yaml      各服务单元（按名称排序）
-profiles/<profile>.yaml           平台差异（设备、用户组、网络）
-generated/network.compose.yaml    仅当 profile 设置 x-network-mode 时生成，排在最后
+docker-compose.yaml                   框架级：deepstream-base、deepstream-apps（播种）、model-engine-builder
+framework/docker/build.compose.yaml   两个镜像的构建定义，只在开发机（project.env 不带镜像名）
+services/<unit>/compose.yaml          各服务单元（按名称排序）
+profiles/<profile>.yaml               平台差异（设备、用户组、网络）
+generated/network.compose.yaml        仅当 profile 设置 x-network-mode 时生成，排在最后
 ```
+
+安装的项目没有构建定义（发布包也不含 Dockerfile）：镜像只来自发布包，`docker compose run`、`up --build` 等命令都不会尝试构建。
 
 | 服务 | 行为 |
 |---|---|

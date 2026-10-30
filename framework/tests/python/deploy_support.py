@@ -189,6 +189,7 @@ class ProjectTestCase(unittest.TestCase):
                             ignore=shutil.ignore_patterns("__pycache__"))
         (self.root / "framework/docker").mkdir(parents=True)
         shutil.copy2(ROOT / "framework/docker/base.Dockerfile", self.root / "framework/docker")
+        shutil.copy2(ROOT / layout.BUILD_COMPOSE, self.root / layout.BUILD_COMPOSE)
         shutil.copy2(ROOT / layout.COMPOSE_ROOT, self.root / layout.COMPOSE_ROOT)
         (self.root / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts/install.sh", self.root / "scripts/install.sh")

@@ -345,7 +345,7 @@ site-fields.env 中的默认值 < project.env < profile 的 x-build < site.env
 
 模板来自 `services/*/templates/<type>/`，渲染到 `generated/<type>/`。未定义的占位符和跨单元同名输出均报错；profile 的 `x-app-<type>` 进行深合并，映射递归合并，列表与标量整体替换。
 
-渲染器先计算并校验完整计划，再替换 `.env` 与 `generated/`。`COMPOSE_FILE` 按根 Compose、名称排序的单元片段、profile 的顺序组装，使配置预检与实际启动使用相同定义。
+渲染器先计算并校验完整计划，再替换 `.env` 与 `generated/`。`COMPOSE_FILE` 按根 Compose、构建定义（只在开发机）、名称排序的单元片段、profile 的顺序组装，使配置预检与实际启动使用相同定义。构建定义单独成文件、不进发布包：目标机从不构建，某些 Compose 命令（例如 `run` 一个与构建目标共用镜像的服务）却会在定义存在时尝试构建，而包中没有构建上下文。
 
 profile 用 `x-platform` 声明面向的平台。打包时镜像必须是这个平台，安装时只提供与发布包平台（及 DeepStream 版本）相符的 profile，选错平台在停服前失败，而不是停服后 GPU 服务起不来。
 

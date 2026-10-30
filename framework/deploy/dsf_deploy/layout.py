@@ -8,6 +8,8 @@ RELEASE_ENV = "release.env"
 INVENTORY = "package-files.json"
 MANAGED = ".managed-files.json"
 COMPOSE_ROOT = "docker-compose.yaml"
+# 镜像的构建定义：只在开发机进入 COMPOSE_FILE，不进发布包。
+BUILD_COMPOSE = "framework/docker/build.compose.yaml"
 PROFILES = "profiles"
 SERVICES = "services"
 PLUGINS = "plugins"
