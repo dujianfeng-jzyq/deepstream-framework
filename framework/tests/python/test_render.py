@@ -125,13 +125,13 @@ class RenderTest(ProjectTestCase):
     def test_site_answers(self):
         answers = self.root / layout.SITE_ENV
         answers.write_text("SITE_NAME=lab\nUNKNOWN=1\n")
-        with self.assertRaisesRegex(DeployError, "undeclared site fields"):
+        with self.assertRaisesRegex(DeployError, "未声明的现场参数"):
             self.plan()
         answers.write_text("CAMERA_ID=\nSITE_NAME=lab\n")
-        with self.assertRaisesRegex(DeployError, "CAMERA_ID must not be empty"):
+        with self.assertRaisesRegex(DeployError, "CAMERA_ID 不能为空"):
             self.plan()
         answers.write_text("")
-        with self.assertRaisesRegex(DeployError, "not answered: SITE_NAME"):
+        with self.assertRaisesRegex(DeployError, "没有填写：SITE_NAME"):
             self.plan()
         (self.root / layout.PROJECT_ENV).write_text((self.root / layout.PROJECT_ENV).read_text()
                                                     + "SITE_NAME=from-project\n")
@@ -260,6 +260,7 @@ class SiteFieldsTest(unittest.TestCase):
 
     def test_prompts_defaults_and_secrets(self):
         fields = self.fields("# 文件说明\n\n# 第一行\n# 第二行\nA=1\nB_PASSWORD=\"\"\nC=\n")
+        self.assertEqual(fields[0].hint, ("第一行", "第二行"))
         self.assertEqual(fields[0].prompt, "第一行 第二行")
         self.assertEqual(fields[1].prompt, "B_PASSWORD")
         self.assertTrue(fields[1].nullable and fields[1].secret and not fields[1].required)
@@ -267,23 +268,26 @@ class SiteFieldsTest(unittest.TestCase):
 
     def test_reserved_keys_are_rejected(self):
         for key in ("PROJECT_NAME", "REDIS_IMAGE", "APPS_VERSION", "CONTAINER_X", "COMPOSE_FILE"):
-            with self.assertRaisesRegex(DeployError, "cannot be a site field"):
+            with self.assertRaisesRegex(DeployError, "不能作为现场参数"):
                 self.fields(f"{key}=x\n")
 
     def test_ask(self):
-        required = site.Field("A", "prompt", "", False)
+        required = site.Field("A", ("第一行", "第二行"), "", False)
         answers = iter(["", "value"])
-        with redirect_stdout(io.StringIO()) as output:  # 空答案时重新提问
-            self.assertEqual(site.ask(required, prompt=lambda _: next(answers)), "value")
+        prompts = []
+        with redirect_stdout(io.StringIO()) as output:  # 空答案时重新提问，只重复输入行
+            self.assertEqual(site.ask(required, prompt=lambda text: prompts.append(text) or next(answers),
+                                      position="[1/2]"), "value")
         self.assertIn("A 是必填项", output.getvalue())
-        default = site.Field("B", "prompt", "d", False)
+        self.assertEqual(prompts, ["\n[1/2] A（必填）\n  第一行\n  第二行\n> ", "> "])
+        default = site.Field("B", ("prompt",), "d", False)
         self.assertEqual(site.ask(default, prompt=lambda _: ""), "d")
         self.assertEqual(site.ask(default, "inherited", prompt=lambda _: ""), "inherited")  # 继承值优先于清单
         prompts = []
         self.assertEqual(site.ask(required, "inherited", prompt=lambda text: prompts.append(text) or ""),
                          "inherited")  # 有继承值的必填项回车即可
         self.assertIn("[inherited]", prompts[0])
-        secret = site.Field("X_TOKEN", "p", "", True)
+        secret = site.Field("X_TOKEN", ("p",), "", True)
         self.assertEqual(site.ask(secret, prompt=lambda _: 1 / 0, prompt_secret=lambda _: ""), "")
         prompts = []
         self.assertEqual(site.ask(secret, "saved", prompt_secret=lambda text: prompts.append(text) or ""),
@@ -292,10 +296,10 @@ class SiteFieldsTest(unittest.TestCase):
         self.assertIn(site.CLEAR, prompts[0])
         self.assertEqual(site.ask(secret, "saved", prompt_secret=lambda _: site.CLEAR), "")
         self.assertEqual(site.ask(default, prompt=lambda _: site.CLEAR), site.CLEAR)  # 不可留空的字段照字面
-        self.assertEqual(site.masked([secret], {"X_TOKEN": "s"}), "X_TOKEN=***")
+        self.assertEqual(site.masked([secret, default], {"X_TOKEN": "s", "B": ""}), ["X_TOKEN  ***", "B        （空）"])
 
     def test_defaults_follow_inherited_values(self):
-        fields = [site.Field("A", "a", "manifest", False), site.Field("B", "b", "", True)]
+        fields = [site.Field("A", ("a",), "manifest", False), site.Field("B", ("b",), "", True)]
         self.assertEqual(site.defaults(fields, {"A": "profile", "OTHER": "x"}), {"A": "profile", "B": ""})
 
 

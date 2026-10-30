@@ -66,38 +66,39 @@ def _choose_profile(options: Options, release: dict[str, str], install_dir: Path
     if options.profile:
         if options.profile in [name for name, _ in render.list_profiles(package_root)] and \
                 options.profile not in fitting:
-            raise DeployError(f"profile {options.profile} targets another platform than this {platform} package; "
-                              f"profiles for {platform}: {', '.join(fitting) or 'none'}")
-        return options.profile, "from --profile"
+            raise DeployError(f"profile {options.profile} 面向的平台不是本发布包的 {platform}；"
+                              f"适用于 {platform} 的 profile：{', '.join(fitting) or '无'}")
+        return options.profile, "来自 --profile"
     previous = install_dir / layout.ENV
     if previous.is_file() and not options.clean:
         chosen = envfile.read_compose(previous).get("CONFIG_PROFILE", "")
         if chosen in fitting:
-            return chosen, "kept from the current installation"
+            return chosen, "沿用当前安装"
         if chosen:
             # 例如新版本改了 profile 名：不沿用，按新包重新选择（非交互时用包内建议）。
-            print(f"note: the installed profile {chosen} is not offered by this package for {platform}; "
-                  "choosing again")
+            print(f"提示：本发布包没有为 {platform} 提供已安装的 profile {chosen}，重新选择")
     suggested = envfile.require(release, "CONFIG_PROFILE", layout.RELEASE_ENV)
     choices = render.fitting_profiles(package_root, platform)
     if not options.interactive or not choices:
-        return suggested, "suggested by the package"
-    print("profiles in this package (press Enter for the suggestion):")
-    for index, (name, summary) in enumerate(choices, start=1):
-        print(f"  {index}) {name}  {summary}")
+        return suggested, "发布包建议"
+    # 与现场参数的提问同一种排版（site.ask）：标题行、缩进的选项、单独的输入行。
     names = [name for name, _ in choices]
+    width = max(len(name) for name in names)
+    print(f"\nprofile [{suggested}]（输入编号或名称；回车接受 [ ] 中的值）")
+    for index, (name, summary) in enumerate(choices, start=1):
+        print(f"  {index}) {name:<{width}}  {summary}".rstrip())
     while True:
         try:
-            answer = input(f"profile [{suggested}]: ").strip()
+            answer = input("> ").strip()
         except EOFError:
-            return suggested, "suggested by the package"
+            return suggested, "发布包建议"
         if not answer:
-            return suggested, "suggested by the package"
+            return suggested, "发布包建议"
         if answer.isdigit() and 1 <= int(answer) <= len(names):
-            return names[int(answer) - 1], "chosen here"
+            return names[int(answer) - 1], "本次选择"
         if answer in names:
-            return answer, "chosen here"
-        print(f"  unknown profile {answer!r}")
+            return answer, "本次选择"
+        print(f"  没有 {answer!r} 这个 profile，请输入列表中的编号或名称")
 
 
 def _collect_answers(options: Options, install_dir: Path, package_root: Path,
@@ -111,20 +112,19 @@ def _collect_answers(options: Options, install_dir: Path, package_root: Path,
     新 profile 的默认值不同时丢弃，改为重新提问或继承；现场输入的其他值保留。"""
     fields = site.parse_fields(package_root / layout.SITE_FIELDS)
     if options.ask and not options.interactive:
-        raise DeployError(f"--ask needs a terminal to ask the site questions; edit "
-                          f"{install_dir / layout.SITE_ENV} and run the installer again instead")
+        raise DeployError(f"--ask 需要终端来逐项提问；请改为编辑 {install_dir / layout.SITE_ENV} "
+                          "后重新运行安装器")
     retired: list[str] = []
     answers = {} if options.clean else site.read_answers(install_dir / layout.SITE_ENV, fields, retired)
     if retired:
-        print(f"dropped site fields no longer used by this release: {', '.join(retired)}")
+        print(f"已去掉本版本不再使用的现场参数：{', '.join(retired)}")
     if answers and previous is not None:
         old, new = site.defaults(fields, previous()), site.defaults(fields, inherited())
         stale = sorted(key for key, value in answers.items() if value == old[key] != new[key])
         for key in stale:
             del answers[key]
         if stale:
-            print(f"profile changed: {', '.join(stale)} follow the new profile "
-                  "(the saved values were the previous profile's defaults)")
+            print(f"profile 已更换：{', '.join(stale)} 改用新 profile 的值（保存的是旧 profile 的默认值）")
     if not options.interactive:
         pending = []
     elif options.ask:
@@ -133,8 +133,11 @@ def _collect_answers(options: Options, install_dir: Path, package_root: Path,
         pending = [item for item in fields if item.key not in answers]
     if pending:
         suggested = site.defaults(fields, inherited())
-        for item in pending:
-            answers[item.key] = site.ask(item, answers.get(item.key, suggested[item.key]))
+        print(f"\n现场参数共 {len(pending)} 项，保存到 {install_dir / layout.SITE_ENV}；回车接受 [ ] 中的值")
+        for index, item in enumerate(pending, start=1):
+            answers[item.key] = site.ask(item, answers.get(item.key, suggested[item.key]),
+                                         position=f"[{index}/{len(pending)}]")
+        print()
     site.validate(fields, answers)
     return fields, answers
 
@@ -143,11 +146,11 @@ def _check_clean_scope(install_dir: Path, package_root: Path) -> None:
     if not install_dir.exists():
         return
     if install_dir in (Path(install_dir.anchor), Path.home().resolve()):
-        raise DeployError(f"refusing to wipe {install_dir}")
+        raise DeployError(f"拒绝清空 {install_dir}")
     if install_dir == package_root or install_dir in package_root.parents or package_root in install_dir.parents:
-        raise DeployError(f"refusing to wipe {install_dir}: it overlaps the package {package_root}")
+        raise DeployError(f"拒绝清空 {install_dir}：它与发布包 {package_root} 重叠")
     if not any((install_dir / marker).exists() for marker in (layout.RELEASE_ENV, layout.ENV, layout.MANAGED)):
-        raise DeployError(f"{install_dir} does not look like an installation; remove it by hand if intended")
+        raise DeployError(f"{install_dir} 看起来不是安装目录；确实要清空请手工删除")
 
 
 def _load_images(package_root: Path, docker: Docker, loaded: set[str], only: str | None = None) -> None:
@@ -157,7 +160,7 @@ def _load_images(package_root: Path, docker: Docker, loaded: set[str], only: str
         archives = [a for a in archives if a.name == naming.image_tar_name(only)]
     for archive in archives:
         if archive.name not in loaded:
-            print(f"loading {archive.name}")
+            print(f"加载镜像 {archive.name}")
             docker.load(archive)
             loaded.add(archive.name)
 
@@ -170,8 +173,8 @@ def _run_deploy_tool(root: Path, args: list[str], base_image: str, docker: Docke
     if not docker.image_exists(base_image):
         _load_images(package_root, docker, loaded, only=base_image)
     if not docker.image_exists(base_image):
-        raise DeployError(f"the base image {base_image} is missing; it renders the configuration and runs the "
-                          "services: use a package built with --with-base or load the base image first")
+        raise DeployError(f"缺少 base 镜像 {base_image}，渲染配置与运行服务都需要它：请使用带 --with-base "
+                          "打包的发布包，或先加载 base 镜像")
     try:
         result = docker.run(["--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
                              "-e", f"HOME={Path.home()}",
@@ -230,7 +233,7 @@ def _docker_env_file(service: str, environment: dict[str, str]) -> str:
     lines = []
     for key, value in sorted(environment.items()):
         if "\n" in value or "\r" in value:
-            raise DeployError(f"{service}: environment {key} contains a line break; it cannot be passed to --check-config")
+            raise DeployError(f"{service}：环境变量 {key} 含换行，无法传给 --check-config")
         lines.append(f"{key}={value}")
     return "\n".join(lines) + "\n"
 
@@ -250,7 +253,7 @@ def _check_configs(services: dict, stage: Path, release: dict[str, str], docker:
     for name, service in sorted(checks.items()):
         entrypoint = service.get("entrypoint")
         if not isinstance(entrypoint, list) or not entrypoint:
-            raise DeployError(f"{name}: {layout.CONFIG_CHECK_LABEL} requires an explicit entrypoint list")
+            raise DeployError(f"{name}：{layout.CONFIG_CHECK_LABEL} 要求显式的 entrypoint 列表")
         args = ["--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
                 "--user", service.get("user") or f"{os.getuid()}:{os.getgid()}",
                 "--workdir", service.get("working_dir") or workspace,
@@ -265,7 +268,7 @@ def _check_configs(services: dict, stage: Path, release: dict[str, str], docker:
             env_file.write_text(_docker_env_file(name, environment), encoding="utf-8")
             args += ["--env-file", str(env_file)]
         args += ["--entrypoint", entrypoint[0], service["image"], *entrypoint[1:], "--check-config"]
-        print(f"checking configuration: {name}")
+        print(f"检查配置：{name}")
         docker.run(args)
 
 
@@ -278,15 +281,15 @@ def _check_other_directories(project: str, install_dir: Path, docker: Docker) ->
         # 不知道启动目录时（容器缺少 Compose 的标签）只能按工程名停止，那个目录的 Compose 文件不参与。
         commands = [f"cd {directory} && docker compose down" if directory else f"docker compose -p {project} down"
                     for directory in others]
-        raise DeployError(f"the Compose project {project} already has containers started from "
-                          f"{', '.join(d or '(unknown directory)' for d in others)}; installing here would take "
-                          "them over.\n" + "\n".join(f"  stop them first: {command}" for command in commands))
+        raise DeployError(f"Compose 工程 {project} 已有从 {', '.join(d or '未知目录' for d in others)} "
+                          "启动的容器，在这里安装会接管它们。\n"
+                          + "\n".join(f"  先停止它们：{command}" for command in commands))
 
 
 def prepare(options: Options, docker: Docker) -> Plan:
     package_root = options.package.resolve()
     if not docker.available():
-        raise DeployError("docker is required")
+        raise DeployError("需要 docker")
 
     # 1. 发布事实、平台与完整性
     release = envfile.read(package_root / layout.RELEASE_ENV, expand_home=False)
@@ -294,16 +297,16 @@ def prepare(options: Options, docker: Docker) -> Plan:
         envfile.require(release, key, layout.RELEASE_ENV)
     host = naming.host_platform()
     if release["TARGET_PLATFORM"] != host:
-        raise DeployError(f"this package is for {release['TARGET_PLATFORM']}, this machine is {host}")
+        raise DeployError(f"这个发布包面向 {release['TARGET_PLATFORM']}，本机是 {host}")
     files = inventory.verify(package_root)
 
     # 2. 安装目标
     requested = (options.install_dir or default_install_dir(release)).absolute()
     if requested.is_symlink():
-        raise DeployError(f"the installation directory is a symlink: {requested}")
+        raise DeployError(f"安装目录是符号链接：{requested}")
     install_dir = requested.resolve()
     if install_dir == package_root or install_dir in package_root.parents or package_root in install_dir.parents:
-        raise DeployError("the installation directory must not overlap the package directory")
+        raise DeployError("安装目录不能与发布包目录重叠")
     targets.check(package_root, install_dir)
     _check_other_directories(release["PROJECT_NAME"], install_dir, docker)
 
@@ -315,13 +318,15 @@ def prepare(options: Options, docker: Docker) -> Plan:
         **release, **_profile_variables(package_root, profile, base_image, docker, package_root, loaded)})
     previous = _previous_inherited(options, install_dir, profile, base_image, docker, package_root, loaded)
     fields, answers = _collect_answers(options, install_dir, package_root, inherited, previous)
-    print(f"install to:  {install_dir}")
-    print(f"profile:     {profile} ({source})")
+    print(f"安装目录：{install_dir}")
+    print(f"profile： {profile}（{source}）")
     if answers:
-        print(f"site:        {site.masked(fields, answers)}")
+        print("现场参数：")
+        for line in site.masked(fields, answers):
+            print(f"  {line}")
     if options.clean:
         _check_clean_scope(install_dir, package_root)
-        print(f"clean install: {install_dir} will be wiped (data directories and images are kept)")
+        print(f"清洁安装：{install_dir} 将被清空（数据目录与镜像保留）")
     obsolete = [] if options.clean else inventory.obsolete(install_dir, inventory.managed(files))
 
     # 4. 镜像、配置与挂载
@@ -341,7 +346,7 @@ def prepare(options: Options, docker: Docker) -> Plan:
         for name, service in sorted(services.items()):
             image = service.get("image")
             if image and docker.image_platform(image) != release["TARGET_PLATFORM"]:
-                raise DeployError(f"{name}: image {image} is missing or not {release['TARGET_PLATFORM']}")
+                raise DeployError(f"{name}：镜像 {image} 不存在或不是 {release['TARGET_PLATFORM']} 平台")
         _check_configs(services, stage, release, docker)
         configuration = {layout.ENV: (stage / layout.ENV).read_bytes()}
         for path in sorted((stage / layout.GENERATED).rglob("*")):
@@ -353,19 +358,18 @@ def prepare(options: Options, docker: Docker) -> Plan:
 
 
 def describe(plan: Plan, docker: Docker) -> str:
-    lines = [f"installation directory: {plan.install_dir}"]
+    lines = [f"安装目录：{plan.install_dir}"]
     if (plan.install_dir / layout.ENV).is_file():
-        lines.append("stop: current services (docker compose down) using the installed definition, "
-                     "then remove the payload volume")
+        lines.append("停止：用已安装的定义停止当前服务（docker compose down），再删除载荷卷")
     if plan.clean:
-        lines.append(f"wipe: {plan.install_dir}")
-    lines += [f"remove obsolete: {path}" for path in plan.obsolete]
-    lines.append(f"write: {len(inventory.managed(plan.files))} release files, "
-                 f"{len(plan.configuration)} configuration files, {layout.SITE_ENV}")
-    lines += [f"writable mount: {path}" for path in plan.data_paths]
+        lines.append(f"清空：{plan.install_dir}")
+    lines += [f"删除退役文件：{path}" for path in plan.obsolete]
+    lines.append(f"写入：{len(inventory.managed(plan.files))} 个发布文件、"
+                 f"{len(plan.configuration)} 个配置文件与 {layout.SITE_ENV}")
+    lines += [f"可写挂载：{path}" for path in plan.data_paths]
     volume = layout.payload_volume(plan.release["PROJECT_NAME"])
     if not (plan.install_dir / layout.ENV).is_file() and docker.volume_exists(volume):
-        lines.append(f"remove: leftover payload volume {volume} (it would keep the old programs)")
-    lines.append("start: docker compose up -d, then wait for readiness")
+        lines.append(f"删除：遗留的载荷卷 {volume}（不删会继续运行旧程序）")
+    lines.append("启动：docker compose up -d，然后等待就绪")
     return "\n".join(lines)
 

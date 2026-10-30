@@ -17,39 +17,39 @@ def _root(value: str | None) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="dsf-deploy", description=__doc__)
+    parser = argparse.ArgumentParser(prog="dsf-deploy", description="Render, pack and install DeepStream projects.")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    p = commands.add_parser("render", help="渲染 .env 与 generated/")
+    p = commands.add_parser("render", help="render .env and generated/")
     p.add_argument("--root")
-    p.add_argument("--profile", help="省略时沿用 .env 中记录的选择")
+    p.add_argument("--profile", help="defaults to the profile recorded in .env")
     p.add_argument("--quiet", action="store_true")
 
-    p = commands.add_parser("profile-variables", help="以 JSON 打印 profile 的 x-build 变量（安装器使用）")
+    p = commands.add_parser("profile-variables", help="print the x-build variables of a profile as JSON (used by the installer)")
     p.add_argument("--root")
     p.add_argument("--profile", required=True)
 
-    p = commands.add_parser("pack", help="渲染并生成发布包（镜像须已构建）")
+    p = commands.add_parser("pack", help="render and create a release package (the images must be built)")
     p.add_argument("--root")
     p.add_argument("--profile")
-    p.add_argument("--with-base", action="store_true", help="同时打包 base 镜像（首次部署或 base 变化时）")
+    p.add_argument("--with-base", action="store_true", help="include the base image (first deployment or when base changes)")
 
     p = commands.add_parser("install", help="在目标机安装发布包")
     p.add_argument("--package", required=True, help="解压后的发布包目录")
-    p.add_argument("--install-dir", type=Path)
+    p.add_argument("--install-dir", type=Path, help="默认为 INSTALL_ROOT、XDG_DATA_HOME 或 ~/.local/share 下的项目名目录")
     p.add_argument("--profile", help="覆盖已记录或包内建议的 profile")
     p.add_argument("--ask", action="store_true", help="逐项重新填写现场参数，默认值为当前答案（需要终端）")
     p.add_argument("--clean-install", action="store_true", help="清空安装目录后安装（数据目录保留）")
     p.add_argument("--dry-run", action="store_true", help="只预检并打印计划，不停服、不写安装目录")
     p.add_argument("--ready-timeout", type=float, default=180.0, help="启动后的就绪等待上限（秒）")
 
-    p = commands.add_parser("init", help="初始化派生项目的名称与数据目录")
+    p = commands.add_parser("init", help="set the name and data directory of a derived project")
     p.add_argument("name")
     p.add_argument("--root")
     p.add_argument("--data-path")
-    p.add_argument("--profile", help="初始化后立即渲染该 profile")
+    p.add_argument("--profile", help="render this profile right after initializing")
 
-    p = commands.add_parser("new-app", help="生成服务单元骨架")
+    p = commands.add_parser("new-app", help="create a service unit skeleton")
     p.add_argument("name")
     p.add_argument("--kind", choices=("cpp", "python"), default="cpp")
     p.add_argument("--root")
@@ -74,9 +74,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "new-app":
             project.new_unit(_root(args.root), args.name, args.kind)
     except DeployError as error:
-        print(f"error: {error}", file=sys.stderr)
+        # 安装器面向现场，用中文；其他命令面向开发者。安装器在 base 中调用 render 等命令时按 "error: " 剥离前缀。
+        print(f"{'错误：' if args.command == 'install' else 'error: '}{error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("interrupted", file=sys.stderr)  # 安装器在停服之后被中断时已另行说明现场状态
+        print("已中断" if args.command == "install" else "interrupted", file=sys.stderr)  # 安装器在停服之后被中断时已另行说明现场状态
         return 130
     return 0

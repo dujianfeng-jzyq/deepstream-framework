@@ -27,8 +27,7 @@ def wait(docker: Docker, install_dir: Path, timeout: float, poll: float = 1.0) -
     expected = {name: d for name, d in definitions.items() if not d.get("profiles")}
     start = time.monotonic()
     deadline, progress = start + timeout, start + PROGRESS_INTERVAL
-    print(f"waiting up to {timeout:.0f}s for the services to become ready "
-          "(Ctrl-C stops waiting; the services keep running)", flush=True)
+    print(f"等待服务就绪，最多 {timeout:.0f}s（Ctrl-C 只停止等待，服务继续运行）", flush=True)
     while True:
         states = {row.get("Service"): row for row in docker.compose_ps(install_dir)}
         pending = []
@@ -40,29 +39,28 @@ def wait(docker: Docker, install_dir: Path, timeout: float, poll: float = 1.0) -
             if state == "exited":
                 if one_shot and int(row.get("ExitCode", -1)) == 0:
                     continue
-                raise DeployError(f"service {name} exited with {row.get('ExitCode')} before becoming ready\n"
+                raise DeployError(f"服务 {name} 在就绪前退出，退出码 {row.get('ExitCode')}\n"
                                   f"{_describe(docker, install_dir, name, row)}\n"
-                                  f"  inspect: docker compose logs {name}")
+                                  f"  查看：docker compose logs {name}")
             if state == "running" and not one_shot and (not health or row.get("Health") == "healthy"):
                 continue
             pending.append(name)
         if not pending:
-            print("all services are ready")
+            print("所有服务已就绪")
             _note_idle_inputs(docker, install_dir, [name for name, d in sorted(expected.items())
                                                     if _has_healthcheck(d)])
             return
         now = time.monotonic()
         if now >= deadline:
             details = "\n".join(_describe(docker, install_dir, name, states.get(name, {})) for name in pending)
-            raise DeployError(f"services not ready after {timeout:.0f}s: {', '.join(pending)}\n{details}\n"
-                              "  the services are installed and keep running; the installer only stopped waiting\n"
-                              "  readiness can depend on input reaching a service, for example a camera that "
-                              "is not streaming yet\n"
-                              "  inspect: docker compose logs <service>")
+            raise DeployError(f"{timeout:.0f}s 后仍未就绪：{', '.join(pending)}\n{details}\n"
+                              "  服务已安装并继续运行，安装器只是停止了等待\n"
+                              "  就绪可能取决于服务是否收到输入，例如相机还没有推流\n"
+                              "  查看：docker compose logs <服务名>")
         if now >= progress:
             progress = now + PROGRESS_INTERVAL
             waiting = ", ".join(f"{name} ({_state(states.get(name, {}))})" for name in pending)
-            print(f"  {now - start:.0f}s: waiting for {waiting}", flush=True)
+            print(f"  {now - start:.0f}s：等待 {waiting}", flush=True)
         time.sleep(poll)
 
 
@@ -71,8 +69,8 @@ def _note_idle_inputs(docker: Docker, install_dir: Path, names: list[str]) -> No
     这里提示还没有收到输入的服务，现场不必等到看门狗重启才发现。"""
     for name in names:
         if NO_INPUT.match(docker.ready_state(install_dir, name).strip()):
-            print(f"note: {name} has not received any input yet; expected for sources that produce frames "
-                  "on demand (line-scan, triggered), otherwise check the source", flush=True)
+            print(f"提示：{name} 还没有收到任何输入；按需出帧的源（线扫、触发）属于正常，否则请检查源",
+                  flush=True)
 
 
 def _state(row: dict) -> str:

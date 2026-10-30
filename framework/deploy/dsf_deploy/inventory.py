@@ -30,12 +30,12 @@ def safe_path(root: Path, relative: str) -> Path:
     """清单中的路径只能指向根目录内部，且沿途没有符号链接。"""
     value = Path(relative)
     if value.is_absolute() or ".." in value.parts or not value.parts:
-        raise DeployError(f"invalid path in inventory: {relative}")
+        raise DeployError(f"文件清单中的路径无效：{relative}")
     path = root
     for part in value.parts:
         path = path / part
         if path.is_symlink():
-            raise DeployError(f"symlink in {root}: {path}")
+            raise DeployError(f"{root} 中有符号链接：{path}")
     return path
 
 
@@ -54,23 +54,23 @@ def verify(root: Path) -> dict[str, str]:
     """包内文件必须与清单完全一致：没有缺失、改动、多余文件或符号链接。"""
     manifest = root / layout.INVENTORY
     if not manifest.is_file():
-        raise DeployError(f"{manifest} is missing; this is not a complete release package")
+        raise DeployError(f"缺少 {manifest}，这不是完整的发布包")
     values = json.loads(manifest.read_text(encoding="utf-8"))
     if not isinstance(values, dict) or not values:
-        raise DeployError(f"{manifest} is not a valid inventory")
+        raise DeployError(f"{manifest} 不是有效的文件清单")
     paths = list(root.rglob("*"))
     links = [p for p in paths if p.is_symlink()]
     if links:
-        raise DeployError(f"package contains a symlink: {links[0]}")
+        raise DeployError(f"发布包中有符号链接：{links[0]}")
     # 解释器在包内运行时生成的字节码缓存不是发布内容。
     actual = {p.relative_to(root).as_posix() for p in paths
               if p.is_file() and p != manifest and "__pycache__" not in p.parts}
     if actual != set(values):
         missing, extra = sorted(set(values) - actual), sorted(actual - set(values))
-        raise DeployError(f"package does not match its inventory; missing={missing[:5]} extra={extra[:5]}")
+        raise DeployError(f"发布包与文件清单不一致：缺少 {missing[:5]}，多出 {extra[:5]}")
     for relative, digest in values.items():
         if sha256(safe_path(root, relative)) != digest:
-            raise DeployError(f"package file is corrupted: {relative}")
+            raise DeployError(f"发布包文件已损坏：{relative}")
     return values
 
 
@@ -93,7 +93,6 @@ def obsolete(install_dir: Path, incoming: dict[str, str]) -> list[Path]:
         if not path.exists():
             continue
         if not path.is_file() or sha256(path) != digest:
-            raise DeployError(f"{path} was modified locally but is no longer part of the release; "
-                              "move it aside and run the installation again")
+            raise DeployError(f"{path} 在现场被修改过，但已不属于新版本；请先移走再重新安装")
         result.append(path)
     return result

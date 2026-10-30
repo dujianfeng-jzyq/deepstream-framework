@@ -67,11 +67,11 @@ class PackInstallTest(ProjectTestCase):
         """交互提问：replies 中的键输入对应的值，其余回车；提示文本记入 prompts。"""
         real_ask = site.ask
 
-        def answer(item, default=None):
+        def answer(item, default=None, **options):
             def record(text):
                 prompts.append(text)
                 return (replies or {}).get(item.key, "")
-            return real_ask(item, default, prompt=record, prompt_secret=record)
+            return real_ask(item, default, prompt=record, prompt_secret=record, **options)
 
         return mock.patch.object(site, "ask", answer)
 
@@ -175,12 +175,12 @@ class PackInstallTest(ProjectTestCase):
         compose = [call[2:] for call in target.calls if call[0] == "compose"]
         self.assertFalse([call for call in compose if call[:1] == ["down"]])
         self.assertEqual(compose[-1], ["up", "-d"])
-        self.assertIn("all services are ready", output)
+        self.assertIn("所有服务已就绪", output)
 
     def test_missing_required_answers_fail_before_anything_changes(self):
         (self.root / layout.SITE_FIELDS).write_text("SITE_NAME=\nCAMERA_ID=c\nRTSP_PASSWORD=\"\"\n")
         package = self.pack(with_base=True)
-        with self.assertRaisesRegex(DeployError, "not answered: SITE_NAME"):
+        with self.assertRaisesRegex(DeployError, "没有填写：SITE_NAME"):
             self.install(package)
         self.assertFalse(self.install_dir.exists())
 
@@ -188,7 +188,7 @@ class PackInstallTest(ProjectTestCase):
         package = self.pack(with_base=True)
         target, output = self.install(package, dry_run=True)
         self.assertFalse(self.install_dir.exists())
-        self.assertIn("--dry-run: nothing was stopped or written", output)
+        self.assertIn("--dry-run：没有停止任何服务", output)
         self.assertFalse([c for c in target.calls if c[0] == "compose" and "up" in c])
 
     def test_upgrade_stops_old_services_and_prunes_unmodified_obsolete_files(self):
@@ -216,7 +216,7 @@ class PackInstallTest(ProjectTestCase):
         target = FakeDocker()
         target.volumes = {"demo_app-files", "demo_redis-data"}
         _, output = self.install(package, target, dry_run=True)
-        self.assertIn("remove: leftover payload volume demo_app-files", output)
+        self.assertIn("删除：遗留的载荷卷 demo_app-files", output)
         self.assertEqual(target.volumes, {"demo_app-files", "demo_redis-data"})
         self.install(package, target)
         removed = target.calls.index(["volume-rm", "demo_app-files"])
@@ -231,12 +231,12 @@ class PackInstallTest(ProjectTestCase):
         target.containers = [("demo-app-1", str(self.root)), ("demo-redis-1", str(self.root))]
         for dry_run in (True, False):
             with self.subTest(dry_run=dry_run), \
-                    self.assertRaisesRegex(DeployError, f"started from {self.root}; installing here.*\n"
-                                                        f"  stop them first: cd {self.root} && docker compose down$"):
+                    self.assertRaisesRegex(DeployError, f"已有从 {self.root} 启动的容器，在这里安装.*\n"
+                                                        f"  先停止它们：cd {self.root} && docker compose down$"):
                 self.install(package, target, dry_run=dry_run)
         target.containers = [("demo-app-1", "")]  # 容器缺少启动目录的标签：只能按工程名停止
-        with self.assertRaisesRegex(DeployError, "started from \\(unknown directory\\);.*\n"
-                                                 "  stop them first: docker compose -p demo down$"):
+        with self.assertRaisesRegex(DeployError, "已有从 未知目录 启动的容器.*\n"
+                                                 "  先停止它们：docker compose -p demo down$"):
             self.install(package, target, dry_run=True)
         target.containers = [("demo-app-1", str(self.root))]
         self.assertFalse(self.install_dir.exists())
@@ -265,7 +265,7 @@ class PackInstallTest(ProjectTestCase):
         (self.install_dir / "models/m/deployment/config.txt").write_text("edited on site")
         (self.root / "models/m/deployment/config.txt").unlink()
         upgraded = self.pack(with_base=True)
-        with self.assertRaisesRegex(DeployError, "modified locally"):
+        with self.assertRaisesRegex(DeployError, "在现场被修改过"):
             self.install(upgraded)
 
     def test_clean_install(self):
@@ -277,7 +277,7 @@ class PackInstallTest(ProjectTestCase):
         foreign = self.tmp / "foreign"
         foreign.mkdir()
         (foreign / "important").write_text("x")
-        with self.assertRaisesRegex(DeployError, "does not look like an installation"):
+        with self.assertRaisesRegex(DeployError, "看起来不是安装目录"):
             self.install(package, clean=True, install_dir=foreign)
 
     def test_saved_answers_are_reused(self):
@@ -310,7 +310,7 @@ class PackInstallTest(ProjectTestCase):
         self.install(package)
         before = (self.install_dir / layout.SITE_ENV).read_text()
         target = FakeDocker()
-        with self.assertRaisesRegex(DeployError, "--ask needs a terminal"):
+        with self.assertRaisesRegex(DeployError, "--ask 需要终端"):
             self.install(package, target=target, ask=True)
         self.assertFalse([call for call in target.calls if "down" in call])
         self.assertEqual((self.install_dir / layout.SITE_ENV).read_text(), before)
@@ -321,7 +321,7 @@ class PackInstallTest(ProjectTestCase):
         self.install(package)
         (self.install_dir / layout.SITE_ENV).write_text('CAMERA_ID="site-cam"\nREDIS_HOST="redis"\n')
         _, output = self.install(package)
-        self.assertIn("dropped site fields no longer used by this release: REDIS_HOST", output)
+        self.assertIn("已去掉本版本不再使用的现场参数：REDIS_HOST", output)
         self.assertEqual(answers(self.install_dir), {"CAMERA_ID": "site-cam"})
         self.assertIn("camera: site-cam", (self.install_dir / "generated/config/app.yaml").read_text())
 
@@ -343,7 +343,7 @@ class PackInstallTest(ProjectTestCase):
         # 当时回车接受的清单默认值 cam0，与现场输入的 custom
         (self.install_dir / layout.SITE_ENV).write_text("CAMERA_ID=cam0\nSITE_NAME=custom\n")
         _, output = self.install(package, profile="other")
-        self.assertIn("profile changed: CAMERA_ID follow the new profile", output)
+        self.assertIn("profile 已更换：CAMERA_ID 改用新 profile 的值", output)
         self.assertEqual(answers(self.install_dir), {"SITE_NAME": "custom"})
         config = (self.install_dir / "generated/config/app.yaml").read_text()
         self.assertIn("camera: other-cam", config)
@@ -379,7 +379,7 @@ class PackInstallTest(ProjectTestCase):
 
     def test_package_without_base_renders_with_the_installed_base(self):
         package = self.pack()  # 升级的常态：base 没有变化，包里不带
-        with self.assertRaisesRegex(DeployError, "the base image .* is missing; .*--with-base"):
+        with self.assertRaisesRegex(DeployError, "缺少 base 镜像 .*--with-base"):
             self.install(package)
         self.assertFalse(self.install_dir.exists())  # 预检失败：什么都没有写
         target, _ = self.install(package, images={self.base: self.platform})
@@ -399,16 +399,16 @@ class PackInstallTest(ProjectTestCase):
     def test_integrity_and_platform_are_checked_first(self):
         package = self.pack(with_base=True)
         (package / "profiles/test.yaml").write_text("tampered\n")
-        with self.assertRaisesRegex(DeployError, "corrupted: profiles/test.yaml"):
+        with self.assertRaisesRegex(DeployError, "已损坏：profiles/test.yaml"):
             self.install(package)
         package = self.pack(with_base=True)
         (package / "extra.txt").write_text("x")
-        with self.assertRaisesRegex(DeployError, "does not match its inventory"):
+        with self.assertRaisesRegex(DeployError, "与文件清单不一致"):
             self.install(package)
         (package / "extra.txt").unlink()
         release = package / layout.RELEASE_ENV
         release.write_text(release.read_text().replace(f"TARGET_PLATFORM={self.platform}", "TARGET_PLATFORM=mips"))
-        with self.assertRaisesRegex(DeployError, "this package is for mips"):
+        with self.assertRaisesRegex(DeployError, "这个发布包面向 mips"):
             self.install(package)
 
     def test_unsafe_targets_are_rejected(self):
@@ -417,13 +417,13 @@ class PackInstallTest(ProjectTestCase):
         outside = self.tmp / "outside"
         outside.mkdir()
         (self.install_dir / "profiles").symlink_to(outside)
-        with self.assertRaisesRegex(DeployError, "symlink in the installation target"):
+        with self.assertRaisesRegex(DeployError, "安装目标中有符号链接"):
             self.install(package)
         (self.install_dir / "profiles").unlink()
         (self.install_dir / "profiles").write_text("not a directory")
-        with self.assertRaisesRegex(DeployError, "must be a directory"):
+        with self.assertRaisesRegex(DeployError, "必须是目录"):
             self.install(package)
-        with self.assertRaisesRegex(DeployError, "must not overlap the package"):
+        with self.assertRaisesRegex(DeployError, "不能与发布包目录重叠"):
             self.install(package, install_dir=package / "inside")
 
     def test_writable_mounts_may_not_enter_the_installation(self):
@@ -431,7 +431,7 @@ class PackInstallTest(ProjectTestCase):
         env.write_text(env.read_text().replace(f"HOST_DATA_PATH={self.data}",
                                                f"HOST_DATA_PATH={self.install_dir}/data"))
         package = self.pack(with_base=True)
-        with self.assertRaisesRegex(DeployError, "overlaps the installation directory"):
+        with self.assertRaisesRegex(DeployError, "与安装目录 .* 重叠"):
             self.install(package)
 
     def test_preflight_failure_keeps_the_running_installation(self):
@@ -460,20 +460,20 @@ class PackInstallTest(ProjectTestCase):
             with patch, redirect_stdout(io.StringIO()), redirect_stderr(errors), \
                     self.assertRaises((DeployError, KeyboardInterrupt)):
                 install(Options(package, self.install_dir, interactive=False), target)
-            self.assertIn("installation incomplete: the previous services are stopped", errors.getvalue())
-            self.assertIn("run the installer again", errors.getvalue())
+            self.assertIn("安装未完成：旧服务已停止", errors.getvalue())
+            self.assertIn("重新运行安装器", errors.getvalue())
 
     def test_interrupt_is_reported_by_the_command_line(self):
         errors = io.StringIO()
         with mock.patch.object(cli, "install", side_effect=KeyboardInterrupt), redirect_stderr(errors):
             code = cli.main(["install", "--package", str(self.tmp)])
-        self.assertEqual((code, errors.getvalue().strip()), (130, "interrupted"))
+        self.assertEqual((code, errors.getvalue().strip()), (130, "已中断"))
 
     def test_failed_readiness_is_reported(self):
         package = self.pack(with_base=True)
         target = FakeDocker()
         target.ps_rows = [{"Service": "app", "State": "exited", "ExitCode": 1}]
-        with self.assertRaisesRegex(DeployError, "service app exited with 1"), redirect_stdout(io.StringIO()):
+        with self.assertRaisesRegex(DeployError, "服务 app 在就绪前退出，退出码 1"), redirect_stdout(io.StringIO()):
             install(Options(package, self.install_dir, interactive=False, ready_timeout=2), target)
 
     def test_readiness_timeout_shows_why_a_service_is_not_ready(self):
@@ -486,13 +486,13 @@ class PackInstallTest(ProjectTestCase):
         with self.assertRaises(DeployError) as caught, redirect_stdout(io.StringIO()):
             install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
         message = str(caught.exception)
-        self.assertIn("services not ready after 0s: app,", message)
+        self.assertIn("0s 后仍未就绪：app,", message)
         self.assertIn("  app: running, starting\n    [warning] src: Not Found (404) #2\n", message)
         self.assertIn("[warning] src: Not Found (404) #4\n  deepstream-apps: missing", message)
         self.assertNotIn("#1", message)  # 只摘最近的几条
         self.assertNotIn("[info]", message)
-        self.assertIn("camera that is not streaming", message)
-        self.assertIn("the services are installed and keep running", message)
+        self.assertIn("相机还没有推流", message)
+        self.assertIn("服务已安装并继续运行", message)
         # GStreamer 的错误详情换行：括号未闭合的行与下一行合并成一条
         target.logs["app"] = "[warning] src: Not found (gstrtspsrc.c(6736): src:\nNot Found (404))\nResetting source"
         with self.assertRaises(DeployError) as caught, redirect_stdout(io.StringIO()):
@@ -508,7 +508,7 @@ class PackInstallTest(ProjectTestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             install(Options(package, self.install_dir, interactive=False), target)
-        self.assertIn("all services are ready\nnote: app has not received any input yet", output.getvalue())
+        self.assertIn("所有服务已就绪\n提示：app 还没有收到任何输入", output.getvalue())
         target.ready_files["app"] = "count=250 idle_s=0\n"
         output = io.StringIO()
         with redirect_stdout(output):
@@ -524,8 +524,8 @@ class PackInstallTest(ProjectTestCase):
         with mock.patch.object(ready, "PROGRESS_INTERVAL", 0), redirect_stdout(output), \
                 self.assertRaises(DeployError):
             install(Options(package, self.install_dir, interactive=False, ready_timeout=0.1), target)
-        self.assertIn("waiting up to 0s for the services to become ready (Ctrl-C stops waiting", output.getvalue())
-        self.assertIn("s: waiting for app (running, starting), deepstream-apps (missing)", output.getvalue())
+        self.assertIn("等待服务就绪，最多 0s（Ctrl-C 只停止等待", output.getvalue())
+        self.assertIn("s：等待 app (running, starting), deepstream-apps (missing)", output.getvalue())
 
     def test_interrupted_readiness_wait_says_the_services_keep_running(self):
         package = self.pack(with_base=True)
@@ -535,8 +535,8 @@ class PackInstallTest(ProjectTestCase):
         with mock.patch.object(ready.time, "sleep", side_effect=KeyboardInterrupt), redirect_stdout(io.StringIO()), \
                 redirect_stderr(errors), self.assertRaises(KeyboardInterrupt):
             install(Options(package, self.install_dir, interactive=False), target)
-        self.assertIn("stopped waiting: the services are installed and keep running", errors.getvalue())
-        self.assertNotIn("installation incomplete", errors.getvalue())
+        self.assertIn("已停止等待：服务已安装并继续运行", errors.getvalue())
+        self.assertNotIn("安装未完成", errors.getvalue())
 
 
 class InventoryTest(ProjectTestCase):
@@ -544,7 +544,7 @@ class InventoryTest(ProjectTestCase):
         with self.assertRaises(DeployError):
             inventory.safe_path(self.root, "../x")
         (self.root / "link").symlink_to(self.tmp)
-        with self.assertRaisesRegex(DeployError, "symlink"):
+        with self.assertRaisesRegex(DeployError, "符号链接"):
             inventory.safe_path(self.root, "link/x")
 
 
@@ -572,26 +572,27 @@ class ProfileChoiceTest(ProjectTestCase):
 
     def test_only_profiles_for_the_package_platform_are_offered(self):
         (_, how), menu = self.choose(interactive=True)
-        self.assertEqual(how, "suggested by the package")
-        self.assertIn("jetson  Jetson", menu)
-        self.assertIn("test  测试方案", menu)  # 没有声明 x-platform：不限平台
+        self.assertEqual(how, "发布包建议")
+        self.assertIn("profile [jetson]", menu)
+        self.assertIn("1) jetson  Jetson", menu)
+        self.assertIn("2) test    测试方案", menu)  # 名称对齐  # 没有声明 x-platform：不限平台
         self.assertNotIn("server", menu)
-        self.assertEqual(self.choose(interactive=True, answer="1")[0], ("jetson", "chosen here"))
+        self.assertEqual(self.choose(interactive=True, answer="1")[0], ("jetson", "本次选择"))
 
     def test_a_profile_for_another_platform_is_rejected_before_anything_changes(self):
-        with self.assertRaisesRegex(DeployError, "profile server targets another platform than this arm64 "
-                                                 "package; profiles for arm64: jetson, test"):
+        with self.assertRaisesRegex(DeployError, "profile server 面向的平台不是本发布包的 arm64；"
+                                                 "适用于 arm64 的 profile：jetson, test"):
             self.choose(profile="server")
-        self.assertEqual(self.choose(profile="test")[0], ("test", "from --profile"))
+        self.assertEqual(self.choose(profile="test")[0], ("test", "来自 --profile"))
 
     def test_installed_profile_is_kept_only_when_it_still_fits(self):
         self.installed("test")
-        self.assertEqual(self.choose()[0], ("test", "kept from the current installation"))
+        self.assertEqual(self.choose()[0], ("test", "沿用当前安装"))
         for retired in ("server", "dgpu-ds71"):  # 平台不符，或新包已不再提供
             self.installed(retired)
             (profile, how), output = self.choose()
-            self.assertEqual((profile, how), ("jetson", "suggested by the package"))
-            self.assertIn(f"the installed profile {retired} is not offered by this package for arm64", output)
+            self.assertEqual((profile, how), ("jetson", "发布包建议"))
+            self.assertIn(f"本发布包没有为 arm64 提供已安装的 profile {retired}", output)
 
 
 if __name__ == "__main__":

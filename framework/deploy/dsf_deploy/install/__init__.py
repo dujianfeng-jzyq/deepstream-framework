@@ -11,10 +11,10 @@ def install(options: Options, docker: Docker | None = None) -> None:
     docker = docker or Docker()
     if options.ready_timeout <= 0:
         from ..errors import DeployError
-        raise DeployError("--ready-timeout must be positive")
+        raise DeployError("--ready-timeout 必须大于 0")
     plan = prepare(options, docker)
     if options.dry_run:
-        print("\n--dry-run: nothing was stopped or written. Plan:")
+        print("\n--dry-run：没有停止任何服务，也没有写入任何文件。计划：")
         print(describe(plan, docker))
         return
     apply(plan, docker, options.ready_timeout)

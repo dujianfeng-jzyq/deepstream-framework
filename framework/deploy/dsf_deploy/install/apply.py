@@ -26,7 +26,7 @@ def apply(plan: Plan, docker: Docker, ready_timeout: float) -> None:
     try:
         _replace(plan, docker)
         docker.compose(root, ["config", "--quiet"])
-        print("starting services")
+        print("启动服务")
         docker.compose(root, ["up", "-d"])
     except BaseException:
         print(incomplete_message(root, upgrading), file=sys.stderr)
@@ -34,19 +34,19 @@ def apply(plan: Plan, docker: Docker, ready_timeout: float) -> None:
     try:
         ready.wait(docker, root, ready_timeout)
     except KeyboardInterrupt:
-        print(f"\nstopped waiting: the services are installed and keep running\n"
-              f"  check: cd {root} && docker compose ps", file=sys.stderr)
+        print(f"\n已停止等待：服务已安装并继续运行\n"
+              f"  查看：cd {root} && docker compose ps", file=sys.stderr)
         raise
-    print(f"\ninstalled: {root} (profile {plan.profile})")
-    print(f"logs:      cd {root} && docker compose logs -f")
-    print("rollback:  install the previous release package again")
+    print(f"\n安装完成：{root}（profile {plan.profile}）")
+    print(f"查看日志：cd {root} && docker compose logs -f")
+    print("回滚方法：重新安装上一个版本的发布包")
 
 
 def incomplete_message(root: Path, upgrading: bool) -> str:
-    state = "the previous services are stopped (or were being stopped) and " if upgrading else ""
-    return (f"\ninstallation incomplete: {state}{root} may be partly written.\n"
-            "  to finish:  run the installer again with the same package and options\n"
-            "  to go back: install the previous release package")
+    state = "旧服务已停止（或正在停止），" if upgrading else ""
+    return (f"\n安装未完成：{state}{root} 可能只写入了一部分。\n"
+            "  继续完成：用同一个发布包和参数重新运行安装器\n"
+            "  退回旧版：安装上一个版本的发布包")
 
 
 def _replace(plan: Plan, docker: Docker) -> None:
@@ -55,29 +55,29 @@ def _replace(plan: Plan, docker: Docker) -> None:
     new_volume = layout.payload_volume(plan.release["PROJECT_NAME"])
     stale_check = True
     if (root / layout.ENV).is_file():
-        print("stopping the current services")
+        print("停止当前服务")
         # 不用 down -v：它删除项目的全部命名卷，服务放在命名卷中的持久数据也会丢失。
         # 只删载荷卷：卷只在为空时播种，不删就会继续运行旧载荷。
         docker.compose(root, ["down", "--remove-orphans"])
         old_volume = layout.payload_volume(envfile.read_compose(root / layout.ENV).get("PROJECT_NAME")
                                            or plan.release["PROJECT_NAME"])
         if docker.volume_exists(old_volume):
-            print(f"removing the payload volume {old_volume}")
+            print(f"删除载荷卷 {old_volume}")
             docker.volume_remove(old_volume)
         stale_check = old_volume != new_volume
     if stale_check and docker.volume_exists(new_volume):
         # 首次安装或改名后遗留的载荷卷（例如删掉安装目录后重装）：卷只在为空时播种，不删就会运行旧载荷。
         # 预检已确认没有其他目录启动的同名工程容器在用它。
-        print(f"removing the leftover payload volume {new_volume}")
+        print(f"删除遗留的载荷卷 {new_volume}")
         docker.volume_remove(new_volume)
 
     if plan.clean and root.exists():
-        print(f"wiping {root}")
+        print(f"清空 {root}")
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
     for path in plan.obsolete:
         path.unlink(missing_ok=True)  # 预检之后可能已被现场删除；停服之后不能因此中断
-        print(f"removed obsolete file {path.relative_to(root)}")
+        print(f"已删除退役文件 {path.relative_to(root)}")
 
     managed = inventory.managed(plan.files)
     for name in sorted(managed):
@@ -88,7 +88,7 @@ def _replace(plan: Plan, docker: Docker) -> None:
     envfile.write(root / layout.PROJECT_ENV, envfile.read(package / layout.RELEASE_ENV, expand_home=False),
                   ("GENERATED from release.env by the installer — DO NOT EDIT",))
     site.write_answers(root / layout.SITE_ENV, plan.answers,
-                       ("site answers — edit and rerun the installer to apply",), mode=0o600)
+                       ("现场答案：修改后重新运行安装器生效",), mode=0o600)
     (root / layout.MANAGED).write_text(json.dumps(managed, indent=2) + "\n", encoding="utf-8")
 
     # generated/ 整体替换；rmtree 删除其中的旧链接本身，不跟随链接。

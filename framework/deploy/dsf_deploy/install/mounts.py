@@ -28,15 +28,15 @@ def ensure_directory(path: Path) -> None:
     except OSError as error:
         blocker = next((p for p in [path, *path.parents] if p.exists() and not p.is_dir()), None)
         if blocker is not None:
-            raise DeployError(f"cannot create {path}: {blocker} is a file; move it aside") from error
+            raise DeployError(f"无法创建 {path}：{blocker} 是文件，请先移走") from error
         parent = next((p for p in path.parents if p.exists()), Path("/"))
-        raise DeployError(f"cannot create {path}: {parent} is not writable by {getpass.getuser()}\n"
-                          f"  fix: sudo mkdir -p {path} && sudo chown -R $(id -u):$(id -g) {path}") from error
+        raise DeployError(f"无法创建 {path}：{getpass.getuser()} 不能写入 {parent}\n"
+                          f"  修复：sudo mkdir -p {path} && sudo chown -R $(id -u):$(id -g) {path}") from error
     if not os.access(path, os.W_OK):
         owner = path.stat()
-        raise DeployError(f"{path} is not writable by {getpass.getuser()} (owner {owner.st_uid}:{owner.st_gid})\n"
-                          f"  fix: sudo chown -R $(id -u):$(id -g) {path}\n"
-                          "  (Docker creates missing bind sources as root; an earlier start may have done so)")
+        raise DeployError(f"{getpass.getuser()} 不能写入 {path}（属主 {owner.st_uid}:{owner.st_gid}）\n"
+                          f"  修复：sudo chown -R $(id -u):$(id -g) {path}\n"
+                          "  （Docker 以 root 创建不存在的 bind 源目录，之前的某次启动可能这样做过）")
 
 
 def prepare(services: dict, install_dir: Path, package_root: Path) -> list[Path]:
@@ -50,25 +50,25 @@ def prepare(services: dict, install_dir: Path, package_root: Path) -> list[Path]
             is_data = mount.get("target") == data_target
             writable_bind = mount.get("type") == "bind" and not mount.get("read_only")
             if is_data and not writable_bind:
-                raise DeployError(f"{name}: {data_target} must be a writable bind mount")
+                raise DeployError(f"{name}：{data_target} 必须是可写的 bind 挂载")
             if not writable_bind:
                 continue
             source = Path(mount["source"]).resolve()
             if name == ENGINE_BUILDER and mount.get("target") == models_target and \
                     source == (install_dir / layout.MODELS).resolve():
                 continue
-            for protected, label in ((install_dir, "installation"), (package_root, "package")):
+            for protected, label in ((install_dir, "安装"), (package_root, "发布包")):
                 if _overlaps(source, protected):
-                    raise DeployError(f"{name}: writable mount {source} overlaps the {label} directory {protected}")
+                    raise DeployError(f"{name}：可写挂载 {source} 与{label}目录 {protected} 重叠")
             directories[source] = directories.get(source, False) or is_data
             if (mount.get("bind") or {}).get("create_host_path") is False:
                 must_exist.add(source)
     for path in sorted(must_exist):
         if not path.exists():
-            raise DeployError(f"bind source must already exist (create_host_path: false): {path}")
+            raise DeployError(f"bind 源必须已存在（create_host_path: false）：{path}")
     for path, is_data in sorted(directories.items()):
         if is_data or not path.exists() or path.is_dir():
             ensure_directory(path)
         elif not os.access(path, os.W_OK):
-            raise DeployError(f"writable bind source is not writable: {path}")
+            raise DeployError(f"可写的 bind 源不可写：{path}")
     return sorted(directories)
