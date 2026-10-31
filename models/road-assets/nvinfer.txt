@@ -1,15 +1,17 @@
-# road-assets nvinfer 配置；ONNX/标签相对本文件解析，应用只读模型目录。
+# road-assets nvinfer 配置（人工维护的运行参数）；ONNX/标签相对本文件解析，应用只读模型目录。
+# 与模型产物相关的键（onnx-file、labelfile-path、num-detected-classes、batch-size）由打包时的
+# 模型校验对照 model.yaml 与 release.json 检查。
 # engine 由 prepare_model_engines.py 预构建：nvinfer 自建派生名可能不同于读取路径。
-# model-engine-file 是唯一输出路径；绝对 /data 路径跨发布保留，相对路径落在模型树内。
+# model-engine-file 是唯一输出路径，必须在 /data/engines/road-assets/ 下：跨发布与清洁安装保留，模型目录只读。
 [property]
 gpu-id=0
 net-scale-factor=0.0039215697906911373
 model-color-format=0
-onnx-file=../onnx/best.onnx
-model-engine-file=/data/engines/road-assets/best.onnx_b1_gpu0_fp16.engine
-labelfile-path=../onnx/labels.txt
-# ONNX 以固定 batch=1 导出（onnx/export.json：batch 1、dynamic false），batch-size 只能为 1。
-# 多路时 nvinfer 逐帧推理；需要批处理时以 dynamic 重新导出，并在 config.trtexec 中给出形状。
+onnx-file=artifacts/model.onnx
+model-engine-file=/data/engines/road-assets/model_b1_gpu0_fp16.engine
+labelfile-path=artifacts/labels.txt
+# ONNX 以固定 batch=1 导出（release.json 的 onnx：batch 1、dynamic false），batch-size 只能为 1。
+# 多路时 nvinfer 逐帧推理；需要批处理时以 dynamic 重新导出，并在 nvinfer.trtexec 中给出形状。
 batch-size=1
 # 2 = FP16，它同时决定上面引擎名里的 fp16 段。
 network-mode=2

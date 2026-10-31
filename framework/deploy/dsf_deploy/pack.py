@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from . import envfile, inventory, layout, naming, render
+from . import envfile, inventory, layout, models, naming, render
 from .docker import Docker
 from .errors import DeployError
 
@@ -99,6 +99,7 @@ def payload_id_of(docker: Docker, apps_image: str) -> str:
 def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None = None) -> Path:
     docker = docker or Docker()
     plan = render.render(root, profile)
+    models.check(root)  # 模型与其配置不一致时，不产出发布包
     values = plan.variables
     project = values["PROJECT_NAME"]
     base_image, apps_image = values["BASE_IMAGE"], values["APPS_IMAGE"]

@@ -78,7 +78,7 @@ WebRTC 的媒体不走页面所在的 HTTP 连接：MediaMTX 在应答中告诉�
 | `CONTAINER_WORKSPACE` | `/workspace` | 载荷，只读，工作目录 |
 | `CONTAINER_CONFIG_PATH` | `/config` | `generated/config`，只读 |
 | `CONTAINER_DATA_PATH` | `/data` | `HOST_DATA_PATH`，可写，跨发布保留 |
-| `CONTAINER_MODELS_PATH` | `/models` | `models/`，业务只读，engine 预构建可写 |
+| `CONTAINER_MODELS_PATH` | `/models` | `models/`，所有容器只读 |
 
 日常命令：
 
@@ -111,7 +111,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 
 `model-engine-builder` 运行 `tools/prepare_model_engines.py --models-path /models`：
 
-- 扫描 `*.txt`，`[property]` 段同时含 `onnx-file` 与 `model-engine-file` 的就是待构建配置；输出路径完全遵循 `model-engine-file`（相对路径以配置目录为基准）。业务服务只读加载，nvinfer 不会把 engine 写到配置指定的路径，因此必须预构建。
+- 扫描 `*.txt`，`[property]` 段同时含 `onnx-file` 与 `model-engine-file` 的就是待构建配置；输出路径完全遵循 `model-engine-file`；随项目发布的模型必须把它设在 `/data/engines/<模型>/` 下（打包前的模型校验检查），模型目录只读，engine 跨发布与清洁安装保留。业务服务只读加载，nvinfer 不会把 engine 写到配置指定的路径，因此必须预构建。
 - 计算能力经 `libcuda` 的驱动 API 读取（NVIDIA runtime 在 x86 与 Jetson 上都提供），设备编号与 `trtexec --device`、nvinfer 的 `gpu-id` 一致；TensorRT 版本与每块 GPU 的计算能力每次运行只探测一次，在任何构建之前完成。读不到时失败，`--compute-cap` 可显式指定。
 - 指纹记录 ONNX 哈希、TensorRT 版本、GPU 计算能力、`network-mode`/`batch-size`/`int8-calib-file`、trtexec 参数，以及 engine 自身的哈希；engine 非空且指纹完全一致才复用，二者不配套时一定重建。
 - `network-mode=2` 自动加 `--fp16`，`=1` 加 `--int8`（有校准文件时加 `--calib`）。其他参数写在配置旁的 `<配置名>.trtexec`（例如动态形状），计入指纹。
@@ -124,7 +124,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 ```
 
-先渲染，再构建 base 与 apps（`--no-build` 跳过），然后打包到 `dist/<项目>-v<APPS_VERSION>-ds<DS版本>.tar.gz`：
+先渲染，再构建 base 与 apps（`--no-build` 跳过），校验 `models/`（见 [training.md](training.md) §7，不一致时不打包），然后打包到 `dist/<项目>-v<APPS_VERSION>-ds<DS版本>.tar.gz`：
 
 - apps 与依赖镜像（所有非空 `*_IMAGE`，排除上游与本项目镜像）每次都带；缺失的依赖镜像按 base 的平台拉取；所有镜像必须与 base 同平台。base 只在 `--with-base` 时带。
 - 部署文件：`docker-compose.yaml`、`framework/{compose,deploy,python/dsf}`、各单元的 `compose.yaml` 与 `templates/`、`profiles/`、`models/`、`site-fields.env`、`install.sh`。不含源码、Dockerfile、渲染结果、现场答案与 engine。
@@ -152,7 +152,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 
 规则：
 
-- 可写 bind 源不得与安装目录或发布包互相包含，唯一例外是 `model-engine-builder` 写本次安装的 `models/`；`/data` 必须是可写 bind；显式 `create_host_path: false` 的源必须已存在；缺失目录由安装用户创建，失败时指出阻塞的路径层级。
+- 可写 bind 源不得与安装目录或发布包互相包含（engine 写在 `/data`，不写 `models/`）；`/data` 必须是可写 bind；显式 `create_host_path: false` 的源必须已存在；缺失目录由安装用户创建，失败时指出阻塞的路径层级。
 - 普通升级保留现场新增的、与发布路径不冲突的文件；退役受管理文件被现场修改过时在停服前失败。
 - 清洁安装拒绝根目录、家目录、与包重叠的目录及不像安装目录的目录；数据目录与镜像保留。
 - 调用 shell 中的 `COMPOSE_FILE` 等选择变量被忽略，预检与执行看到同一份定义。

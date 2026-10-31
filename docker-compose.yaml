@@ -34,7 +34,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
       - app-files:${CONTAINER_WORKSPACE}:ro
-      - ./models:${CONTAINER_MODELS_PATH}  # 允许相对的 model-engine-file 写在模型目录内
+      - ./models:${CONTAINER_MODELS_PATH}:ro  # engine 只写到 /data/engines（打包前的模型校验保证）
       - ${HOST_DATA_PATH}:${CONTAINER_DATA_PATH}
       - /etc/localtime:/etc/localtime:ro
     working_dir: ${CONTAINER_WORKSPACE}

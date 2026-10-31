@@ -90,8 +90,9 @@ class PackInstallTest(ProjectTestCase):
         self.assertIn("framework/deploy/dsf-deploy.py", files)
         self.assertIn("services/app/compose.yaml", files)
         self.assertIn("services/app/templates/config/app.yaml", files)
-        self.assertIn("models/m/deployment/config.txt", files)
-        for excluded in ("services/app/src/main.cpp", "models/m/deployment/x.engine", "site.env", ".env",
+        self.assertIn("models/m/nvinfer.txt", files)
+        self.assertIn("models/m/artifacts/model.onnx", files)
+        for excluded in ("services/app/src/main.cpp", "models/m/x.engine", "site.env", ".env",
                          "generated/config/app.yaml", "framework/docker/base.Dockerfile", layout.BUILD_COMPOSE):
             self.assertNotIn(excluded, files)
         saved = sorted(call[1] for call in self.docker.calls if call[0] == "save")
@@ -205,8 +206,8 @@ class PackInstallTest(ProjectTestCase):
         package = self.pack(with_base=True)
         self.install(package)
         (self.install_dir / "notes.txt").write_text("site file")  # 现场文件保留
-        (self.root / "models/m/deployment/config.txt").unlink()
-        (self.root / "models/m/deployment/new.txt").write_text("[property]\n")
+        (self.root / "models/m/notes.md").unlink()
+        (self.root / "models/m/new.md").write_text("new notes\n")
         self.docker.files[self.apps] = {layout.PAYLOAD_ID_FILE: "fedcba987654"}  # 新载荷
         upgraded = self.pack(with_base=True)
         target = FakeDocker()
@@ -222,8 +223,8 @@ class PackInstallTest(ProjectTestCase):
         self.assertGreater(min(removed), started)
         self.assertEqual(target.volumes, {"demo_redis-data"})
         self.assertIn(f"已删除旧载荷卷 {old}", output)
-        self.assertFalse((self.install_dir / "models/m/deployment/config.txt").exists())
-        self.assertTrue((self.install_dir / "models/m/deployment/new.txt").exists())
+        self.assertFalse((self.install_dir / "models/m/notes.md").exists())
+        self.assertTrue((self.install_dir / "models/m/new.md").exists())
         self.assertTrue((self.install_dir / "notes.txt").exists())
 
     def test_reinstall_reuses_the_payload_volume_and_tolerates_volumes_in_use(self):
@@ -276,12 +277,12 @@ class PackInstallTest(ProjectTestCase):
     def test_obsolete_file_removed_after_preflight_does_not_abort_the_upgrade(self):
         package = self.pack(with_base=True)
         self.install(package)
-        (self.root / "models/m/deployment/config.txt").unlink()
+        (self.root / "models/m/notes.md").unlink()
         upgraded = self.pack(with_base=True)
         target = FakeDocker()
         with redirect_stdout(io.StringIO()):
             plan = preflight.prepare(Options(upgraded, self.install_dir, interactive=False), target)
-            obsolete = self.install_dir / "models/m/deployment/config.txt"
+            obsolete = self.install_dir / "models/m/notes.md"
             self.assertEqual(plan.obsolete, [obsolete])
             obsolete.unlink()  # 现场在预检与执行之间删除了它
             apply(plan, target, 5)
@@ -290,8 +291,8 @@ class PackInstallTest(ProjectTestCase):
     def test_modified_obsolete_file_blocks_the_upgrade_before_stopping(self):
         package = self.pack(with_base=True)
         self.install(package)
-        (self.install_dir / "models/m/deployment/config.txt").write_text("edited on site")
-        (self.root / "models/m/deployment/config.txt").unlink()
+        (self.install_dir / "models/m/notes.md").write_text("edited on site")
+        (self.root / "models/m/notes.md").unlink()
         upgraded = self.pack(with_base=True)
         with self.assertRaisesRegex(DeployError, "在现场被修改过"):
             self.install(upgraded)
@@ -461,6 +462,16 @@ class PackInstallTest(ProjectTestCase):
         package = self.pack(with_base=True)
         with self.assertRaisesRegex(DeployError, "与安装目录 .* 重叠"):
             self.install(package)
+
+    def test_models_cannot_be_mounted_writable(self):
+        # 模型目录属于安装内容：profile 把它改成可写挂载时，与安装目录重叠的检查照常拒绝。
+        profile = self.root / "profiles/test.yaml"
+        profile.write_text(profile.read_text() + "services:\n  model-engine-builder:\n"
+                                                  "    volumes: [./models:/models]\n")
+        package = self.pack(with_base=True)
+        with self.assertRaisesRegex(DeployError, "model-engine-builder：可写挂载 .*/models 与安装目录 .* 重叠"):
+            self.install(package)
+        self.assertFalse(self.install_dir.exists())
 
     def test_preflight_failure_keeps_the_running_installation(self):
         package = self.pack(with_base=True)

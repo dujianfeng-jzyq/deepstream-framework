@@ -1,4 +1,4 @@
-"""命令行入口：render / profile-variables / pack / install / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
+"""命令行入口：render / profile-variables / check-models / pack / install / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import pack, project, render
+from . import models, pack, project, render
 from .errors import DeployError
 from .install import Options, install
 
@@ -28,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     p = commands.add_parser("profile-variables", help="print the x-build variables of a profile as JSON (used by the installer)")
     p.add_argument("--root")
     p.add_argument("--profile", required=True)
+
+    p = commands.add_parser("check-models", help="check models/ (spec, release record, artifacts, nvinfer configs)")
+    p.add_argument("--root")
 
     p = commands.add_parser("pack", help="render and create a release package (the images must be built)")
     p.add_argument("--root")
@@ -60,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
             render.render(_root(args.root), args.profile, quiet=args.quiet)
         elif args.command == "profile-variables":
             print(json.dumps(render.profile_variables(_root(args.root), args.profile)))
+        elif args.command == "check-models":
+            models.check(_root(args.root))
+            print("models ok")
         elif args.command == "pack":
             pack.pack(_root(args.root), args.profile, args.with_base)
         elif args.command == "install":

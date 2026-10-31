@@ -79,7 +79,7 @@ framework/
   tests/                     框架与部署测试
 services/<name>/             应用、Python 服务或基础设施单元
 plugins/<name>/              推理自定义库等产品插件
-models/<id>/                 模型、标签、推理配置与元数据
+models/<id>/                 模型规格、发布记录、产物与推理配置
 profiles/                    平台部署方案
 project.env                  项目身份、版本与公共默认值（上游镜像由 profile 写明）
 site-fields.env              现场参数清单
@@ -328,7 +328,7 @@ base tag 包含 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES` 的输入�
 |---|---|---|
 | `/workspace` | 程序载荷 | 只读 |
 | `/config` | 渲染后的配置 | 只读 |
-| `/models` | 模型、推理配置与 engine | 只读；预构建服务可写 |
+| `/models` | 模型与推理配置 | 只读（engine 写在 `/data/engines`） |
 | `/data` | 录像与其他持久数据 | 可写 |
 
 公共部署机制通过 `--check-config` 和 `io.deepstream.config-check` 标签执行服务预检，通过 `$DSF_READY_FILE` 判断运行进度。容器 runtime 由需要 GPU 的单元自己声明（公共定义不预设，Python 服务不一定需要 GPU）；设备与补充用户组由 profile 定义。
@@ -355,7 +355,7 @@ profile 用 `x-platform` 声明面向的平台。打包时镜像必须是这个�
 
 ### 8.4 模型与 engine
 
-模型目录包含 ONNX、标签、推理配置和元数据。engine 预构建工具扫描 nvinfer 配置，不依赖具体应用字段；输出路径遵循 `model-engine-file`。
+模型目录分为人写的规格（`model.yaml`）、工具写的发布事实（`release.json`）、已发布的产物（`artifacts/`）与 nvinfer 配置。规格中的类别、输入尺寸与输出布局是部署契约：打包前校验它们与发布记录、产物哈希、标签及 nvinfer 配置一致，契约漂移在开发机上失败而不是在现场。训练数据与过程留在仓库外的训练根目录，见 [training.md](training.md)。engine 预构建工具扫描 nvinfer 配置，不依赖具体应用字段；输出路径遵循 `model-engine-file`。
 
 复用指纹包含 ONNX、TensorRT 版本、GPU 计算能力、构建参数及 engine 自身哈希。只有文件非空且指纹匹配时才复用；同一目标使用文件锁串行检查与构建，临时文件成功后才替换正式 engine，失败保留旧文件。
 

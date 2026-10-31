@@ -12,7 +12,7 @@ GPU 计算能力、影响产物的 nvinfer 属性、trtexec 参数，以及 engi
 # 开头为注释；这些参数计入指纹。
 
     python3 tools/prepare_model_engines.py --models-path /models
-    python3 tools/prepare_model_engines.py /models/<model>/deployment/config.txt
+    python3 tools/prepare_model_engines.py /models/<model>/nvinfer.txt
 """
 
 from __future__ import annotations

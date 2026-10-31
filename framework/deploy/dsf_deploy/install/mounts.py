@@ -1,8 +1,8 @@
 """按最终 Compose 定义检查并准备可写的 bind 挂载源。
 
 只检查实际使用的可写 bind（profile 可以覆盖挂载，未使用的 HOST_DATA_PATH 不创建也不检查）。
-数据挂载点必须是可写 bind 目录；任何可写源都不得与安装目录或发布包互相包含，
-唯一例外是 engine 预构建服务写本次安装的 models/。显式 create_host_path: false 的源必须已存在。
+数据挂载点必须是可写 bind 目录；任何可写源都不得与安装目录或发布包互相包含（engine 写在 /data，
+不写模型目录）。显式 create_host_path: false 的源必须已存在。
 """
 
 from __future__ import annotations
@@ -13,8 +13,6 @@ from pathlib import Path
 
 from .. import layout
 from ..errors import DeployError
-
-ENGINE_BUILDER = "model-engine-builder"
 
 
 def _overlaps(a: Path, b: Path) -> bool:
@@ -42,7 +40,6 @@ def ensure_directory(path: Path) -> None:
 def prepare(services: dict, install_dir: Path, package_root: Path) -> list[Path]:
     """检查全部可写 bind 后再创建目录，坏挂载不会在发现之前留下半成品。返回准备好的路径。"""
     data_target = layout.MOUNTS["CONTAINER_DATA_PATH"]
-    models_target = layout.MOUNTS["CONTAINER_MODELS_PATH"]
     directories: dict[Path, bool] = {}
     must_exist: set[Path] = set()
     for name, service in sorted(services.items()):
@@ -54,9 +51,6 @@ def prepare(services: dict, install_dir: Path, package_root: Path) -> list[Path]
             if not writable_bind:
                 continue
             source = Path(mount["source"]).resolve()
-            if name == ENGINE_BUILDER and mount.get("target") == models_target and \
-                    source == (install_dir / layout.MODELS).resolve():
-                continue
             for protected, label in ((install_dir, "安装"), (package_root, "发布包")):
                 if _overlaps(source, protected):
                     raise DeployError(f"{name}：可写挂载 {source} 与{label}目录 {protected} 重叠")

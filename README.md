@@ -100,7 +100,7 @@ scripts/new-app.sh my-uploader --kind python       # 生成 Python 服务单元
 framework/          框架：cmake/ cpp/ python/ deploy/ docker/ compose/ tools/ templates/ tests/
 services/<name>/    服务单元：代码、templates/ 配置模板、compose.yaml
 plugins/<name>/     推理自定义库等 SDK 插件
-models/<id>/        模型、标签与 nvinfer 配置
+models/<id>/        模型：model.yaml 规格、release.json 发布记录、artifacts/ 产物、nvinfer 配置（见 docs/training.md）
 profiles/           部署方案（平台差异、Compose 覆盖、配置覆盖）
 project.env         项目身份、版本与公共默认值（上游镜像写在各 profile）
 site-fields.env     现场参数清单

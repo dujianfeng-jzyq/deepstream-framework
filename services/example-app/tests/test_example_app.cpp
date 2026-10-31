@@ -176,7 +176,7 @@ TEST(h265_rtsp_output_warns_about_browser_playback) {
 
 TEST(cross_field_rules) {
   const std::string base = Template();
-  CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/deployment/config.txt",
+  CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/nvinfer.txt",
                             "inference: []")),
                "tracker.enabled: requires at least one inference");
   std::string no_output = Replace(base, "  osd: true\n\nrtsp_out:\n  enabled: true",
@@ -188,7 +188,7 @@ TEST(cross_field_rules) {
                                    "  osd: false\n\nrtsp_out:\n  enabled: false");
   redis_only = Replace(redis_only, "tracker:\n  enabled: true", "tracker:\n  enabled: false");
   CHECK(Load(redis_only).redis.enabled);
-  CHECK_THROWS(Load(Replace(redis_only, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/deployment/config.txt",
+  CHECK_THROWS(Load(Replace(redis_only, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/nvinfer.txt",
                             "inference: []")),
                "or redis with at least one inference entry");
   CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");

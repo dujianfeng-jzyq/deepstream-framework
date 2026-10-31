@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -74,6 +75,31 @@ x-app-config:
 
 # apps 镜像中记录的载荷标识（apps.Dockerfile 写入 /payload-id）。
 PAYLOAD_ID = "0123456789ab"
+
+
+def write_model(directory: Path, classes=("car", "person")) -> dict:
+    """写一个通过契约校验的已发布模型（见 dsf_deploy.models），返回它的 release.json 内容。"""
+    from dsf_deploy import models
+    (directory / "artifacts").mkdir(parents=True)
+    (directory / "artifacts/model.onnx").write_bytes(b"onnx")
+    (directory / "artifacts/labels.txt").write_text("".join(f"{name}\n" for name in classes))
+    (directory / "model.yaml").write_text(
+        f"schema: 1\nid: {directory.name}\ntask: detect\nclasses: [{', '.join(classes)}]\n"
+        "input: {width: 64, height: 32}\noutput_layout: xyxy-confidence-class_id\n")
+    release = {
+        "schema": 1, "model": directory.name, "release": "r1", "classes": list(classes),
+        "input": {"width": 64, "height": 32}, "output_layout": "xyxy-confidence-class_id",
+        "onnx": {"batch": 1, "dynamic": False, "inputs": [{"name": "input", "shape": [1, 3, 32, 64]}],
+                 "outputs": [{"name": "output", "shape": [1, 100, 6]}]},
+        "artifacts": {name: models.sha256(directory / name)
+                      for name in ("artifacts/model.onnx", "artifacts/labels.txt")},
+    }
+    (directory / "release.json").write_text(json.dumps(release))
+    (directory / "nvinfer.txt").write_text(
+        f"[property]\nonnx-file=artifacts/model.onnx\nlabelfile-path=artifacts/labels.txt\n"
+        f"model-engine-file=/data/engines/{directory.name}/model_b1_gpu0_fp16.engine\nbatch-size=1\n"
+        f"num-detected-classes={len(classes)}\n")
+    return release
 
 
 def docker_cli_available() -> bool:
@@ -225,10 +251,9 @@ class ProjectTestCase(unittest.TestCase):
         (unit / "templates/config/app.yaml").write_text(UNIT_TEMPLATE)
         (unit / "src").mkdir()
         (unit / "src/main.cpp").write_text("int main() {}\n")
-        model = self.root / "models/m/deployment"
-        model.mkdir(parents=True)
-        (model / "config.txt").write_text("[property]\nonnx-file=../m.onnx\n")
-        (model / "x.engine").write_text("device-specific")
+        write_model(self.root / "models/m")
+        (self.root / "models/m/x.engine").write_text("device-specific")
+        (self.root / "models/m/notes.md").write_text("model notes\n")
         (self.root / layout.SITE_ENV).write_text("SITE_NAME=lab\n")
         self.environ = dict(os.environ)
 

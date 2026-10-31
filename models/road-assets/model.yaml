@@ -1,8 +1,12 @@
+# road-assets：道路资产检测。模型规格，人工维护；训练、发布与打包都从这里读取。
+# 发布事实（产物、来源、指标）由发布工具写进 release.json，不手改。
+schema: 1
 id: road-assets
 display_name: 道路资产检测
 task: detect
-backend: ultralytics-yolo
 
+# 顺序即类别号，发布后不能调换或删减：已部署的业务规则与历史数据按类别号解读。
+# 名称同时是标注中的类别名与 OSD 显示的标签（labels.txt）。
 classes:
   - 标志牌(绿底矩形)
   - 标志牌(菱形)
@@ -31,28 +35,35 @@ classes:
   - 波形梁护栏破损
   - 波形梁护栏坠落
   - 金属梁护栏破损
-ignored_classes:
-  - 待定
 
-dataset:
-  source_model_id: road-assets
-  val_ratio: 0.15
-  test_ratio: 0.15
-  seed: 42
-  split_strategy: balanced_group
-  capture_group_fallback: filename_prefix
-  copy_mode: hardlink
+# 部署契约：网络输入尺寸与输出布局。plugins/yolo-parser 只接受 xyxy-confidence-class_id
+# （唯一输出层 [batch, 候选数, 6]）；导出时按它追加转换，发布时校验导出的 ONNX 与之一致。
+input: {width: 640, height: 640}
+output_layout: xyxy-confidence-class_id
 
+# 数据准备：从训练根目录 sources/ 下的这些来源导入；标注中的其他类别名报错，ignore_classes 中的丢弃。
+data:
+  sources: [road-assets]
+  ignore_classes: [待定]
+  split:
+    val: 0.15
+    test: 0.15
+    seed: 42
+    # 同一采集组（文件名前缀相同的连续帧）整体进入同一份划分，避免近似帧同时出现在训练与测试中。
+    group_by: filename_prefix
+
+# 训练：backend 选择训练后端；options 原样交给后端（这里是 Ultralytics 的 train 参数）。
 train:
-  model: yolo11s.pt
-  epochs: 200
-  batch: 16
-  imgsz: 640
-  patience: 50
-  workers: 8
-  optimizer: auto
-  cache: false
-  augmentation:
+  backend: ultralytics
+  weights: yolo11s.pt
+  options:
+    epochs: 200
+    batch: 16
+    imgsz: 640
+    patience: 50
+    workers: 8
+    optimizer: auto
+    cache: false
     hsv_h: 0.0138
     hsv_s: 0.664
     hsv_v: 0.464
@@ -67,13 +78,16 @@ train:
     mixup: 0.1
     close_mosaic: 10
 
-evaluation:
-  slices:
-    all: null
+# 发布门槛：在本次数据集的测试划分上评估。min 是绝对下限；regression 与 release.json 中的
+# 当前模型在同一测试划分上重新评估后比较（没有当前模型时跳过）。
+evaluate:
+  gate:
+    min: {}
+    regression: {metric: map50_95, max_drop: 0.01}
 
 export:
-  imgsz: 640
-  batch: 1
+  format: onnx
   opset: 17
+  batch: 1
   dynamic: false
   simplify: true

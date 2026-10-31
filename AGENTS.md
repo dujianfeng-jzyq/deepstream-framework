@@ -1,6 +1,6 @@
 # 开发约定
 
-人和 AI agent 修改本仓库时都按本文件执行。框架接口见 [docs/framework.md](docs/framework.md)，构建与部署见 [docs/deployment.md](docs/deployment.md)，设计依据见 [docs/design.md](docs/design.md)。
+人和 AI agent 修改本仓库时都按本文件执行。框架接口见 [docs/framework.md](docs/framework.md)，构建与部署见 [docs/deployment.md](docs/deployment.md)，模型训练与发布见 [docs/training.md](docs/training.md)，设计依据见 [docs/design.md](docs/design.md)。
 
 ## 核心原则
 
