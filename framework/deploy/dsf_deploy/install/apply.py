@@ -2,7 +2,7 @@
 停服之后到启动之前的任何失败或中断（包括 Ctrl-C）都会说明现场状态与恢复办法，再原样抛出；
 就绪等待中的中断只结束等待，服务已经启动。
 
-顺序：重验目标 → 用旧定义停服 → 按需清空目录 → 删除退役文件 → 复制发布文件 →
+顺序：重验目标 → 用旧定义停服 → 按需清空目录 → 删除退役文件 → 复制发布文件 → 删除因此变空的目录 →
 写入 project.env、site.env、受管理清单与预检过的配置快照 → 启动 → 清理旧载荷卷 → 等待就绪。
 载荷卷按载荷标识命名，新载荷总是播种到新卷，停服后不需要删卷；旧卷在启动之后才不再被引用。
 """
@@ -74,6 +74,19 @@ def _prune_payload_volumes(plan: Plan, projects: list[str], docker: Docker) -> N
             print(f"提示：载荷卷 {name} 仍在使用，没有删除", file=sys.stderr)
 
 
+def _remove_empty_directories(root: Path, retired: list[Path]) -> None:
+    """删除因退役文件而变空的目录：从每个退役文件所在目录向上，到第一个非空目录或安装根为止。
+    在复制新版本文件之后执行，新版本仍使用的目录不会被删除再重建；含现场文件的目录保留。"""
+    for directory in sorted({path.parent for path in retired}, key=lambda path: len(path.parts), reverse=True):
+        while directory != root and root in directory.parents:
+            if directory.is_dir() and not directory.is_symlink():
+                if any(directory.iterdir()):
+                    break
+                directory.rmdir()
+                print(f"已删除空目录 {directory.relative_to(root)}")
+            directory = directory.parent  # 已被现场删除的目录：继续检查上一级
+
+
 def _replace(plan: Plan, docker: Docker) -> None:
     """停旧服务并写入新版本的全部文件。"""
     root, package = plan.install_dir, plan.package_root
@@ -95,6 +108,7 @@ def _replace(plan: Plan, docker: Docker) -> None:
         destination = root / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(package / name, destination)
+    _remove_empty_directories(root, plan.obsolete)
     # 目标机的 project.env 由发布事实派生；镜像名由包决定，不按目标机 profile 重新派生。
     envfile.write(root / layout.PROJECT_ENV, envfile.read(package / layout.RELEASE_ENV, expand_home=False),
                   ("GENERATED from release.env by the installer — DO NOT EDIT",))

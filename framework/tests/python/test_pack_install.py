@@ -274,6 +274,25 @@ class PackInstallTest(ProjectTestCase):
         target.containers = [("demo-app-1", str(self.install_dir))]  # 本安装启动的容器：照常升级
         self.install(package, target)
 
+    def test_directories_emptied_by_retired_files_are_removed(self):
+        for name in ("models/m/old/v1/a.md", "models/m/old/b.md", "models/m/kept/c.md", "models/m/reused/d.md"):
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_text(name)
+        self.install(self.pack(with_base=True))
+        (self.install_dir / "models/m/kept/site.txt").write_text("added on site")
+        for name in ("models/m/old/v1/a.md", "models/m/old/b.md", "models/m/kept/c.md", "models/m/reused/d.md"):
+            (self.root / name).unlink()
+        (self.root / "models/m/reused/e.md").write_text("new file in a retired file's directory")
+        _, output = self.install(self.pack(with_base=True))
+        root = self.install_dir / "models/m"
+        self.assertFalse((root / "old").exists())  # 逐级向上删除
+        self.assertEqual(sorted(p.name for p in (root / "kept").iterdir()), ["site.txt"])  # 现场文件保留目录
+        self.assertEqual(sorted(p.name for p in (root / "reused").iterdir()), ["e.md"])
+        self.assertTrue((root / "nvinfer.txt").is_file())
+        self.assertIn("已删除空目录 models/m/old/v1", output)
+        self.assertIn("已删除空目录 models/m/old\n", output)
+        self.assertNotIn("已删除空目录 models/m/kept", output)
+
     def test_obsolete_file_removed_after_preflight_does_not_abort_the_upgrade(self):
         package = self.pack(with_base=True)
         self.install(package)
