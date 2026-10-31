@@ -33,6 +33,12 @@ class RenderTest(ProjectTestCase):
         self.assertEqual(values["COMPOSE_FILE"],
                          f"docker-compose.yaml:{layout.BUILD_COMPOSE}:services/app/compose.yaml:profiles/test.yaml")
 
+    def test_empty_data_path_means_the_default(self):
+        self.assertEqual(self.plan().variables["HOST_DATA_PATH"], str(self.data))
+        project_env = self.root / layout.PROJECT_ENV
+        project_env.write_text(project_env.read_text().replace(f"HOST_DATA_PATH={self.data}", "HOST_DATA_PATH="))
+        self.assertEqual(self.plan().variables["HOST_DATA_PATH"], os.path.expanduser("~/demo/data"))
+
     def test_templates_are_substituted_and_overridden(self):
         content = self.plan().files["generated/config/app.yaml"]
         self.assertIn("camera: cam0", content)

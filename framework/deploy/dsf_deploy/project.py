@@ -24,20 +24,20 @@ def _rewrite(path: Path, key: str, value: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def init_project(root: Path, name: str, data_path: str | None) -> None:
-    """改项目名与数据目录（其余字段与注释保留），并清除属于旧名称的渲染产物。"""
+def init_project(root: Path, name: str) -> None:
+    """改项目名（其余字段与注释保留），并清除属于旧名称的渲染产物。
+    HOST_DATA_PATH 留空时随项目名取默认位置；显式写的值不改动。"""
     if not NAME.match(name):
         raise DeployError(f"invalid project name {name!r}: lowercase letters, digits and '-', "
                           "starting with a letter (it names images, volumes and containers)")
     project_env = root / layout.PROJECT_ENV
     _rewrite(project_env, "PROJECT_NAME", name)
-    _rewrite(project_env, "HOST_DATA_PATH", data_path or f"~/{name}/data")
     for stale in (root / layout.ENV, root / layout.GENERATED):
         if stale.is_dir():
             shutil.rmtree(stale)
         elif stale.exists():
             stale.unlink()
-    print(f"project: {name}\ndata:    {data_path or f'~/{name}/data'}")
+    print(f"project: {name}")
 
 
 # Compose 文件 services: 下的服务名。只读两空格缩进的键，不解析 YAML（与安装器一样只用标准库）。

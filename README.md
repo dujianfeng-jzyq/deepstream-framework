@@ -58,7 +58,7 @@ sudo systemctl restart docker                        # 会重启正在运行的�
 
 ```bash
 scripts/apply-profile.sh server-ds71           # 选择部署方案，渲染 .env 与 generated/
-mkdir -p ~/deepstream-example/data             # 数据目录（project.env 的 HOST_DATA_PATH）
+mkdir -p ~/deepstream-example/data             # 数据目录（默认 ~/<项目名>/data）
 docker compose build deepstream-base deepstream-apps
 docker compose up -d
 docker compose logs -f example-app
@@ -89,7 +89,7 @@ scripts/build-release.sh --with-base   # 首次部署或 base 变化时带上 ba
 ## 新建项目与服务
 
 ```bash
-scripts/init-project.sh my-product                 # 改项目名与数据目录
+scripts/init-project.sh my-product                 # 改项目名
 scripts/new-app.sh my-detector --kind cpp          # 生成 C++ 应用单元
 scripts/new-app.sh my-uploader --kind python       # 生成 Python 服务单元
 ```

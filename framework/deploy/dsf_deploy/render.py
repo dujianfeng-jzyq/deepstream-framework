@@ -295,7 +295,8 @@ def _resolve_variables(root: Path, profile_name: str,
 
     if not released:
         variables.update(_derived_images(root, profile_name, variables))
-    variables.setdefault("HOST_DATA_PATH", os.path.expanduser(f"~/{variables['PROJECT_NAME']}/data"))
+    if not variables.get("HOST_DATA_PATH"):  # project.env 留空表示默认位置
+        variables["HOST_DATA_PATH"] = os.path.expanduser(f"~/{variables['PROJECT_NAME']}/data")
     variables.update(layout.MOUNTS)
     # 业务容器以渲染用户运行，写进数据目录的文件归现场用户所有。
     variables["HOST_UID"] = str(os.getuid())

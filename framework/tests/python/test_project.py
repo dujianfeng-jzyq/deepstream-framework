@@ -73,19 +73,17 @@ class InitProjectTest(unittest.TestCase):
     def test_renames_the_project_and_removes_stale_render_output(self):
         root = Path(tempfile.mkdtemp(prefix="dsf-project-"))
         self.addCleanup(shutil.rmtree, root)
-        (root / layout.PROJECT_ENV).write_text("# 项目名\nPROJECT_NAME=old\nAPPS_VERSION=1.0.0\n"
-                                               "HOST_DATA_PATH=~/old/data\n")
+        (root / layout.PROJECT_ENV).write_text("# 项目名\nPROJECT_NAME=old\nAPPS_VERSION=1.0.0\n")
         (root / layout.ENV).write_text("PROJECT_NAME=old\n")
         (root / layout.GENERATED / "config").mkdir(parents=True)
         with redirect_stdout(StringIO()):
-            project.init_project(root, "acme-vision", None)
+            project.init_project(root, "acme-vision")
         self.assertEqual((root / layout.PROJECT_ENV).read_text(),
-                         "# 项目名\nPROJECT_NAME=acme-vision\nAPPS_VERSION=1.0.0\n"
-                         "HOST_DATA_PATH=~/acme-vision/data\n")
+                         "# 项目名\nPROJECT_NAME=acme-vision\nAPPS_VERSION=1.0.0\n")
         self.assertFalse((root / layout.ENV).exists())
         self.assertFalse((root / layout.GENERATED).exists())
         with self.assertRaisesRegex(DeployError, "invalid project name"):
-            project.init_project(root, "Acme", None)
+            project.init_project(root, "Acme")
 
 
 if __name__ == "__main__":

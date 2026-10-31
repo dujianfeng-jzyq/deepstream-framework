@@ -295,7 +295,7 @@ DeepStream 应用通过 `ReadyWhen` 使用 `MetaTap::frames()`，按批次元数
 
 服务单元包含 `compose.yaml`，可按需包含源代码、`CMakeLists.txt`、配置模板、依赖清单和测试。应用、插件和 Python 服务分别通过 `dsf_add_app`、`dsf_add_plugin`、`dsf_add_python_service` 登记，安装规则决定交付内容。
 
-`new-app` 根据 C++ 或 Python 模板生成服务目录；`init-project` 设置产品项目身份与数据路径。新增单元通过目录发现与公共约定接入，平台设置放在 profile 中。
+`new-app` 根据 C++ 或 Python 模板生成服务目录；`init-project` 设置产品项目身份。新增单元通过目录发现与公共约定接入，平台设置放在 profile 中。
 
 `example-app` 展示多路视频到推理、跟踪、消息、录像和 RTSP 的完整组合：`config.cpp` 负责配置，`plan.cpp` 生成图，`main.cpp` 接入 SDK 元数据、录像器和发布通道。配置与图结构可脱离 SDK 测试。多源 RTSP 输出经 tiler 合流，录像可经 demux 分流；这些是示例策略。
 

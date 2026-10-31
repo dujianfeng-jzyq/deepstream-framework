@@ -46,10 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="只预检并打印计划，不停服、不写安装目录")
     p.add_argument("--ready-timeout", type=float, default=180.0, help="启动后的就绪等待上限（秒）")
 
-    p = commands.add_parser("init", help="set the name and data directory of a derived project")
+    p = commands.add_parser("init", help="set the name of a derived project")
     p.add_argument("name")
     p.add_argument("--root")
-    p.add_argument("--data-path")
     p.add_argument("--profile", help="render this profile right after initializing")
 
     p = commands.add_parser("new-app", help="create a service unit skeleton")
@@ -74,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                             ready_timeout=args.ready_timeout))
         elif args.command == "init":
             root = _root(args.root)
-            project.init_project(root, args.name, args.data_path)
+            project.init_project(root, args.name)
             if args.profile:
                 render.render(root, args.profile)
         elif args.command == "new-app":
