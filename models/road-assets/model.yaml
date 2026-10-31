@@ -41,7 +41,9 @@ classes:
 input: {width: 640, height: 640}
 output_layout: xyxy-confidence-class_id
 
-# 数据准备：从训练根目录 sources/ 下的这些来源导入；标注中的其他类别名报错，ignore_classes 中的丢弃。
+# 数据集：训练根目录 sources/ 下的这些来源（X-AnyLabeling 标注）；标注中的其他类别名报错，
+# ignore_classes 中的丢弃。划分按采集组（导入时确定：同一视频、同一目录或同一文件名前缀）的哈希决定，
+# 加入新来源时已有样本的划分不变（docs/training.md §6）。
 data:
   sources: [road-assets]
   ignore_classes: [待定]
@@ -49,8 +51,6 @@ data:
     val: 0.15
     test: 0.15
     seed: 42
-    # 同一采集组（文件名前缀相同的连续帧）整体进入同一份划分，避免近似帧同时出现在训练与测试中。
-    group_by: filename_prefix
 
 # 训练：backend 选择训练后端；options 原样交给后端（这里是 Ultralytics 的 train 参数）。
 train:

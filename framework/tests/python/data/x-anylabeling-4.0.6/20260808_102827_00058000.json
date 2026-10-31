@@ -1,0 +1,45 @@
+{
+  "version": "4.0.6",
+  "flags": {},
+  "checked": false,
+  "shapes": [
+    {
+      "label": "标志牌(圆牌)",
+      "points": [
+        [
+          1345.79443359375,
+          456.11553955078125
+        ],
+        [
+          1379.8740234375,
+          456.11553955078125
+        ],
+        [
+          1379.8740234375,
+          491.62042236328125
+        ],
+        [
+          1345.79443359375,
+          491.62042236328125
+        ]
+      ],
+      "group_id": null,
+      "description": "",
+      "difficult": false,
+      "shape_type": "rectangle",
+      "flags": {},
+      "attributes": {
+        "遮挡": "否",
+        "脏污": "否",
+        "破损": "否",
+        "歪斜": "否"
+      },
+      "kie_linking": []
+    }
+  ],
+  "imagePath": "20260808_102827_00058000.jpg",
+  "imageData": null,
+  "imageHeight": 1080,
+  "imageWidth": 1920,
+  "description": ""
+}
