@@ -37,11 +37,17 @@ PACKAGE_EXCLUDED_NAMES = ("__pycache__", ".DS_Store")
 
 # 服务声明支持无副作用预检的标签。
 CONFIG_CHECK_LABEL = "io.deepstream.config-check"
+# 载荷卷在 docker-compose.yaml 中的键；卷名带载荷标识（见 payload_volume）。
 PAYLOAD_VOLUME = "app-files"
+# apps 镜像中载荷标识所在的文件（载荷树的摘要），打包时写进 release.env 的 PAYLOAD_ID_KEY。
+PAYLOAD_ID_FILE = "/payload-id"
+PAYLOAD_ID_KEY = "APPS_PAYLOAD_ID"
+# 开发渲染的载荷标识：Compose 在构建之前就要确定卷名，开发机上无法按内容命名。
+DEV_PAYLOAD_ID = "dev"
 # apps 镜像记录构建时源码版本的标签（naming.source_revision），打包时比对。
 SOURCE_REVISION_LABEL = "io.deepstream.source-revision"
 
 
-def payload_volume(project_name: str) -> str:
-    """Compose 为载荷卷生成的全名（项目名来自 docker-compose.yaml 的 name: ${PROJECT_NAME}）。"""
-    return f"{project_name}_{PAYLOAD_VOLUME}"
+def payload_volume(project_name: str, payload_id: str) -> str:
+    """载荷卷的全名，与 docker-compose.yaml 中 app-files 的 name: 一致。"""
+    return f"{project_name}_{PAYLOAD_VOLUME}-{payload_id}"

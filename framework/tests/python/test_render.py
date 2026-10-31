@@ -182,6 +182,7 @@ class RenderTest(ProjectTestCase):
     def test_release_render_rejects_profiles_for_another_package(self):
         env = self.root / layout.PROJECT_ENV
         env.write_text(env.read_text() + "BASE_IMAGE=demo/base:fixed\nAPPS_IMAGE=demo/apps:fixed\n"
+                       "APPS_PAYLOAD_ID=0123456789ab\n"
                        "TARGET_PLATFORM=amd64\nDEEPSTREAM_VERSION=8.0\n")
         profiles = self.root / "profiles"
         (profiles / "server.yaml").write_text("x-platform: amd64\n")
@@ -210,14 +211,24 @@ class RenderTest(ProjectTestCase):
         env.write_text(env.read_text().replace("BASE_APT_PACKAGES=", "BASE_APT_PACKAGES=libfoo"))
         self.assertNotEqual(self.plan().variables["BASE_IMAGE"], before)
 
+    def test_development_payload_volume_has_a_fixed_name(self):
+        # 卷名在构建之前确定，开发机上无法按载荷内容命名。
+        self.assertEqual(self.plan().variables["APPS_PAYLOAD_ID"], "dev")
+        env = self.root / layout.PROJECT_ENV
+        env.write_text(env.read_text() + "BASE_IMAGE=demo/base:fixed\nAPPS_IMAGE=demo/apps:fixed\n")
+        with self.assertRaisesRegex(DeployError, "APPS_PAYLOAD_ID"):
+            self.plan()  # 发布包派生的安装必须带载荷标识
+
     def test_release_installations_keep_packaged_images(self):
         env = self.root / layout.PROJECT_ENV
         env.write_text(env.read_text() + "BASE_IMAGE=demo/base:fixed\nAPPS_IMAGE=demo/apps:fixed\n"
+                       "APPS_PAYLOAD_ID=0123456789ab\n"
                        "DEEPSTREAM_IMAGE=nvcr.io/nvidia/deepstream:8.0-samples-multiarch\n")  # 来自 release.env
         profile = self.root / "profiles/test.yaml"
         profile.write_text("x-build:\n  DEEPSTREAM_IMAGE: other:7.1\n")
         plan = self.plan()
         self.assertEqual(plan.variables["BASE_IMAGE"], "demo/base:fixed")
+        self.assertEqual(plan.variables["APPS_PAYLOAD_ID"], "0123456789ab")  # 载荷卷名同样由包决定
         self.assertEqual(plan.variables["DEEPSTREAM_IMAGE"], "nvcr.io/nvidia/deepstream:8.0-samples-multiarch")
         # 计算渲染计划不输出任何东西：提示随计划返回，由 render() 输出（安装器同样经过它）。
         self.assertEqual(plan.notes, ["images come from the release package; ignoring x-build DEEPSTREAM_IMAGE"])

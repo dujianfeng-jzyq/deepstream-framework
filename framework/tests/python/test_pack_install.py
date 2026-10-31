@@ -11,7 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from deploy_support import PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
+from deploy_support import PAYLOAD_ID, PROFILE, FakeDocker, ProjectTestCase, docker_cli_available
 from dsf_deploy import cli, inventory, layout, naming, pack, render, site
 from dsf_deploy.envfile import read, unquote_answer
 from dsf_deploy.errors import DeployError
@@ -37,6 +37,7 @@ class PackInstallTest(ProjectTestCase):
         self.platform = naming.host_platform()
         self.other = "arm64" if self.platform == "amd64" else "amd64"
         self.docker.images.update({self.base: self.platform, self.apps: self.platform})
+        self.docker.files[self.apps] = {layout.PAYLOAD_ID_FILE: PAYLOAD_ID}
         self.install_dir = self.tmp / "installed"
         os.environ["XDG_DATA_HOME"] = str(self.tmp / "xdg")
 
@@ -100,6 +101,7 @@ class PackInstallTest(ProjectTestCase):
         self.assertEqual(release["APPS_VERSION"], "1.2.1")   # 取渲染结果（含 profile 覆盖）
         self.assertEqual(release["TARGET_PLATFORM"], self.platform)
         self.assertEqual(release["CONFIG_PROFILE"], "test")
+        self.assertEqual(release["APPS_PAYLOAD_ID"], PAYLOAD_ID)  # 载荷卷的卷名取自镜像记录的标识
         self.assertNotIn("SITE_NAME", release)              # 现场答案不进包
         self.assertTrue(package.name.endswith("demo-v1.2.1-ds8.0"))
 
@@ -127,6 +129,13 @@ class PackInstallTest(ProjectTestCase):
         with redirect_stderr(errors):
             self.pack()
         self.assertIn("uncommitted changes", errors.getvalue())
+
+    def test_pack_refuses_an_apps_image_without_a_payload_id(self):
+        for value in ("", "not-a-digest"):
+            self.docker.files[self.apps] = {layout.PAYLOAD_ID_FILE: value} if value else {}
+            with self.subTest(value=value), self.assertRaisesRegex(DeployError, "has no payload id"):
+                self.pack()
+        self.assertFalse(any(call[0] == "save" for call in self.docker.calls))
 
     def test_pack_refuses_a_profile_for_another_platform(self):
         profile = self.root / "profiles/test.yaml"
@@ -159,8 +168,9 @@ class PackInstallTest(ProjectTestCase):
         self.assertNotIn("install.sh", managed)
         self.assertTrue(self.data.is_dir())  # 数据目录按最终 Compose 准备
         # 安装的项目没有构建定义：docker compose run/up 不会尝试构建包中没有的 Dockerfile。
-        services = target.compose_config(root, env_file=root / layout.ENV)["services"]
-        self.assertEqual([name for name, service in services.items() if "build" in service], [])
+        config = target.compose_config(root, env_file=root / layout.ENV)
+        self.assertEqual([name for name, service in config["services"].items() if "build" in service], [])
+        self.assertEqual(config["volumes"]["app-files"]["name"], f"demo_app-files-{PAYLOAD_ID}")
         # 预检用新载荷、关闭网络执行带标签服务的 --check-config
         check = next(call for call in target.calls if call[0] == "run" and "--check-config" in call)
         self.assertIn("--network", check)
@@ -197,32 +207,50 @@ class PackInstallTest(ProjectTestCase):
         (self.install_dir / "notes.txt").write_text("site file")  # 现场文件保留
         (self.root / "models/m/deployment/config.txt").unlink()
         (self.root / "models/m/deployment/new.txt").write_text("[property]\n")
+        self.docker.files[self.apps] = {layout.PAYLOAD_ID_FILE: "fedcba987654"}  # 新载荷
         upgraded = self.pack(with_base=True)
         target = FakeDocker()
-        target.volumes = {"demo_app-files", "demo_redis-data"}
-        target, _ = self.install(upgraded, target)
+        old = f"demo_app-files-{PAYLOAD_ID}"
+        target.volumes = {old, "demo_app-files", "demo_app-files-dev", "demo_redis-data"}
+        target, output = self.install(upgraded, target)
         compose = [call[2:] for call in target.calls if call[0] == "compose"]
         self.assertEqual(compose[0], ["down", "--remove-orphans"])  # 先用旧定义停服；不带 -v
-        # 只删除载荷卷使其重新播种，服务的其他命名卷保留
-        self.assertIn(["volume-rm", "demo_app-files"], target.calls)
+        # 新载荷播种到新卷，停服后不删卷；启动之后才清理旧载荷卷（含旧的固定卷名与开发卷），其他命名卷保留
+        started = next(i for i, call in enumerate(target.calls) if call[0] == "compose" and "up" in call)
+        removed = [i for i, call in enumerate(target.calls) if call[0] == "volume-rm"]
+        self.assertEqual(len(removed), 3)
+        self.assertGreater(min(removed), started)
         self.assertEqual(target.volumes, {"demo_redis-data"})
+        self.assertIn(f"已删除旧载荷卷 {old}", output)
         self.assertFalse((self.install_dir / "models/m/deployment/config.txt").exists())
         self.assertTrue((self.install_dir / "models/m/deployment/new.txt").exists())
         self.assertTrue((self.install_dir / "notes.txt").exists())
 
-    def test_first_install_removes_a_leftover_payload_volume(self):
-        # 删掉安装目录后重装：遗留的载荷卷不删就会继续运行旧程序。
+    def test_reinstall_reuses_the_payload_volume_and_tolerates_volumes_in_use(self):
+        # 删掉安装目录后重装同一个包：卷名相同，已播种的卷直接复用；遗留的旧载荷卷照常清理。
         package = self.pack(with_base=True)
         target = FakeDocker()
-        target.volumes = {"demo_app-files", "demo_redis-data"}
+        current = f"demo_app-files-{PAYLOAD_ID}"
+        target.volumes = {current, "demo_app-files-111111111111", "demo_app-files-222222222222"}
+        target.volumes_in_use = {"demo_app-files-222222222222"}
         _, output = self.install(package, target, dry_run=True)
-        self.assertIn("删除：遗留的载荷卷 demo_app-files", output)
-        self.assertEqual(target.volumes, {"demo_app-files", "demo_redis-data"})
-        self.install(package, target)
-        removed = target.calls.index(["volume-rm", "demo_app-files"])
-        started = next(i for i, call in enumerate(target.calls) if call[0] == "compose" and "up" in call)
-        self.assertLess(removed, started)
-        self.assertEqual(target.volumes, {"demo_redis-data"})
+        self.assertIn(f"载荷卷 {current}，已播种", output)
+        self.assertFalse([call for call in target.calls if call[0] == "volume-rm"])
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            self.install(package, target)
+        self.assertEqual(target.volumes, {current, "demo_app-files-222222222222"})
+        self.assertIn("载荷卷 demo_app-files-222222222222 仍在使用，没有删除", errors.getvalue())
+
+    def test_apps_image_must_carry_the_packaged_payload(self):
+        # 目标机上同名 apps 镜像是另一份载荷时，播种会把它放进以发布包标识命名的卷。
+        package = self.pack(with_base=True)
+        target = FakeDocker()
+        with mock.patch.object(target, "image_file", return_value="999999999999"), \
+                self.assertRaisesRegex(DeployError, f"载荷标识是 999999999999，发布包记录的是 {PAYLOAD_ID}"), \
+                redirect_stdout(io.StringIO()):
+            install(Options(package, self.install_dir, interactive=False), target)
+        self.assertFalse(self.install_dir.exists())
 
     def test_refuses_to_take_over_the_project_started_elsewhere(self):
         # 开发仓库的栈与安装共用工程名：在这里 up 会接管并重建它的容器。
@@ -452,8 +480,12 @@ class PackInstallTest(ProjectTestCase):
             target = FakeDocker()
             errors = io.StringIO()
             if failure == KeyboardInterrupt:
-                # Ctrl-C 落在停服之后（查找载荷卷只发生在 down 之后）
-                patch = mock.patch.object(target, "volume_exists", side_effect=KeyboardInterrupt)
+                # Ctrl-C 落在停服之后、启动之前
+                def compose(project_dir, args, real=target.compose, **options):
+                    if args[:1] == ["up"]:
+                        raise KeyboardInterrupt
+                    return real(project_dir, args, **options)
+                patch = mock.patch.object(target, "compose", side_effect=compose)
             else:
                 target.fail_on = failure
                 patch = contextlib.nullcontext()

@@ -118,6 +118,36 @@ class RepositoryTest(unittest.TestCase):
             result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, f"{script}: {result.stderr}")
 
+    def test_payload_seeding(self):
+        # apps 镜像的 CMD：空卷播种并最后写标记；同一份载荷直接退出；另一份载荷失败而不就地替换；
+        # 没有标记的内容是中断的播种，清空重来。
+        dockerfile = (FRAMEWORK / "docker/apps.Dockerfile").read_text()
+        self.assertIn('CMD ["/bin/sh", "/seed-payload.sh", "/workspace", "/payload-id", "/payload"]', dockerfile)
+        self.assertIn("app-files:/payload ", (ROOT / "docker-compose.yaml").read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            tmp = Path(temporary)
+            source, target, id_file = tmp / "workspace", tmp / "payload", tmp / "payload-id"
+            (source / "bin").mkdir(parents=True)
+            (source / "bin/app").write_text("v1")
+            target.mkdir()
+
+            def seed(payload_id):
+                id_file.write_text(payload_id + "\n")
+                return subprocess.run(["sh", str(FRAMEWORK / "docker/seed-payload.sh"), str(source), str(id_file),
+                                       str(target)], capture_output=True, text=True)
+
+            (target / "partial").write_text("interrupted")
+            self.assertEqual(seed("aaa").returncode, 0)
+            self.assertEqual(sorted(p.name for p in target.iterdir()), [".payload-id", "bin"])
+            self.assertEqual((target / ".payload-id").read_text(), "aaa\n")
+            (source / "bin/app").write_text("v2")
+            self.assertEqual(seed("aaa").returncode, 0)  # 标识相同：不重新复制
+            self.assertEqual((target / "bin/app").read_text(), "v1")
+            result = seed("bbb")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("载荷卷中的程序（aaa）与 apps 镜像（bbb）不一致", result.stderr)
+            self.assertEqual((target / "bin/app").read_text(), "v1")
+
     def test_build_release_ignores_compose_selectors_from_the_shell(self):
         sys.path.insert(0, str(FRAMEWORK / "deploy"))
         from dsf_deploy.docker import COMPOSE_SELECTORS

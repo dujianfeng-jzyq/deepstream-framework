@@ -7,7 +7,7 @@
 ```text
 上游 DeepStream ──继承──> base ──继承──> builder（工具链、构建、CTest、cmake --install）
                           └──继承──> runtime-check（复制载荷，非 root、无网络自检）
-busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app-files 卷播种）
+busybox:1.36 ──继承──> apps（只复制通过自检的载荷与载荷标识，向 app-files 卷播种）
 ```
 
 | 位置 | 内容 |
@@ -22,6 +22,7 @@ busybox:1.36 ──继承──> apps（只复制通过自检的载荷，向 app
 - `profiles/`、`project.env`、`site-fields.env` 在编译之后才复制，随后只运行带 `profiles` 标签的测试（每个 profile 渲染并经 `docker compose config` 解析）；改动它们不会重新编译。
 - runtime-check 回到原始 base，对每个应用执行 `--version` 与 `--selftest`，导入 Python 运行时，并对每个 Python 服务执行 `services/<name>/main.py --version`（执行模块顶层的导入：未写进 `requirements.txt` 的顶层依赖在这里失败，函数内的延迟导入不在检查范围内）；没有应用或服务时相应步骤跳过；任何失败都不会生成 apps 镜像。
 - JPEG 编码库在 `image.enabled` 的采集组件启动时才加载，构建和无 GPU 自检不加载其设备依赖。目标 Jetson 仍须使用与 JetPack 匹配的 DeepStream 镜像和 NVIDIA runtime；缺少运行库时启用图片会明确报错。
+- 载荷标识：builder 对 `/workspace` 树（路径、类型、权限、链接目标、文件内容）求摘要，取前 12 位写入 apps 镜像的 `/payload-id`。内容相同得到同一个标识，内容不同一定得到新标识；它决定载荷卷的卷名（见下文）。Python 依赖以 `--no-compile` 安装后按源码哈希编译字节码（默认的 pyc 记录安装时刻），无缓存重新构建也得到同一个标识。
 - 镜像名由渲染器派生：`<项目>/deepstream-<DS版本>-base:<BASE_VERSION>-<输入摘要>`、`<项目>/deepstream-<DS版本>-apps:<APPS_VERSION>`。base 的输入摘要覆盖 base Dockerfile、上游镜像与 `BASE_APT_PACKAGES`：输入变化一定得到新 tag，同名 tag 不会代表两种内容。
 
 ## 2. 服务与 Compose
@@ -41,7 +42,7 @@ generated/network.compose.yaml        仅当 profile 设置 x-network-mode 时�
 | 服务 | 行为 |
 |---|---|
 | `deepstream-base` | 构建目标与运行时父镜像，启动后立即成功退出 |
-| `deepstream-apps` | 向空的 `<项目>_app-files` 卷播种后退出 |
+| `deepstream-apps` | 向空的载荷卷播种后退出；卷中已是同一份载荷时直接退出，是另一份载荷时失败 |
 | `model-engine-builder` | 预构建 engine，成功退出后业务服务才启动 |
 | 业务服务 | `extends: {file: framework/compose/defaults.yaml, service: dsf-service}` |
 | `redis`、`mediamtx` | 基础设施单元，可删除；依赖它们的服务使用 `required: false` |
@@ -66,6 +67,8 @@ WebRTC 的媒体不走页面所在的 HTTP 连接：MediaMTX 在应答中告诉�
 
 浏览器的 WebRTC 多数只能播放 H.264，`encoder.codec: h265` 的输出只能用 RTSP 播放器查看（example-app 在 `--check-config` 与启动时给出警告）。
 
+载荷卷 `app-files` 的卷名是 `<项目>_app-files-<APPS_PAYLOAD_ID>`。安装的项目中标识来自发布包（apps 镜像的 `/payload-id`）：换了载荷就是一个新的空卷，引用它的服务随之重建，不需要先删卷；同一份载荷重装时复用已播种的卷。开发渲染的标识固定为 `dev`，因为 Compose 在构建之前就要确定卷名。`deepstream-apps` 把卷挂在 `/payload`，自己复制载荷并最后写入标记 `.payload-id`（不依赖 Docker 对空卷的隐式复制）：没有标记的内容视为中断的播种，清空重来；标记与镜像不一致时失败而不就地替换，因为正在运行的业务服务不会随之重启。
+
 公共定义 `dsf-service`：`image: ${BASE_IMAGE}`、渲染用户的 UID/GID、`restart: unless-stopped`、预检标签 `io.deepstream.config-check: "true"`、挂载点环境变量、`PYTHONPATH`、`DSF_READY_FILE`、只读载荷卷与配置目录、可写数据目录、`/etc/localtime`、就绪健康检查（`$DSF_READY_FILE` 30 秒内更新过）、等待播种完成、日志轮转。注意 `extends` 文件中的相对路径以该文件所在目录为基准，单元 compose.yaml 中的相对路径以项目根为基准。
 
 固定挂载点：
@@ -82,7 +85,7 @@ WebRTC 的媒体不走页面所在的 HTTP 连接：MediaMTX 在应答中告诉�
 ```bash
 scripts/apply-profile.sh <profile>                   # 渲染；省略 profile 时沿用上次选择
 docker compose build deepstream-base deepstream-apps
-docker compose down && docker volume rm <项目名>_app-files && docker compose up -d  # 更换载荷：卷只在为空时播种
+docker compose down && docker volume rm <项目名>_app-files-dev && docker compose up -d  # 重新构建载荷后：开发卷名固定
 docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入口参数
 ```
 
@@ -127,7 +130,7 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 - 部署文件：`docker-compose.yaml`、`framework/{compose,deploy,python/dsf}`、各单元的 `compose.yaml` 与 `templates/`、`profiles/`、`models/`、`site-fields.env`、`install.sh`。不含源码、Dockerfile、渲染结果、现场答案与 engine。
 - apps 镜像的 tag 只含版本号，源码改了而没有重新构建时同名镜像仍是旧程序。渲染记录源码版本 `SOURCE_REVISION`（git 提交号，有未提交改动时带 `-dirty`），构建把它写进 apps 镜像的标签 `io.deepstream.source-revision`；打包时两者不一致即拒绝，提示重新构建。工作区有未提交改动时只警告：无法证明镜像包含了哪些改动。不是 git 仓库时不比对。
 - 构建只由渲染出的 `.env` 决定：脚本忽略 shell 中的 `COMPOSE_FILE`、`COMPOSE_PROJECT_NAME`、`COMPOSE_PROFILES` 等变量（它们优先于 `.env`）。
-- `release.env`：项目公共输入加本次发布事实（版本、镜像、平台、建议 profile、源码版本）。`package-files.json`：全部文件的 SHA-256（完整性校验，不是签名）。
+- `release.env`：项目公共输入加本次发布事实（版本、镜像、平台、建议 profile、源码版本、载荷标识 `APPS_PAYLOAD_ID`）。载荷标识从 apps 镜像的 `/payload-id` 读取，镜像没有标识（旧框架构建）时拒绝打包。`package-files.json`：全部文件的 SHA-256（完整性校验，不是签名）。
 
 版本号：开发阶段一直用 `project.env` 中的版本发版（测试包同名覆盖），不为测试改版本号。正式发布时先提交版本号（`chore(release): <版本>`，改 `APPS_VERSION`，base 有变化时同时改 `BASE_VERSION`），再在干净的工作区构建与打包：发布包的 `SOURCE_REVISION` 因此是不带 `-dirty` 的提交号，可以追溯到确切的源码。
 
@@ -142,10 +145,10 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 1. 读取 `release.env`，核对本机平台与包完整性（缺失、改动、多余文件或符号链接都拒绝）。
 2. 检查安装目标：安装目录与包不重叠；控制文件、发布路径不能是符号链接，也不能与已有文件/目录类型冲突。同名 Compose 工程已有由其他目录启动的容器（例如开发仓库的栈）时拒绝：在这里 `up` 会接管并重建它们。之后才读取旧的选择与答案。
 3. 选择 profile（`--profile` > 已安装的选择 > 交互选择 > 包内建议），收集现场答案（升级沿用，新版本已删除的字段从答案中去掉并提示；`--ask` 逐项重新提问，默认值为已保存的答案，口令显示为 `***`、回车保留，可留空的字段输入 `CLEAR` 清空，没有终端时在停服前失败；`--clean-install` 重新收集；非交互时只保存已有答案；提问默认值含所选 profile 的 `x-build`，在 base 镜像中读取，需要时为此提前加载包内的 base）。检查清洁安装范围与退役文件冲突。
-4. 加载镜像（不影响运行中的旧容器）；在临时目录渲染新配置。需要 PyYAML 的步骤（读取 profile 的 `x-build`、渲染）总在 base 镜像中离线运行，以安装用户身份、只挂载临时目录：目标机只需要 Python 标准库，渲染结果也不随目标机的 Python 与 PyYAML 版本变化。base 本来就是运行服务所需，包里不带 base 时它必须已在目标机上，否则在停服前失败；按最终 Compose 检查并准备可写 bind 挂载；核对每个服务镜像的平台；从新 apps 镜像取出载荷，离线、只读地执行所有带预检标签服务的 `--check-config`。
-5. `--dry-run` 到此结束并打印计划。否则重验目标，用旧定义 `docker compose down --remove-orphans`，再只删除载荷卷 `<项目名>_app-files` 使其重新播种（不用 `down -v`：它会删除项目的全部命名卷，包括服务的持久数据；首次安装时删除遗留的同名载荷卷，例如删掉安装目录后重装，否则会继续运行旧载荷）。
+4. 加载镜像（不影响运行中的旧容器）；在临时目录渲染新配置。需要 PyYAML 的步骤（读取 profile 的 `x-build`、渲染）总在 base 镜像中离线运行，以安装用户身份、只挂载临时目录：目标机只需要 Python 标准库，渲染结果也不随目标机的 Python 与 PyYAML 版本变化。base 本来就是运行服务所需，包里不带 base 时它必须已在目标机上，否则在停服前失败；按最终 Compose 检查并准备可写 bind 挂载；核对每个服务镜像的平台；核对 apps 镜像的载荷标识与 `release.env` 一致；从新 apps 镜像取出载荷，离线、只读地执行所有带预检标签服务的 `--check-config`。
+5. `--dry-run` 到此结束并打印计划。否则重验目标，用旧定义 `docker compose down --remove-orphans`（不用 `down -v`：它会删除项目的全部命名卷，包括服务的持久数据）。载荷卷按载荷标识命名，新载荷总是播种到新卷，停服时不删卷。
 6. 按需清空安装目录；删除未被修改的退役受管理文件；复制发布文件；写入 `project.env`（由 `release.env` 派生）、`site.env`、`.managed-files.json` 与预检过的配置快照（不再重新渲染）。
-7. `docker compose config --quiet`、`up -d`，有界等待：常驻服务运行且健康，一次性服务成功退出。就绪默认不要求输入（`readiness.require_input`，见 [framework.md](framework.md)），相机没有推流时安装照常完成，并提示就绪文件中计数仍为 0 的服务（`note: <服务> has not received any input yet`）。等待期间每 30 秒报告仍在等待的服务及其状态。超时或服务提前退出时列出未就绪服务的状态与最近几条告警/错误日志（例如相机还没有推流时的 RTSP 404），以非零状态退出；此时安装已完成，服务继续运行并按重启策略恢复，安装器只是不再等待。等待中按 Ctrl-C 同样只结束等待。
+7. `docker compose config --quiet`、`up -d`；随后删除本工程（含改名前的工程）中不是本次载荷的载荷卷：旧版本、旧框架的固定卷名 `<项目>_app-files` 与停着的开发卷，仍被容器使用的跳过，回滚时重新播种即可。然后有界等待：常驻服务运行且健康，一次性服务成功退出。就绪默认不要求输入（`readiness.require_input`，见 [framework.md](framework.md)），相机没有推流时安装照常完成，并提示就绪文件中计数仍为 0 的服务（`note: <服务> has not received any input yet`）。等待期间每 30 秒报告仍在等待的服务及其状态。超时或服务提前退出时列出未就绪服务的状态与最近几条告警/错误日志（例如相机还没有推流时的 RTSP 404），以非零状态退出；此时安装已完成，服务继续运行并按重启策略恢复，安装器只是不再等待。等待中按 Ctrl-C 同样只结束等待。
 
 规则：
 

@@ -1,6 +1,6 @@
 # check=skip=InvalidDefaultArgInFrom
 # 载荷构建：builder（本次 base + 工具链）→ runtime-check（原始 base 中自检）→ busybox。
-# 载荷范围完全由 CMake 的 install 规则决定；最终镜像只用于向 app-files 卷播种。
+# 载荷范围完全由 CMake 的 install 规则决定；最终镜像只用于向按载荷标识命名的 app-files 卷播种。
 
 # Compose 通过 additional_contexts 把这个名字绑定到本次 base 的构建结果。
 ARG BASE_IMAGE
@@ -61,11 +61,21 @@ ARG APPS_VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eu; \
     if grep -qv '^#' build/python-requirements.txt; then \
-      python3 -m pip install --disable-pip-version-check ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+      python3 -m pip install --disable-pip-version-check --no-compile ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
         --target /workspace/python --requirement build/python-requirements.txt; \
+      # 字节码按源码哈希校验：默认的 pyc 记录安装时刻，每次重新构建都会改变载荷标识。
+      # 载荷只读，运行时无法写缓存，所以在这里编译。
+      python3 -m compileall -q --invalidation-mode checked-hash /workspace/python; \
     fi; \
     printf '%s\n' "${APPS_VERSION}" > /workspace/VERSION; \
     chmod -R a+rX /workspace
+
+# 载荷标识：载荷树（路径、类型、权限、链接目标、文件内容）的摘要，决定载荷卷的卷名。
+# 内容相同得到同一个标识（复用已播种的卷），内容不同一定得到新卷；不计时间戳与属主。
+RUN set -eu; cd /workspace; \
+    { find . -printf '%y %m %p %l\n' | LC_ALL=C sort; \
+      find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum; } \
+    | sha256sum | cut -c1-12 > /payload-id
 
 # ---------------- runtime-check ----------------
 # 回到原始 base：builder 追加的开发包（例如测试用的 python3-redis）可能掩盖载荷在运行环境中缺失的依赖。
@@ -91,7 +101,10 @@ RUN --network=none set -eu; \
 # ---------------- payload ----------------
 FROM busybox:1.36
 COPY --from=runtime-check /workspace /workspace
+COPY --from=builder /payload-id /payload-id
+COPY framework/docker/seed-payload.sh /seed-payload.sh
 # 构建时的源码版本（git 提交号，未提交改动时带 -dirty），打包时与当前源码比对。只影响这一层。
 ARG SOURCE_REVISION=""
 LABEL io.deepstream.source-revision="${SOURCE_REVISION}"
-CMD ["true"]
+# 卷挂载在 /payload（docker-compose.yaml），不挂在 /workspace：不依赖 Docker 对空卷的隐式复制。
+CMD ["/bin/sh", "/seed-payload.sh", "/workspace", "/payload-id", "/payload"]

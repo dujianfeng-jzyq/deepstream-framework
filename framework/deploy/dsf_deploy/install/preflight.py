@@ -293,7 +293,7 @@ def prepare(options: Options, docker: Docker) -> Plan:
 
     # 1. 发布事实、平台与完整性
     release = envfile.read(package_root / layout.RELEASE_ENV, expand_home=False)
-    for key in ("PROJECT_NAME", "TARGET_PLATFORM", "BASE_IMAGE", "APPS_IMAGE"):
+    for key in ("PROJECT_NAME", "TARGET_PLATFORM", "BASE_IMAGE", "APPS_IMAGE", layout.PAYLOAD_ID_KEY):
         envfile.require(release, key, layout.RELEASE_ENV)
     host = naming.host_platform()
     if release["TARGET_PLATFORM"] != host:
@@ -331,6 +331,12 @@ def prepare(options: Options, docker: Docker) -> Plan:
 
     # 4. 镜像、配置与挂载
     _load_images(package_root, docker, loaded)
+    # 卷名按发布包记录的载荷标识：本机同名 apps 镜像（例如未重新加载的旧构建）不是这份载荷时，
+    # 播种会把另一份程序放进以这个标识命名的卷。
+    actual = pack.payload_id_of(docker, release["APPS_IMAGE"])
+    if actual != release[layout.PAYLOAD_ID_KEY]:
+        raise DeployError(f"镜像 {release['APPS_IMAGE']} 的载荷标识是 {actual}，"
+                          f"发布包记录的是 {release[layout.PAYLOAD_ID_KEY]}")
     with tempfile.TemporaryDirectory(prefix="dsf-install-") as temporary:
         stage = Path(temporary).resolve()
         pack.stage_deployment_files(package_root, stage)
@@ -360,16 +366,15 @@ def prepare(options: Options, docker: Docker) -> Plan:
 def describe(plan: Plan, docker: Docker) -> str:
     lines = [f"安装目录：{plan.install_dir}"]
     if (plan.install_dir / layout.ENV).is_file():
-        lines.append("停止：用已安装的定义停止当前服务（docker compose down），再删除载荷卷")
+        lines.append("停止：用已安装的定义停止当前服务（docker compose down）")
     if plan.clean:
         lines.append(f"清空：{plan.install_dir}")
     lines += [f"删除退役文件：{path}" for path in plan.obsolete]
     lines.append(f"写入：{len(inventory.managed(plan.files))} 个发布文件、"
                  f"{len(plan.configuration)} 个配置文件与 {layout.SITE_ENV}")
     lines += [f"可写挂载：{path}" for path in plan.data_paths]
-    volume = layout.payload_volume(plan.release["PROJECT_NAME"])
-    if not (plan.install_dir / layout.ENV).is_file() and docker.volume_exists(volume):
-        lines.append(f"删除：遗留的载荷卷 {volume}（不删会继续运行旧程序）")
-    lines.append("启动：docker compose up -d，然后等待就绪")
+    volume = layout.payload_volume(plan.release["PROJECT_NAME"], plan.release[layout.PAYLOAD_ID_KEY])
+    lines.append(f"启动：docker compose up -d（载荷卷 {volume}{'，已播种' if docker.volume_exists(volume) else ''}），"
+                 "清理不再使用的旧载荷卷，然后等待就绪")
     return "\n".join(lines)
 

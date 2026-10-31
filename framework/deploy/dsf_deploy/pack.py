@@ -7,6 +7,7 @@ release.env（发布事实）与 package-files.json（完整性清单）。不�
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 import tarfile
@@ -86,6 +87,15 @@ def _check_source_revision(docker: Docker, apps_image: str, current: str) -> Non
               "the image contains. Commit, rebuild and pack for a traceable release.", file=sys.stderr)
 
 
+def payload_id_of(docker: Docker, apps_image: str) -> str:
+    """apps 镜像记录的载荷标识（apps.Dockerfile 写入），决定目标机上载荷卷的卷名。"""
+    value = docker.image_file(apps_image, layout.PAYLOAD_ID_FILE)
+    if not re.fullmatch(r"[0-9a-f]{12}", value):
+        raise DeployError(f"{apps_image} has no payload id ({layout.PAYLOAD_ID_FILE}); it was built by an "
+                          "older framework: rebuild it (scripts/build-release.sh without --no-build)")
+    return value
+
+
 def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None = None) -> Path:
     docker = docker or Docker()
     plan = render.render(root, profile)
@@ -112,6 +122,7 @@ def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None
                               "all images in a package must share one platform")
 
     _check_source_revision(docker, apps_image, values.get("SOURCE_REVISION", ""))
+    payload_id = payload_id_of(docker, apps_image)
 
     name = naming.package_name(project, values["APPS_VERSION"], values.get("DEEPSTREAM_VERSION", ""))
     dist = root / "dist"
@@ -144,6 +155,7 @@ def pack(root: Path, profile: str | None, with_base: bool, docker: Docker | None
             "BASE_IMAGE": base_image,
             "APPS_IMAGE": apps_image,
             "SOURCE_REVISION": values.get("SOURCE_REVISION", ""),
+            layout.PAYLOAD_ID_KEY: payload_id,
             **dependencies,
         })
         envfile.write(package / layout.RELEASE_ENV, release, (f"release {name}", "GENERATED — DO NOT EDIT"))

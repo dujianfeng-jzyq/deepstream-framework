@@ -72,6 +72,10 @@ x-app-config:
 """
 
 
+# apps 镜像中记录的载荷标识（apps.Dockerfile 写入 /payload-id）。
+PAYLOAD_ID = "0123456789ab"
+
+
 def docker_cli_available() -> bool:
     return shutil.which("docker") is not None
 
@@ -86,6 +90,8 @@ class FakeDocker(Docker):
         self.fail_on: str | None = None
         self.env_files: list[tuple[int, str]] = []
         self.labels: dict[str, dict[str, str]] = {}
+        self.files: dict[str, dict[str, str]] = {}  # 镜像 → {路径: 内容}，随 save/load 带走
+        self.volumes_in_use: set[str] = set()
         self.containers: list[tuple[str, str]] = []  # (容器名, 启动它的项目目录)
         self.logs: dict[str, str] = {}
         self.ready_files: dict[str, str] = {}
@@ -108,25 +114,41 @@ class FakeDocker(Docker):
     def image_label(self, image, key):
         return self.labels.get(image, {}).get(key, "")
 
+    def image_file(self, image, path):
+        return self.files.get(image, {}).get(path, "")
+
     def pull(self, image, platform):
         self._record("pull", image, platform)
         self.images[image] = platform
 
     def save(self, image, output):
         self._record("save", image, output.name)
-        Path(output).write_text(f"image {image}\n")
+        lines = [f"image {image}", *(f"file {path} {content}" for path, content in self.files.get(image, {}).items())]
+        Path(output).write_text("\n".join(lines) + "\n")
 
     def load(self, archive):
         self._record("load", archive.name)
-        image = archive.read_text().split(" ", 1)[1].strip()
+        first, *rest = archive.read_text().splitlines()
+        image = first.split(" ", 1)[1].strip()
         self.images[image] = self.platform
+        for line in rest:
+            _, path, content = line.split(" ", 2)
+            self.files.setdefault(image, {})[path] = content
 
     def volume_exists(self, name):
         return name in self.volumes
 
     def volume_remove(self, name):
         self._record("volume-rm", name)
+        if name in self.volumes_in_use:
+            from dsf_deploy.errors import DeployError
+            raise DeployError(f"volume is in use: {name}")
         self.volumes.discard(name)
+
+    def project_volumes(self, project, key):
+        """按卷名模拟 Compose 的工程与键标签。"""
+        prefix = f"{project}_{key}"
+        return sorted(v for v in self.volumes if v == prefix or v.startswith(prefix + "-"))
 
     def project_containers(self, project):
         return list(self.containers)

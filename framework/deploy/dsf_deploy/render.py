@@ -24,10 +24,10 @@ from . import envfile, layout, naming, site
 from .errors import DeployError
 
 _PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
-# profile 不能改变项目身份；镜像名在目标机上由发布包决定。
+# profile 不能改变项目身份；镜像名与载荷标识在目标机上由发布包决定。
 IDENTITY_KEYS = ("PROJECT_NAME",)
 _APP_PREFIX = "x-app-"  # profile 中按类型覆盖渲染配置的键：x-app-<type>
-RELEASE_IMAGE_KEYS = ("DEEPSTREAM_IMAGE", "BASE_IMAGE", "APPS_IMAGE")
+RELEASE_IMAGE_KEYS = ("DEEPSTREAM_IMAGE", "BASE_IMAGE", "APPS_IMAGE", layout.PAYLOAD_ID_KEY)
 BASE_DOCKERFILE = "framework/docker/base.Dockerfile"
 
 
@@ -280,6 +280,7 @@ def _resolve_variables(root: Path, profile_name: str,
     overrides = _build_variables(profile)
     notes: list[str] = []
     if released:
+        envfile.require(variables, layout.PAYLOAD_ID_KEY, f"{layout.PROJECT_ENV} (from release.env)")
         _require_fitting(root, profile_name, profile, variables.get("TARGET_PLATFORM", ""),
                          variables.get("DEEPSTREAM_VERSION", ""))
         # 与包内相同的值（本项目每个 profile 都写明 DEEPSTREAM_IMAGE）不必提示；不同时才值得告诉用户。
@@ -314,7 +315,8 @@ def _require_fitting(root: Path, profile_name: str, profile: dict, platform: str
 
 
 def _derived_images(root: Path, profile_name: str, variables: dict[str, str]) -> dict[str, str]:
-    """开发构建：由 DeepStream 镜像、版本号与 base 的构建输入派生镜像名，并记录源码版本。"""
+    """开发构建：由 DeepStream 镜像、版本号与 base 的构建输入派生镜像名，并记录源码版本；
+    载荷卷固定用开发标识（卷名在构建之前确定）。"""
     if not variables.get("DEEPSTREAM_IMAGE"):
         raise DeployError(f"profile {profile_name} must set x-build: DEEPSTREAM_IMAGE "
                           f"({layout.PROJECT_ENV} has no default)")
@@ -329,6 +331,7 @@ def _derived_images(root: Path, profile_name: str, variables: dict[str, str]) ->
                                       variables["APPS_VERSION"], variables["BASE_VERSION"],
                                       derived["BASE_INPUTS"]))
     derived["SOURCE_REVISION"] = naming.source_revision(root)
+    derived[layout.PAYLOAD_ID_KEY] = layout.DEV_PAYLOAD_ID
     return derived
 
 

@@ -2,8 +2,9 @@
 停服之后到启动之前的任何失败或中断（包括 Ctrl-C）都会说明现场状态与恢复办法，再原样抛出；
 就绪等待中的中断只结束等待，服务已经启动。
 
-顺序：重验目标 → 用旧定义停服并删除载荷卷（使其重新播种）→ 按需清空目录 → 删除退役文件 →
-复制发布文件 → 写入 project.env、site.env、受管理清单与预检过的配置快照 → 启动并等待就绪。
+顺序：重验目标 → 用旧定义停服 → 按需清空目录 → 删除退役文件 → 复制发布文件 →
+写入 project.env、site.env、受管理清单与预检过的配置快照 → 启动 → 清理旧载荷卷 → 等待就绪。
+载荷卷按载荷标识命名，新载荷总是播种到新卷，停服后不需要删卷；旧卷在启动之后才不再被引用。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from .. import envfile, inventory, layout, site
 from ..docker import Docker
+from ..errors import DeployError
 from . import ready, targets
 from .preflight import Plan
 
@@ -23,6 +25,10 @@ def apply(plan: Plan, docker: Docker, ready_timeout: float) -> None:
     root = plan.install_dir
     targets.check(plan.package_root, root, plan.configuration)  # 预检可能耗时：停服前再确认一次
     upgrading = (root / layout.ENV).is_file()
+    # 旧工程名在写入新 .env 之前读取：改名后旧工程的载荷卷同样要清理。
+    projects = {plan.release["PROJECT_NAME"]}
+    if upgrading:
+        projects.add(envfile.read_compose(root / layout.ENV).get("PROJECT_NAME") or plan.release["PROJECT_NAME"])
     try:
         _replace(plan, docker)
         docker.compose(root, ["config", "--quiet"])
@@ -31,6 +37,7 @@ def apply(plan: Plan, docker: Docker, ready_timeout: float) -> None:
     except BaseException:
         print(incomplete_message(root, upgrading), file=sys.stderr)
         raise
+    _prune_payload_volumes(plan, sorted(projects), docker)
     try:
         ready.wait(docker, root, ready_timeout)
     except KeyboardInterrupt:
@@ -49,27 +56,31 @@ def incomplete_message(root: Path, upgrading: bool) -> str:
             "  退回旧版：安装上一个版本的发布包")
 
 
+def _prune_payload_volumes(plan: Plan, projects: list[str], docker: Docker) -> None:
+    """删除这些工程中不是本次载荷的载荷卷（旧版本、旧的固定卷名、开发卷）。回滚时重新播种即可。
+    仍被容器使用的卷 docker 拒绝删除，跳过；清理失败不影响安装结果。"""
+    current = layout.payload_volume(plan.release["PROJECT_NAME"], plan.release[layout.PAYLOAD_ID_KEY])
+    try:
+        stale = [name for project in projects
+                 for name in docker.project_volumes(project, layout.PAYLOAD_VOLUME) if name != current]
+    except DeployError as error:
+        print(f"提示：没有清理旧载荷卷：{error}", file=sys.stderr)
+        return
+    for name in stale:
+        try:
+            docker.volume_remove(name)
+            print(f"已删除旧载荷卷 {name}")
+        except DeployError:
+            print(f"提示：载荷卷 {name} 仍在使用，没有删除", file=sys.stderr)
+
+
 def _replace(plan: Plan, docker: Docker) -> None:
     """停旧服务并写入新版本的全部文件。"""
     root, package = plan.install_dir, plan.package_root
-    new_volume = layout.payload_volume(plan.release["PROJECT_NAME"])
-    stale_check = True
     if (root / layout.ENV).is_file():
         print("停止当前服务")
         # 不用 down -v：它删除项目的全部命名卷，服务放在命名卷中的持久数据也会丢失。
-        # 只删载荷卷：卷只在为空时播种，不删就会继续运行旧载荷。
         docker.compose(root, ["down", "--remove-orphans"])
-        old_volume = layout.payload_volume(envfile.read_compose(root / layout.ENV).get("PROJECT_NAME")
-                                           or plan.release["PROJECT_NAME"])
-        if docker.volume_exists(old_volume):
-            print(f"删除载荷卷 {old_volume}")
-            docker.volume_remove(old_volume)
-        stale_check = old_volume != new_volume
-    if stale_check and docker.volume_exists(new_volume):
-        # 首次安装或改名后遗留的载荷卷（例如删掉安装目录后重装）：卷只在为空时播种，不删就会运行旧载荷。
-        # 预检已确认没有其他目录启动的同名工程容器在用它。
-        print(f"删除遗留的载荷卷 {new_volume}")
-        docker.volume_remove(new_volume)
 
     if plan.clean and root.exists():
         print(f"清空 {root}")

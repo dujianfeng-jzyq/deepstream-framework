@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .errors import DeployError
@@ -55,6 +56,22 @@ class Docker:
         value = result.stdout.strip() if result.returncode == 0 else ""
         return "" if value == "<no value>" else value
 
+    def image_file(self, image: str, path: str) -> str:
+        """镜像中一个小文本文件的内容（创建不运行的临时容器）；镜像或文件不存在返回空串。"""
+        created = subprocess.run(["docker", "create", image], capture_output=True, text=True)
+        if created.returncode != 0:
+            return ""
+        container = created.stdout.strip()
+        try:
+            # docker cp 输出到 - 时是 tar 流；读成文件更简单，也不受 tar 格式影响。
+            with tempfile.TemporaryDirectory(prefix="dsf-image-file-") as temporary:
+                target = Path(temporary) / "file"
+                copied = subprocess.run(["docker", "cp", f"{container}:{path}", str(target)],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return target.read_text(encoding="utf-8").strip() if copied.returncode == 0 else ""
+        finally:
+            self._run(["docker", "rm", container], capture=True)
+
     def pull(self, image: str, platform: str) -> None:
         self._run(["docker", "pull", "--platform", f"linux/{platform}", image])
 
@@ -69,6 +86,13 @@ class Docker:
 
     def volume_remove(self, name: str) -> None:
         self._run(["docker", "volume", "rm", name], capture=True)
+
+    def project_volumes(self, project: str, key: str) -> list[str]:
+        """Compose 工程 project 中键为 key 的命名卷的全名（卷名可能带标识，键是 Compose 的标签）。"""
+        result = self._run(["docker", "volume", "ls", "--quiet",
+                            "--filter", f"label=com.docker.compose.project={project}",
+                            "--filter", f"label=com.docker.compose.volume={key}"], capture=True)
+        return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
 
     def project_containers(self, project: str) -> list[tuple[str, str]]:
         """Compose 工程 project 的全部容器（含已停止的）：(容器名, 启动它的项目目录)。"""

@@ -12,13 +12,13 @@ services:
     entrypoint: ["/bin/true"]
     restart: "no"
 
-  # 载荷镜像：只向空的 app-files 卷播种程序，然后退出。
+  # 载荷镜像：向空的 app-files 卷播种程序后退出；卷中已是同一份载荷时直接退出，是另一份载荷时失败。
   deepstream-apps:
     image: ${APPS_IMAGE}
     network_mode: none
     restart: "no"
     volumes:
-      - app-files:${CONTAINER_WORKSPACE}
+      - app-files:/payload  # 与 apps 镜像的 CMD 一致
 
   # 按模型目录中的 nvinfer 配置预构建 engine；业务服务等它成功退出后再启动。
   model-engine-builder:
@@ -44,6 +44,8 @@ services:
       options: {max-size: 10m, max-file: "3"}
 
 volumes:
-  # 默认卷名 <PROJECT_NAME>_app-files。卷只在为空时播种：更换载荷必须删除这个卷
-  # （安装器只删它；docker compose down -v 会连同服务的其他命名卷一起删除）。
+  # 卷名带载荷标识：换了载荷就是一个新的空卷，由 deepstream-apps 播种，引用它的服务随之重建，
+  # 不需要先删卷。APPS_PAYLOAD_ID 来自发布包（apps 镜像的 /payload-id）；开发渲染固定为 dev，
+  # 重新构建载荷后 deepstream-apps 报告不一致，按提示删除开发卷。安装器在启动后清理旧载荷卷。
   app-files:
+    name: ${PROJECT_NAME}_app-files-${APPS_PAYLOAD_ID}
