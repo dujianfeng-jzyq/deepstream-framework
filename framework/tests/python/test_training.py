@@ -1,6 +1,7 @@
-"""训练工具的数据部分：规格、导入、X-AnyLabeling 读写、批量确认、划分与数据集准备。
+"""训练工具：规格、导入、X-AnyLabeling 读写、批量确认、划分、数据集准备，以及训练与评估的记录。
 
-用真实的 Pillow 与 ffmpeg（builder 中已安装），以及 X-AnyLabeling 实际保存的样例文件。
+用真实的 Pillow 与 ffmpeg（builder 中已安装），以及 X-AnyLabeling 实际保存的样例文件。训练与评估用
+假后端：这里验证 run 的记录、续训与评估的组织；Ultralytics 本身只在训练机上验证。
 """
 
 import io
@@ -8,13 +9,15 @@ import json
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from deploy_support import ROOT
 from dsf_deploy import models
-from dsf_train import cli, dataset, paths, sources, spec, split, xanylabeling
+from dsf_train import backends, cli, dataset, paths, runs, sources, spec, split, xanylabeling
+from dsf_train.backends import ultralytics
 from dsf_train.errors import TrainError
 
 SAMPLES = Path(__file__).resolve().parent / "data/x-anylabeling-4.0.6"
@@ -340,6 +343,173 @@ class PrepareTest(TrainingTestCase):
         self.import_(self.tmp / "other")
         with self.assertRaisesRegex(TrainError, "no checked images in batch-01"):
             self.prepare()
+
+
+class FakeBackend(types.ModuleType):
+    """记录调用的假后端；fail 设为异常时训练在写出 last 之后抛出它。"""
+    NAME = "fake"
+    TASKS = ("detect",)
+    BEST = ultralytics.BEST
+    LAST = ultralytics.LAST
+    RESERVED = ultralytics.RESERVED
+
+    def __init__(self):
+        super().__init__("fake")
+        self.calls, self.fail = [], None
+
+    write_view = staticmethod(ultralytics.write_view)
+    check_options = staticmethod(ultralytics.check_options)
+
+    def version(self):
+        return {"fake": "1.0"}
+
+    def train(self, task, data, weights, options, directory, resume, workdir):
+        self.calls.append(("train", weights, dict(options), resume))
+        if not weights.exists() and weights.parent == workdir:  # 模拟下载预训练权重
+            workdir.mkdir(parents=True, exist_ok=True)
+            weights.write_bytes(b"pretrained")
+        (directory / "weights").mkdir(parents=True, exist_ok=True)
+        (directory / self.LAST).write_bytes(b"last")
+        if self.fail is not None:
+            error, self.fail = self.fail, None
+            raise error
+        (directory / self.BEST).write_bytes(f"best {data}".encode())
+        return directory / self.BEST
+
+    def evaluate(self, task, weights, data, split_name, options, directory, workdir):
+        self.calls.append(("evaluate", weights, data, split_name))
+        directory.mkdir(parents=True, exist_ok=True)
+        return {"metrics": {"map50_95": 0.5, "map50": 0.7, "precision": 0.8, "recall": 0.6},
+                "classes": {0: {"map50_95": 0.5, "map50": 0.7, "precision": 0.8, "recall": 0.6}}}
+
+
+class RunTest(TrainingTestCase):
+    def setUp(self):
+        super().setUp()
+        self.backend = FakeBackend()
+        backends.BACKENDS["fake"] = self.backend
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("backend: ultralytics", "backend: fake"))
+        # 选出三个划分各至少一组的采集组，每组一张带框、已检查的图片。
+        covered, index = set(), 0
+        while covered != set(split.SPLITS):
+            group = f"g{index}"
+            name = split.assign(f"dir:batch-01/{group}", 42, 0.15, 0.15)
+            if name not in covered or index < 6:
+                covered.add(name)
+                image(self.raw / group / f"{group}.jpg", (index * 7 % 256, index, 0))
+                annotation(self.raw / group / f"{group}.json", LABELED, checked=True)
+            index += 1
+        self.import_(self.raw)
+        self.dataset_id = dataset.prepare(self.root, self.spec()).dataset_id
+
+    def tearDown(self):
+        del backends.BACKENDS["fake"]
+        super().tearDown()
+
+    def record(self, run):
+        return runs.load(self.root, "m", run)[1]
+
+    def only_run(self):
+        [run] = [p.name for p in (self.root / "runs/m").iterdir()]
+        return run
+
+    def test_a_run_is_recorded_and_evaluated_on_the_test_split(self):
+        code, out, err = self.train("run", "m", "--option", "epochs=3")
+        self.assertEqual(code, 0, err)
+        run = self.only_run()
+        record = self.record(run)
+        self.assertEqual((record["status"], record["dataset"], record["classes"]), ("completed", self.dataset_id, CLASSES))
+        self.assertEqual(record["options"]["epochs"], 3)          # 覆盖值生效并记录
+        self.assertEqual(record["overrides"], {"epochs": 3})
+        self.assertEqual(record["options"]["patience"], 50)       # 其余来自 model.yaml
+        self.assertEqual(record["backend"], {"name": "fake", "fake": "1.0"})
+        pretrained = self.root / paths.PRETRAINED / "yolo11s.pt"
+        self.assertEqual(record["weights"]["start_sha256"], paths.sha256(pretrained))  # 下载后补记
+        self.assertEqual(record["weights"]["best_sha256"],
+                         paths.sha256(self.root / "runs/m" / run / "train" / ultralytics.BEST))
+        self.assertEqual((self.root / "runs/m" / run / "model.yaml").read_text(), spec.path(self.repo, "m").read_text())
+        self.assertRegex(run, r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+
+        [_, (_, weights, data, split_name)] = self.backend.calls
+        self.assertEqual((weights.name, split_name), ("best.pt", "test"))
+        self.assertEqual(data, self.root / "datasets/m" / self.dataset_id / "view/fake/data.yaml")
+        metrics = json.loads((self.root / "runs/m" / run / "eval" / self.dataset_id / "metrics.json").read_text())
+        test = [s for s in json.loads((self.root / "datasets/m" / self.dataset_id / "manifest.json").read_text())
+                ["samples"] if s["split"] == "test"]
+        self.assertEqual(metrics["classes"][0], {"name": CLASSES[0], "instances": len(test), "map50_95": 0.5,
+                                                 "map50": 0.7, "precision": 0.8, "recall": 0.6})
+        self.assertEqual(metrics["classes"][1]["map50"], None)    # 测试划分中没有的类别不给指标
+        self.assertEqual(self.record(run)["evaluations"][self.dataset_id]["map50"], 0.7)
+        self.assertIn("not evaluated (no test instances): 龙门架A, 防撞桶", out)
+
+    def test_interrupted_and_failed_runs_are_recorded_and_resumable(self):
+        self.backend.fail = KeyboardInterrupt()
+        code, out, _ = self.train("run", "m")
+        self.assertEqual(code, 130)
+        run = self.only_run()
+        self.assertIn(f"train run m --resume {run}", out)
+        self.assertEqual(self.record(run)["status"], "interrupted")
+        self.assertIn("--resume continues with the run's own dataset",
+                      self.train("run", "m", "--resume", run, "--option", "epochs=1")[2])
+        self.backend.fail = RuntimeError("CUDA out of memory")
+        with self.assertRaisesRegex(RuntimeError, "CUDA out of memory"):
+            runs.resume(self.root, self.spec(), run)
+        record = self.record(run)
+        self.assertEqual((record["status"], record["error"]), ("failed", "RuntimeError: CUDA out of memory"))
+        code, _, err = self.train("run", "m", "--resume", run)
+        self.assertEqual(code, 0, err)
+        record = self.record(run)
+        self.assertEqual((record["status"], record["error"], len(record["resumed_at"])), ("completed", "", 2))
+        resumed = [call for call in self.backend.calls if call[0] == "train"][-1]
+        self.assertEqual((resumed[1], resumed[3]), (self.root / "runs/m" / run / "train" / ultralytics.LAST, True))
+        code, _, err = self.train("run", "m", "--resume", run)
+        self.assertIn("already completed", err)
+
+    def test_reserved_options_and_unknown_gate_metrics_are_rejected(self):
+        code, _, err = self.train("run", "m", "--option", "project=/tmp/elsewhere")
+        self.assertIn("project is set by the training tool", err)
+        self.assertFalse((self.root / "runs").exists())           # 预检失败不创建 run
+        path = spec.path(self.repo, "m")
+        text = path.read_text()
+        path.write_text(text.replace("    patience: 50", "    patience: 50\n    data: other.yaml")
+                        .replace("min: {}", "min: {map75: 0.5}"))
+        with self.assertRaisesRegex(TrainError, "train.options: data is set(.|\n)*unknown metric 'map75'"):
+            self.spec()
+
+    def test_weights_can_continue_from_another_run(self):
+        self.assertEqual(self.train("run", "m")[0], 0)
+        first = self.only_run()
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("weights: yolo11s.pt", f"weights: run:{first}"))
+        self.assertEqual(self.train("run", "m")[0], 0)
+        second = next(p.name for p in (self.root / "runs/m").iterdir() if p.name != first)
+        record = self.record(second)
+        best = self.root / "runs/m" / first / "train" / ultralytics.BEST
+        self.assertEqual((record["weights"]["start"], record["weights"]["start_sha256"]),
+                         (f"run:{first}", paths.sha256(best)))
+        path.write_text(path.read_text().replace(f"run:{first}", "sub/dir.pt"))
+        self.assertIn("must be a pretrained file name", self.train("run", "m")[2])
+
+    def test_an_old_run_is_evaluated_on_a_newer_dataset(self):
+        self.assertEqual(self.train("run", "m")[0], 0)
+        run = self.only_run()
+        image(self.tmp / "more/x/x.jpg", "white")
+        annotation(self.tmp / "more/x/x.json", LABELED, checked=True)
+        self.import_(self.tmp / "more")
+        newer = dataset.prepare(self.root, self.spec()).dataset_id
+        code, out, err = self.train("eval", "m", run)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.record(run)["evaluations"]), sorted([self.dataset_id, newer]))
+        self.assertIn(f"on the test split of dataset {newer}", out)
+
+    def test_the_dataset_must_match_the_classes(self):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))
+        code, _, err = self.train("run", "m")
+        self.assertIn("prepared with other classes", err)
+        code, _, err = self.train("run", "m", "--dataset", "nope")
+        self.assertIn("dataset 'nope' of m does not exist", err)
 
 
 class RepositoryModelTest(unittest.TestCase):

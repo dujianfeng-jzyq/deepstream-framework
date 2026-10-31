@@ -108,6 +108,25 @@ def prepare(root: Path, spec: dict) -> Result:
     return Result(dataset_id, directory, reused, manifest, skipped, ignored)
 
 
+def locate(root: Path, spec: dict, dataset_id: str | None = None) -> tuple[str, Path, dict]:
+    """找到一个已准备的数据集（默认最近一次 prepare），返回 (标识, 目录, manifest)。
+    数据集必须是按当前规格的类别准备的：类别号在训练、评估与部署之间必须是同一套。"""
+    models_root = root / paths.DATASETS / spec["id"]
+    if dataset_id is None:
+        latest = models_root / paths.LATEST
+        if not latest.is_file():
+            raise TrainError(f"no dataset of {spec['id']} yet: run train prepare {spec['id']} first")
+        dataset_id = latest.read_text(encoding="utf-8").strip()
+    directory = models_root / dataset_id
+    if not dataset_id or "/" in dataset_id or not (directory / paths.MANIFEST).is_file():
+        raise TrainError(f"dataset {dataset_id!r} of {spec['id']} does not exist under {models_root}")
+    manifest = json.loads((directory / paths.MANIFEST).read_text(encoding="utf-8"))
+    if manifest["classes"] != spec["classes"]:
+        raise TrainError(f"dataset {dataset_id} was prepared with other classes than {spec['id']}/model.yaml "
+                         f"has now: run train prepare {spec['id']} again")
+    return dataset_id, directory, manifest
+
+
 def report(result: Result, spec: dict) -> list[str]:
     """给人看的摘要：各划分的样本、组与实例数，跳过的原因，以及需要注意的分布问题。"""
     task = tasks.get(spec["task"])
@@ -120,10 +139,10 @@ def report(result: Result, spec: dict) -> list[str]:
         groups = len({s["group"] for s in items})
         lines.append(f"  {name:<5} {len(items):6d} images ({negatives} without objects), {groups} groups")
     counts = {name: task.statistics(items, spec) for name, items in by_split.items()}
-    width = max(_width(c) for c in [*spec["classes"], "class"])
-    lines.append(f"  {_pad('class', width)}  {'train':>6} {'val':>6} {'test':>6}")
+    width = max(display_width(c) for c in [*spec["classes"], "class"])
+    lines.append(f"  {pad('class', width)}  {'train':>6} {'val':>6} {'test':>6}")
     for name in spec["classes"]:
-        lines.append(f"  {_pad(name, width)}  " + " ".join(f"{counts[s][name]:6d}" for s in split.SPLITS))
+        lines.append(f"  {pad(name, width)}  " + " ".join(f"{counts[s][name]:6d}" for s in split.SPLITS))
     for (source, reason), count in sorted(result.skipped.items()):
         lines.append(f"  skipped {count} images of {source}: {reason}")
     for shape, count in sorted(result.ignored_shapes.items()):
@@ -138,10 +157,10 @@ def report(result: Result, spec: dict) -> list[str]:
     return lines
 
 
-def _width(text: str) -> int:
+def display_width(text: str) -> int:
     """终端中的显示宽度：中文等全角字符占两列。"""
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
 
 
-def _pad(text: str, width: int) -> str:
-    return text + " " * (width - _width(text))
+def pad(text: str, width: int) -> str:
+    return text + " " * (width - display_width(text))

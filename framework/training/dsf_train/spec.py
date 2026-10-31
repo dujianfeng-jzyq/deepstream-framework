@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dsf_deploy import models
 
-from . import paths, tasks
+from . import backends, paths, tasks
 from .errors import TrainError
 
 # train init 生成的骨架。类别由命令行给出；其余是检测任务在 Ultralytics 上的常用起点。
@@ -87,9 +87,12 @@ def load(repo: Path, model_id: str) -> dict:
 def _check_training(spec: dict) -> list[str]:
     problems = []
     try:
-        tasks.get(spec.get("task"))
+        task = tasks.get(spec.get("task"))
     except TrainError as error:
         problems.append(str(error))
+        task = None
+    if task is not None:
+        problems += _check_train(spec.get("train"), task.NAME) + _check_evaluate(spec.get("evaluate"), task)
     if spec.get("cascade") is not None:
         problems.append("cascade (second-stage models) is not supported yet")
     data = spec.get("data")
@@ -109,6 +112,56 @@ def _check_training(spec: dict) -> list[str]:
         if not all(isinstance(v, (int, float)) and 0 <= v < 1 for v in fractions) or sum(fractions) >= 1:
             problems.append("data.split val and test must be fractions whose sum is below 1")
     return problems
+
+
+def _check_train(train: object, task: str) -> list[str]:
+    if not isinstance(train, dict):
+        return ["train must be a mapping"]
+    try:
+        backend = backends.get(train.get("backend"), task)
+    except TrainError as error:
+        return [str(error)]
+    problems = []
+    weights = train.get("weights")
+    if not isinstance(weights, str) or not weights:
+        problems.append("train.weights must name the starting weights (a pretrained file name, run:<run> "
+                        "or an absolute path)")
+    options = train.get("options", {})
+    if not isinstance(options, dict):
+        problems.append("train.options must be a mapping")
+    else:
+        problems += [f"train.options: {problem}" for problem in backend.check_options(options)]
+    return problems
+
+
+def _check_evaluate(evaluate: object, task) -> list[str]:
+    """发布门槛只能引用任务定义的指标：写错名称时在训练前报告，而不是到发布时才发现门槛从未生效。"""
+    if evaluate is None:
+        return []
+    gate = evaluate.get("gate", {}) if isinstance(evaluate, dict) else None
+    if not isinstance(gate, dict):
+        return ["evaluate.gate must be a mapping"]
+    known = ", ".join(task.METRICS)
+    problems = []
+    minimum = gate.get("min") or {}
+    if not isinstance(minimum, dict):
+        problems.append("evaluate.gate.min must map metric names to lower bounds")
+    else:
+        for name, value in minimum.items():
+            if name not in task.METRICS:
+                problems.append(f"evaluate.gate.min: unknown metric {name!r} (task {task.NAME}: {known})")
+            elif not _number(value):
+                problems.append(f"evaluate.gate.min.{name} must be a number")
+    regression = gate.get("regression")
+    if regression is not None:
+        if not isinstance(regression, dict) or regression.get("metric") not in task.METRICS or \
+                not _number(regression.get("max_drop")) or regression["max_drop"] < 0:
+            problems.append(f"evaluate.gate.regression must be {{metric: <{known}>, max_drop: <number >= 0>}}")
+    return problems
+
+
+def _number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def skeleton(model_id: str, task: str, classes: list[str], display_name: str = "") -> str:

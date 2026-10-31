@@ -4,9 +4,10 @@
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-# ffmpeg：视频抽帧；libgl1、libglib2.0-0：Ultralytics 依赖的 OpenCV 运行库。
+# ffmpeg：视频抽帧；libgl1、libglib2.0-0：Ultralytics 依赖的 OpenCV 运行库；
+# git：run.json 记录源码版本（与打包相同的 -dirty 规则）；fonts-wqy-microhei：训练与评估图表中的中文类别名。
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 && \
+    apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 git fonts-wqy-microhei && \
     rm -rf /var/lib/apt/lists/*
 
 # 依赖全部固定在 train-requirements.txt：同一个镜像 tag（Dockerfile 与依赖文件的摘要）总是同一套

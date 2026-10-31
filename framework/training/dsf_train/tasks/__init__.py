@@ -4,6 +4,7 @@
   NAME                         任务名，即 model.yaml 的 task
   samples(annotation, spec)    从一份已检查的标注解读出对象，返回 (objects, problems, ignored_shapes)
   statistics(samples, spec)    数据集报告中每个划分的统计（类别 → 实例数）
+  METRICS                      评估指标的名称 → 比较方向（"higher" 或 "lower"），发布门槛按它比较
 新增任务只加模块并登记在 TASKS 中；规划中尚未实现的任务明确报告“尚未支持”。
 """
 

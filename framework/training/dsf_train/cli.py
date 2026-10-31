@@ -1,4 +1,4 @@
-"""命令行入口：init / import / accept / prepare。由 framework/training/dsf-train.py 调用，
+"""命令行入口：init / import / accept / prepare / run / eval。由 framework/training/dsf-train.py 调用，
 通常经 scripts/train.sh 在训练镜像中运行。"""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, paths, sources, spec
+from . import dataset, paths, runs, sources, spec
 from .errors import TrainError
 
 
@@ -19,6 +19,26 @@ def _classes(args: argparse.Namespace) -> list[str]:
         classes += [line.strip() for line in Path(args.classes_file).read_text(encoding="utf-8").splitlines()
                     if line.strip()]
     return classes
+
+
+def _options(values: list[str]) -> dict:
+    """--option KEY=VALUE：值按 YAML 标量解读（epochs=3 是整数，device=0,1 是字符串）。"""
+    from dsf import yamlio
+    options = {}
+    for value in values:
+        key, sep, text = value.partition("=")
+        if not sep or not key:
+            raise TrainError(f"--option {value!r}: expected KEY=VALUE")
+        try:
+            options[key] = yamlio.load(text)
+        except Exception as error:
+            raise TrainError(f"--option {value!r}: {error}") from error
+    return options
+
+
+def _evaluate(root: Path, model: dict, run: str, dataset_id: str | None = None) -> None:
+    print("\n".join(runs.report(runs.evaluate(root, model, run, dataset_id))))
+    print(f"  details: {paths.run_dir(root, model['id'], run) / runs.EVAL}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,6 +74,18 @@ def main(argv: list[str] | None = None) -> int:
     p = commands.add_parser("prepare", help="build the dataset of a model from its checked annotations")
     p.add_argument("model")
 
+    p = commands.add_parser("run", help="train a model on a prepared dataset, then evaluate it on the test split")
+    p.add_argument("model")
+    p.add_argument("--dataset", help="dataset id (defaults to the latest train prepare)")
+    p.add_argument("--option", action="append", default=[], metavar="KEY=VALUE",
+                   help="override a train.options value for this run, e.g. epochs=3 or device=1 (recorded in run.json)")
+    p.add_argument("--resume", metavar="RUN", help="continue an interrupted or failed run from its last checkpoint")
+
+    p = commands.add_parser("eval", help="evaluate a completed run on the test split of a dataset")
+    p.add_argument("model")
+    p.add_argument("run")
+    p.add_argument("--dataset", help="dataset id (defaults to the latest train prepare)")
+
     args = parser.parse_args(argv)
     repo = (args.repo or paths.repo_root()).resolve()
     try:
@@ -88,6 +120,25 @@ def main(argv: list[str] | None = None) -> int:
             model = spec.load(repo, args.model)
             result = dataset.prepare(root, model)
             print("\n".join(dataset.report(result, model)))
+        elif args.command == "run":
+            model = spec.load(repo, args.model)
+            if args.resume:
+                if args.dataset or args.option:
+                    raise TrainError("--resume continues with the run's own dataset and options; "
+                                     "drop --dataset and --option")
+                run = args.resume
+                runs.resume(root, model, run)
+            else:
+                run = runs.start(repo, root, model, args.dataset, _options(args.option), sys.argv[1:])
+            print(f"run {run} completed: {paths.run_dir(root, model['id'], run)}")
+            if runs.test_split_empty(root, model, run):
+                print("  warning: the test split is empty, so the run is not evaluated "
+                      "(import more capture groups, or raise data.split.test)")
+            else:
+                _evaluate(root, model, run)
+        elif args.command == "eval":
+            model = spec.load(repo, args.model)
+            _evaluate(root, model, args.run, args.dataset)
     except (TrainError, DeployError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

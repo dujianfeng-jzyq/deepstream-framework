@@ -10,6 +10,8 @@ NAME = "detect"
 SHAPE = "rectangle"
 # 标注工具在图像边缘取点时可能略微越界：容差内裁剪到图像内，超出容差视为标错。
 EDGE_TOLERANCE = 2.0
+# 测试划分上的指标：名称 → 比较方向。evaluate.gate 只能引用这些名称；每类指标是前两项与精确率、召回率。
+METRICS = {"map50_95": "higher", "map50": "higher", "precision": "higher", "recall": "higher"}
 
 
 def samples(annotation: Annotation, spec: dict) -> tuple[list[dict], list[str], Counter]:

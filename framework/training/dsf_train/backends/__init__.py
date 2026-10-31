@@ -5,7 +5,14 @@
   TASKS                                    支持的任务
   write_view(task, manifest, root, view, location)
                                            把数据集写成该后端需要的目录格式；location 是视图的最终位置
-训练、评估、原生推理与导出在后续阶段加入。
+  check_options(options)                   train.options 的问题（框架决定的参数不能出现）
+  version()                                后端及其依赖的版本，记入 run.json
+  train(task, data, weights, options, directory, resume, workdir)
+                                           训练到 directory，返回最佳权重；workdir 是下载与缓存的位置
+  evaluate(task, weights, data, split, options, directory, workdir)
+                                           在一个划分上评估，返回 {"metrics": {...}, "classes": {类别号: {...}}}
+  BEST、LAST                               训练目录中最佳与最近检查点的相对路径（续训从 LAST 开始）
+原生推理与导出在后续阶段加入。
 """
 
 from __future__ import annotations

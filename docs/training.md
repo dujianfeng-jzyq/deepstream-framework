@@ -2,7 +2,7 @@
 
 本文说明从数据到现场运行的模型生命周期：导入图片或视频 → 标注 → 准备数据集 → 训练与评估 → 导出与发布 → 打包安装 → 在服务器或 Jetson 上运行。
 
-已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6，一级检测）。其余命令按 §14 的顺序实现；分类、分割与二级模型按 §11、§12 留出扩展点。
+已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6），`train run`、`train eval`（§7）；均为一级检测。其余命令按 §14 的顺序实现；分类、分割与二级模型按 §11、§12 留出扩展点。
 
 ## 1. 原则
 
@@ -80,11 +80,13 @@ models/<id>/
   datasets/<id>/<数据集标识>/          准备好的数据集，不可变
     manifest.json                     每个样本的图像 sha256、解读后的标注、所属划分；数据集标识 = 它的摘要
     view/<后端>/                       后端需要的视图（硬链接到 sources，不复制图像）
-  runs/<id>/<run>/                    一次训练，不可变
-    run.json                          规格摘要、数据集标识、源码版本、后端与版本、命令、状态
-    weights/                          后端的检查点
-    eval/                             测试划分上的指标与分片报告
+  runs/<id>/<run>/                    一次训练；完成后 train/ 不再改变
+    run.json                          规格摘要、数据集标识、源码版本、后端与版本、起点权重、生效参数、命令、状态
+    model.yaml                        训练时规格的副本
+    train/                            后端的输出：检查点（weights/best.pt、last.pt）、曲线与日志
+    eval/<数据集标识>/                 该数据集测试划分上的 metrics.json 与后端的图表
     export/                           导出的 ONNX、labels.txt、签名与一致性检查结果
+  pretrained/                         下载的预训练权重（后端的其他下载物也在这里），下载一次，所有模型复用
 ```
 
 一个来源只属于一次导入；来源可以被多个模型的 `data.sources` 引用（例如一级检测与基于它的二级分类共用同一批标注）。
@@ -151,13 +153,19 @@ models/<id>/
 
 ## 7. 训练与评估
 
-`train run <id> [--dataset <标识>]`（默认用最近一次 prepare 的结果）：
+`train run <id> [--dataset <标识>] [--option 键=值 …]`（默认用最近一次 prepare 的结果）：
 
-- 在训练镜像中调用 `train.backend` 指定的后端，`train.weights` 为起点（预训练权重，或某次 run 的权重以继续训练），`train.options` 原样透传。
-- run 标识为 `<UTC 时间>-<短摘要>`；`run.json` 记录 `model.yaml` 的摘要、数据集标识、源码版本（与打包相同的 `-dirty` 规则）、后端名称与版本，训练中断可续训。
-- 训练结束后在测试划分上评估，写入 `eval/`：指标由任务决定（检测：mAP50、mAP50-95、每类 AP；分类：top-1、每类精确率与召回率；分割：框与掩码的 mAP），另加 `evaluate.slices` 定义的分片（按来源、按形状属性，例如“遮挡=是”的目标，或按 `difficult`）。
+- 在训练镜像中调用 `train.backend` 指定的后端，`train.options` 原样透传；没有给出 `imgsz` 时按 `input` 的尺寸训练。数据集、输出位置与续训由工具决定，写在 `options` 中（`data`、`project`、`name`、`resume` 等）是规格错误。
+- `train.weights` 是起点：预训练权重的文件名（在 `pretrained/` 中查找，没有时由后端下载），`run:<run>`（某次完成的 run 的最佳权重，在已有模型上用新数据继续训练），或绝对路径。起点的 sha256 记入 `run.json`。
+- `--option` 只覆盖这一次 run 的参数，例如试跑 `--option epochs=3`、选卡 `--option device=1`（多卡 `device=0,1`）；覆盖值单独记入 `run.json`，长期有效的参数写进 `model.yaml`。
+- run 标识为 `<UTC 时间>-<短摘要>`（摘要来自规格、数据集与覆盖参数）；`run.json` 记录 `model.yaml` 的摘要与副本、数据集标识、类别、源码版本（与打包相同的 `-dirty` 规则）、后端与依赖版本、生效参数、命令与状态（`running`、`completed`、`failed`、`interrupted`）。
+- 数据集必须按当前规格的类别准备：类别改动后先重新 `prepare`。验证划分为空时拒绝训练。
+- 中断（Ctrl-C）或失败的 run 保留记录与最近检查点，`train run <id> --resume <run>` 沿用原来的数据集与参数继续。
+- 训练结束后在测试划分上评估（测试划分为空时只给出警告），写入 `eval/<数据集标识>/metrics.json`：指标由任务决定（检测：`map50_95`、`map50`、`precision`、`recall` 及每类的同名指标与测试实例数；分类：top-1、每类精确率与召回率；分割：框与掩码的 mAP）。测试划分中没有实例的类别不给指标，单独列出。`evaluate.gate` 只能引用任务定义的指标名，写错时在训练前报告。
 
-`train eval <id> <run> [--dataset <标识>]` 单独重新评估，例如数据集更新后比较新旧 run。
+`train eval <id> <run> [--dataset <标识>]` 单独重新评估，例如数据集更新后在新的测试划分上比较新旧 run；每个数据集的结果分别保存，摘要记入 `run.json` 的 `evaluations`。
+
+分片评估（`evaluate.slices`：按来源、按形状属性，例如“遮挡=是”的目标，或按 `difficult`）尚未实现：按来源是图片级的子集，按属性是目标级的子集，后者需要在评估时忽略其余目标，等有实际需要时再设计。
 
 ## 8. 导出与发布：`train publish <id> <run>`
 
@@ -240,7 +248,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 |---|---|---|
 | 1 | 模型目录格式、`release.json`、打包前的模型校验 | 已实现 |
 | 2 | 训练镜像、`scripts/train.sh`；`train init`、`train import`（图片去重、视频抽帧）；X-AnyLabeling 读取与 `train accept`；`train prepare`（检测） | 已实现 |
-| 3 | `train run` / `train eval`（Ultralytics，检测） | 待实现 |
+| 3 | `train run` / `train eval`（Ultralytics，检测）；分片评估除外 | 已实现 |
 | 4 | `train prelabel` | 待实现 |
 | 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 待实现 |
 | 6 | 模型包与停服前构建 engine | 待实现 |

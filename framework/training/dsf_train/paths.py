@@ -22,6 +22,8 @@ MANIFEST = "manifest.json"
 VIEW = "view"
 # datasets/<id>/latest：最近一次 prepare 得到的数据集标识，train run 的默认输入。
 LATEST = "latest"
+# 下载的预训练权重与后端的其他下载物：训练根目录中的固定位置，下载一次，所有模型复用。
+PRETRAINED = "pretrained"
 
 
 def repo_root() -> Path:
@@ -45,6 +47,12 @@ def source_dir(root: Path, name: str) -> Path:
     if not name or "/" in name or name.startswith("."):
         raise TrainError(f"invalid source name: {name!r}")
     return root / SOURCES / name
+
+
+def run_dir(root: Path, model_id: str, run: str) -> Path:
+    if not run or "/" in run or run.startswith("."):
+        raise TrainError(f"invalid run name: {run!r}")
+    return root / RUNS / model_id / run
 
 
 def sha256(path: Path) -> str:
