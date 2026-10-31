@@ -2,7 +2,7 @@
 
 本文说明从数据到现场运行的模型生命周期：导入图片或视频 → 标注 → 准备数据集 → 训练与评估 → 导出与发布 → 打包安装 → 在服务器或 Jetson 上运行。
 
-已经实现的只有模型目录格式与打包前的模型校验（§3、§10）；`train` 命令是设计，按 §14 的顺序实现，先实现一级检测模型，分类、分割与二级模型按 §11、§12 留出扩展点。
+已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6，一级检测）。其余命令按 §14 的顺序实现；分类、分割与二级模型按 §11、§12 留出扩展点。
 
 ## 1. 原则
 
@@ -94,7 +94,7 @@ models/<id>/
 ### 5.1 导入：`train import <id> <路径…> --source <来源>`
 
 - **图片**：复制（同一文件系统时硬链接）到 `sources/<来源>/`；按 sha256 去掉完全相同的图片，与已有来源重复的图片报告并跳过，避免同一张图同时出现在训练与测试中。
-- **视频**：按 `--every`（默认 1s）抽帧；用感知哈希去掉与上一张保留帧几乎相同的帧（`--dedupe`，静止画面不会产生几百张一样的图）；`--max-frames` 限制每个视频的帧数。帧命名为 `<视频名>_<毫秒>.jpg`。
+- **视频**：按 `--every`（默认 1 秒）抽帧；用 64 位差值哈希去掉与上一张保留帧几乎相同的帧（`--dedupe`，默认相差不超过 4 位即视为相同，`-1` 保留全部帧），静止画面不会产生几百张一样的图；`--max-frames` 限制每个视频的帧数。帧命名为 `<视频名>_<毫秒>.jpg`。
 - **采集组**：同一视频的帧属于同一组；图片默认以所在子目录为组（`--group-by filename_prefix` 改用文件名前缀，适合按序号命名的连拍）。组决定划分（§6），近似帧不会被拆到训练与测试两边。
 - 写出 `source.json` 与 `labels.txt`。导入不改动原始文件，`source.json` 记录来源路径，便于追溯。
 
@@ -173,7 +173,7 @@ models/<id>/
 
 ## 9. 训练机与镜像
 
-- 训练镜像基于 PyTorch 官方 CUDA 镜像加训练后端与 onnx/onnxruntime，只在 x86 GPU 训练机运行；`scripts/train.sh` 挂载仓库与训练根目录，以当前用户运行。
+- 训练镜像（`framework/docker/train.Dockerfile`）基于 PyTorch 官方 CUDA 镜像加训练后端与 onnx/onnxruntime，版本固定，只在 x86 GPU 训练机运行。镜像只提供运行环境，训练工具（`framework/training/`）不复制进镜像：依赖（含间接依赖）全部固定在 `framework/docker/train-requirements.txt`；`scripts/train.sh` 以 Dockerfile 与依赖文件的摘要作为 tag，缺少时自动构建；以当前用户运行，挂载仓库（可写）、训练根目录（可写）与当前目录（只读），参数中含 `/` 的已有路径按真实路径只读挂载。
 - Ultralytics 以 AGPL-3.0 发布：它只存在于训练镜像中，不进入 base、apps 或发布包；导出的 ONNX 是否受其许可约束，商用前需要单独确认。
 - 不依赖 GPU 的部分（标注读取、去重、划分、manifest、规格与发布记录）是纯 Python，在 builder 的 CTest 中测试；训练、导出与一致性验证只在训练机上验证。
 
@@ -239,7 +239,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 1 | 模型目录格式、`release.json`、打包前的模型校验 | 已实现 |
-| 2 | 训练镜像、`scripts/train.sh`；`train init`、`train import`（图片去重、视频抽帧）；X-AnyLabeling 读取与 `train accept`；`train prepare`（检测） | 待实现 |
+| 2 | 训练镜像、`scripts/train.sh`；`train init`、`train import`（图片去重、视频抽帧）；X-AnyLabeling 读取与 `train accept`；`train prepare`（检测） | 已实现 |
 | 3 | `train run` / `train eval`（Ultralytics，检测） | 待实现 |
 | 4 | `train prelabel` | 待实现 |
 | 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 待实现 |

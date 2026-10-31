@@ -174,8 +174,8 @@ class RepositoryTest(unittest.TestCase):
     def test_python_passes_pyflakes(self):
         if importlib.util.find_spec("pyflakes") is None:
             self.skipTest("pyflakes not installed")
-        targets = [FRAMEWORK / "python", FRAMEWORK / "deploy", FRAMEWORK / "tools", FRAMEWORK / "tests",
-                   FRAMEWORK / "templates", ROOT / "services"]
+        targets = [FRAMEWORK / "python", FRAMEWORK / "deploy", FRAMEWORK / "training", FRAMEWORK / "tools",
+                   FRAMEWORK / "tests", FRAMEWORK / "templates", ROOT / "services"]
         result = subprocess.run([sys.executable, "-m", "pyflakes", *map(str, targets)],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

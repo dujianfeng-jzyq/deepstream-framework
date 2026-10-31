@@ -60,7 +60,7 @@ def check_model(directory: Path) -> list[str]:
         spec = _yaml().load(spec_path.read_text(encoding="utf-8")) or {}
     except Exception as error:
         return [f"{SPEC}: {error}"]
-    problems = _check_spec(directory.name, spec)
+    problems = check_spec(directory.name, spec)
     if problems:
         return problems  # 规格本身不成立时，与发布和配置的对照没有意义
 
@@ -79,7 +79,7 @@ def check_model(directory: Path) -> list[str]:
     return problems
 
 
-def _check_spec(name: str, spec: dict) -> list[str]:
+def check_spec(name: str, spec: dict) -> list[str]:
     if not isinstance(spec, dict):
         return [f"{SPEC} must be a mapping"]
     problems = []

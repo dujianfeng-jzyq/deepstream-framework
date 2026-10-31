@@ -14,7 +14,7 @@
 ## 代码
 
 - C++17，两空格缩进，`-Wall -Wextra -Wpedantic` 无警告。类型与函数 `PascalCase`，变量 `snake_case`，常量 `kPascalCase`，成员变量以 `_` 结尾。
-- Python 3.9+，部署工具（`framework/deploy`）只用标准库，渲染时才导入 PyYAML；pyflakes 无警告。
+- Python 3.9+，部署工具（`framework/deploy`）只用标准库，渲染时才导入 PyYAML；训练工具（`framework/training`）在训练镜像中运行，可以使用镜像中的依赖，但数据准备等不依赖 GPU 的部分必须能在 builder 中测试；pyflakes 无警告。
 - 标识符用英文，注释与文档用中文。注释说明契约、原因和不可调换的顺序，不复述代码，不记录调试过程。
 - 组件构造函数不得有副作用（`--check-config` 也会构造组件）；文件、网络、设备操作放在生命周期回调中。
 - 媒体线程（pad probe、流线程信号）只复制数据和入队，不等待网络或锁住控制线程正在等待的资源。

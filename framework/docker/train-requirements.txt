@@ -1,0 +1,37 @@
+# 训练镜像的完整依赖（直接与间接依赖都固定），由 train.Dockerfile 安装；改动后镜像 tag 随之变化。
+# 间接依赖固定在与 ultralytics 8.3.40 同期（2024 年末）的版本：只固定直接依赖时，pip 会解析出
+# 构建当天的最新版本（例如 opencv 5、pandas 3、protobuf 7），同一份 Dockerfile 在不同日期得到不同的环境。
+# torch 2.5.1、torchvision 0.20.1、numpy 2.1.2、requests、tqdm、psutil 来自 PyTorch 基础镜像。
+
+# 训练后端与导出
+ultralytics==8.3.40
+ultralytics-thop==2.0.12
+onnx==1.17.0
+onnxslim==0.1.42
+# CUDA 12 与 cuDNN 9，与基础镜像的 PyTorch 一致
+onnxruntime-gpu==1.20.2
+protobuf==5.29.1
+flatbuffers==24.3.25
+coloredlogs==15.0.1
+humanfriendly==10.0
+sympy==1.13.1
+
+# 训练工具（数据准备）
+pyyaml==6.0.2
+pillow==11.0.0
+
+# ultralytics 的间接依赖
+opencv-python==4.10.0.84
+matplotlib==3.9.3
+contourpy==1.3.1
+cycler==0.12.1
+fonttools==4.55.3
+kiwisolver==1.4.7
+pyparsing==3.2.0
+python-dateutil==2.9.0.post0
+pandas==2.2.3
+pytz==2024.2
+tzdata==2024.2
+scipy==1.14.1
+seaborn==0.13.2
+py-cpuinfo==9.0.0

@@ -10,22 +10,29 @@ FROM ${BASE_IMAGE} AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 编译工具与测试依赖只在 builder：Redis 服务端、软件编解码插件、Docker/Compose CLI 与 git 让集成测试
-# 真正执行而不是 SKIP。部署测试只用 `docker compose config` 解析文件，不需要（也不启动）守护进程。
+# 真正执行而不是 SKIP；Pillow 与 ffmpeg 供训练工具的数据部分（导入、抽帧、数据集）测试。部署测试只用 `docker compose config` 解析文件，不需要（也不启动）守护进程。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update || true; \
     apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config python3-pyflakes git \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-      redis-server python3-redis gstreamer1.0-tools docker.io docker-compose-v2 \
+      redis-server python3-redis gstreamer1.0-tools docker.io docker-compose-v2 python3-pil ffmpeg \
       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
 
 # 上游镜像裁掉了软件编解码库的文件却保留了包记录，普通 apt install 不会恢复；
-# 使用 SDK 自带的恢复脚本，再以实际元素检查结果为准。
+# 使用 SDK 自带的恢复脚本，再以实际元素检查结果为准。ffmpeg（训练工具测试中的视频抽帧）还缺其他
+# 被裁掉的库：按 ldd 报告缺失的文件找回所属的包重装，不逐个点名。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     bash /opt/nvidia/deepstream/deepstream/user_additional_install.sh; \
     apt-get install --reinstall -y --no-install-recommends libmp3lame0 libxvidcore4 || true; \
+    missing="$(ldd /usr/bin/ffmpeg | awk '/not found/ {print $1}' | sort -u)"; \
+    if [ -n "$missing" ]; then \
+      apt-get install --reinstall -y --no-install-recommends \
+        $(for lib in $missing; do dpkg -S "$lib" | head -n 1 | cut -d: -f1; done | sort -u); \
+    fi; \
+    ffmpeg -version >/dev/null || { echo "ffmpeg cannot run" >&2; exit 1; }; \
     for element in x264enc h264parse splitmuxsink mp4mux decodebin; do \
       gst-inspect-1.0 "$element" >/dev/null || { echo "missing GStreamer element: $element" >&2; exit 1; }; \
     done
