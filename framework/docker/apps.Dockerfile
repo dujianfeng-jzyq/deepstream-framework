@@ -10,14 +10,14 @@ FROM ${BASE_IMAGE} AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 编译工具与测试依赖只在 builder：Redis 服务端、软件编解码插件、Docker/Compose CLI 与 git 让集成测试
-# 真正执行而不是 SKIP；Pillow 与 ffmpeg 供训练工具的数据部分（导入、抽帧、数据集）测试。部署测试只用 `docker compose config` 解析文件，不需要（也不启动）守护进程。
+# 真正执行而不是 SKIP；Pillow、ffmpeg 与 numpy 供训练工具中不依赖 GPU 的部分（导入、抽帧、数据集、导出的一致性比较）测试。部署测试只用 `docker compose config` 解析文件，不需要（也不启动）守护进程。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update || true; \
     apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkg-config python3-pyflakes git \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-      redis-server python3-redis gstreamer1.0-tools docker.io docker-compose-v2 python3-pil ffmpeg \
+      redis-server python3-redis gstreamer1.0-tools docker.io docker-compose-v2 python3-pil python3-numpy ffmpeg \
       gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
 
 # 上游镜像裁掉了软件编解码库的文件却保留了包记录，普通 apt install 不会恢复；

@@ -1,7 +1,8 @@
-"""训练工具：规格、导入、X-AnyLabeling 读写、批量确认、划分、数据集准备，训练与评估的记录，以及预标注。
+"""训练工具：规格、导入、X-AnyLabeling 读写、批量确认、划分、数据集准备，训练与评估的记录，预标注与发布。
 
-用真实的 Pillow 与 ffmpeg（builder 中已安装），以及 X-AnyLabeling 实际保存的样例文件。训练与评估用
-假后端：这里验证 run 的记录、续训与评估的组织；Ultralytics 本身只在训练机上验证。
+用真实的 Pillow、ffmpeg 与 numpy（builder 中已安装），以及 X-AnyLabeling 实际保存的样例文件。训练、评估、
+推理与导出用假后端，ONNX 的签名与推理也用替身：这里验证记录、门槛、一致性判断与模型目录的写入；
+Ultralytics、onnx 与 onnxruntime 本身只在训练机上验证。
 """
 
 import io
@@ -14,10 +15,11 @@ import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from deploy_support import ROOT
 from dsf_deploy import models
-from dsf_train import backends, cli, dataset, paths, runs, sources, spec, split, xanylabeling
+from dsf_train import backends, cli, dataset, media, paths, publish, runs, sources, spec, split, xanylabeling
 from dsf_train.backends import ultralytics
 from dsf_train.tasks import detect
 from dsf_train.errors import TrainError
@@ -26,6 +28,12 @@ SAMPLES = Path(__file__).resolve().parent / "data/x-anylabeling-4.0.6"
 NEGATIVE = SAMPLES / "20260808_102138_00023000.json"
 LABELED = SAMPLES / "20260808_102827_00058000.json"   # 一个“标志牌(圆牌)”矩形框，带属性
 CLASSES = ["标志牌(圆牌)", "龙门架A", "防撞桶"]
+
+try:
+    import numpy
+except ModuleNotFoundError:  # 宿主可能没有；builder 中有，DSF_FORBID_SKIPS 使跳过计为失败
+    numpy = None
+needs_numpy = unittest.skipUnless(numpy is not None, "numpy not installed")
 
 
 def image(path: Path, color: str, size=(1920, 1080)) -> Path:
@@ -366,6 +374,9 @@ class FakeBackend(types.ModuleType):
         super().__init__("fake")
         self.calls, self.fail = [], None
         self.during_predict = None  # 推理每张图之前调用，模拟人同时在工具中保存
+        self.map50_95 = {}          # run → 评估得到的 map50_95（默认 0.5）
+
+    LAYOUTS = ultralytics.LAYOUTS
 
     write_view = staticmethod(ultralytics.write_view)
     check_options = staticmethod(ultralytics.check_options)
@@ -383,14 +394,28 @@ class FakeBackend(types.ModuleType):
         if self.fail is not None:
             error, self.fail = self.fail, None
             raise error
-        (directory / self.BEST).write_bytes(f"best {data}".encode())
+        (directory / self.BEST).write_bytes(f"best {data} {directory}".encode())  # 每次 run 的权重不同
         return directory / self.BEST
 
     def evaluate(self, task, weights, data, split_name, options, directory, workdir):
-        self.calls.append(("evaluate", weights, data, split_name))
+        self.calls.append(("evaluate", weights, data, split_name, options.get("device")))
         directory.mkdir(parents=True, exist_ok=True)
-        return {"metrics": {"map50_95": 0.5, "map50": 0.7, "precision": 0.8, "recall": 0.6},
-                "classes": {0: {"map50_95": 0.5, "map50": 0.7, "precision": 0.8, "recall": 0.6}}}
+        value = self.map50_95.get(weights.parents[2].name, 0.5)  # runs/m/<run>/train/weights/best.pt
+        return {"metrics": {"map50_95": value, "map50": 0.7, "precision": 0.8, "recall": 0.6},
+                "classes": {0: {"map50_95": value, "map50": 0.7, "precision": 0.8, "recall": 0.6}}}
+
+    def export(self, task, weights, layout, size, settings, target, workdir):
+        self.calls.append(("export", weights, layout, size, dict(settings)))
+        target.write_bytes(b"onnx of " + weights.read_bytes())
+
+    def reference(self, task, weights, layout, batch):
+        """每张图 4 个候选：坐标来自图像均值，两个高分、两个低分。"""
+        rows = []
+        for item in batch:
+            mean = float(item.mean()) * 100
+            rows.append([[mean, mean, mean + 10, mean + 10, 0.9, 1.0], [1, 2, 3, 4, 0.3, 2.0],
+                         [5, 6, 7, 8, 0.02, 0.0], [0, 0, 1, 1, 0.01, 1.0]])
+        return numpy.array(rows, dtype=numpy.float32)
 
 
     def predict(self, task, weights, images, options, conf, workdir):
@@ -454,7 +479,7 @@ class RunTest(RunTestCase):
         self.assertEqual((self.root / "runs/m" / run / "model.yaml").read_text(), spec.path(self.repo, "m").read_text())
         self.assertRegex(run, r"^\d{8}-\d{6}-[0-9a-f]{6}$")
 
-        [_, (_, weights, data, split_name)] = self.backend.calls
+        [_, (_, weights, data, split_name, _)] = self.backend.calls
         self.assertEqual((weights.name, split_name), ("best.pt", "test"))
         self.assertEqual(data, self.root / "datasets/m" / self.dataset_id / "view/fake/data.yaml")
         metrics = json.loads((self.root / "runs/m" / run / "eval" / self.dataset_id / "metrics.json").read_text())
@@ -656,6 +681,252 @@ class CorrectionsTest(unittest.TestCase):
             xanylabeling.Shape("a", "rectangle", [(60, 60), (70, 70)]),        # 补上的框
             xanylabeling.Shape("a", "polygon", [(0, 0), (5, 5), (0, 5)])])     # 其他形状不计
         self.assertEqual(dict(detect.corrections(predicted, final)), {"kept": 1, "removed": 2, "added": 2})
+
+
+NVINFER = """[property]
+onnx-file=artifacts/model.onnx
+labelfile-path=artifacts/labels.txt
+model-engine-file=/data/engines/m/model_b1_gpu0_fp16.engine  # 构建器写入的位置
+batch-size=1
+num-detected-classes=3
+network-type=0
+"""
+
+
+class FakeOnnx:
+    """onnxio 的替身：签名可改，推理 = 原生推理 + offset。"""
+    def __init__(self, backend):
+        self.backend = backend
+        self.output = [1, 4, 6]
+        self.offset = 0.0
+
+    def signature(self, path):
+        return {"inputs": [{"name": "input", "shape": [1, 3, 640, 640]}],
+                "outputs": [{"name": "output", "shape": self.output}]}
+
+    def run(self, path, batch):
+        return self.backend.reference("detect", None, "xyxy-confidence-class_id", batch) + self.offset
+
+
+@needs_numpy
+class PublishTest(RunTestCase):
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.train("run", "m")[0], 0)
+        self.run_id = self.only_run()
+        self.model_dir = self.repo / "models/m"
+        (self.model_dir / "nvinfer.txt").write_text(NVINFER, encoding="utf-8")
+        self.onnx = FakeOnnx(self.backend)
+        patcher = mock.patch.object(publish, "onnxio", self.onnx)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def snapshot(self):
+        return {str(p.relative_to(self.model_dir)): p.read_bytes() for p in self.model_dir.rglob("*") if p.is_file()}
+
+    def gate(self, text):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("    min: {}", f"    min: {text}"))
+
+    def second_run(self):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("epochs: 200", "epochs: 201"))  # 另一份规格摘要
+        self.assertEqual(self.train("run", "m")[0], 0)
+        return max(p.name for p in (self.root / "runs/m").iterdir() if p.name != self.run_id)
+
+    def test_first_publish_writes_a_checked_model_directory(self):
+        code, _, err = self.train("publish", "m", self.run_id)
+        self.assertIn("evaluate.gate.min is empty and there is no published model", err)
+        self.assertFalse((self.model_dir / "release.json").exists())
+        code, out, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertEqual(code, 0, err)
+        release = json.loads((self.model_dir / "release.json").read_text(encoding="utf-8"))
+        self.assertRegex(release["release"], r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+        self.assertEqual((release["run"]["id"], release["evaluated_on"], release["metrics"]["map50_95"]),
+                         (self.run_id, self.dataset_id, 0.5))
+        self.assertTrue(release["gate"]["accepted_without_comparison"])
+        self.assertTrue(release["consistency"]["passed"])
+        self.assertEqual(release["consistency"]["class_mismatches"], 0)
+        self.assertEqual((self.model_dir / "artifacts/labels.txt").read_text(encoding="utf-8"),
+                         "".join(f"{c}\n" for c in CLASSES))
+        best = self.root / "runs/m" / self.run_id / "train" / ultralytics.BEST
+        self.assertEqual((self.model_dir / "artifacts/model.onnx").read_bytes(), b"onnx of " + best.read_bytes())
+        engine = f"/data/engines/m/{release['release']}/model_b1_gpu0_fp16.engine"
+        self.assertIn(f"model-engine-file={engine}  # 构建器写入的位置\n",
+                      (self.model_dir / "nvinfer.txt").read_text(encoding="utf-8"))
+        self.assertEqual(models.check_model(self.model_dir), [])     # 与打包时同一套校验
+        [export] = [c for c in self.backend.calls if c[0] == "export"]
+        self.assertEqual((export[2], export[3], export[4]["batch"]), ("xyxy-confidence-class_id", (640, 640), 1))
+        record = json.loads((self.root / "runs/m" / self.run_id / "export/export.json").read_text())
+        self.assertEqual(record["onnx"]["outputs"][0]["shape"], [1, 4, 6])
+        self.assertIn(f"nvinfer.txt: model-engine-file /data/engines/m/model_b1_gpu0_fp16.engine -> {engine}", out)
+        before = self.snapshot()
+        code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertIn(f"identical to the published release {release['release']}", err)   # 不为同一模型换 engine 路径
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_minimum_gate_is_never_overridden(self):
+        self.gate("{map50_95: 0.6}")
+        before = self.snapshot()
+        code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertIn("map50_95 0.5000 does not reach evaluate.gate.min 0.6", err)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(any(c[0] == "export" for c in self.backend.calls))  # 门槛在导出之前
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("min: {map50_95: 0.6}", "min: {map50_95: 0.5}"))
+        code, out, err = self.train("publish", "m", self.run_id)              # 有下限即无需 --accept-metrics
+        self.assertEqual(code, 0, err)
+        self.assertIn("gate min: map50_95 0.5000 >= 0.5", out)
+
+    def test_a_new_run_is_compared_with_the_published_one(self):
+        self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
+        first = json.loads((self.model_dir / "release.json").read_text())["release"]
+        second = self.second_run()
+        self.backend.map50_95[second] = 0.48                                   # 下降 0.02 > max_drop 0.01
+        shutil.rmtree(self.root / "runs/m" / second / "eval")                  # train run 时按 0.5 评估过
+        before = self.snapshot()
+        code, _, err = self.train("publish", "m", second, "--device", "1")
+        self.assertIn(f"map50_95 0.4800 is 0.0200 below the published release {first}", err)
+        self.assertEqual(self.snapshot(), before)
+        self.backend.map50_95[second] = 0.495
+        shutil.rmtree(self.root / "runs/m" / second / "eval")                  # 重新评估（已有结果会复用）
+        code, out, err = self.train("publish", "m", second)
+        self.assertEqual(code, 0, err)
+        release = json.loads((self.model_dir / "release.json").read_text())
+        regression = release["gate"]["regression"]
+        self.assertEqual((regression["release"], regression["run"], regression["passed"]), (first, self.run_id, True))
+        self.assertAlmostEqual(regression["drop"], 0.005)
+        self.assertFalse(release["gate"]["accepted_without_comparison"])
+        # 发布段被替换为新的发布，而不是再嵌套一层。
+        self.assertIn(f"model-engine-file=/data/engines/m/{release['release']}/model_b1_gpu0_fp16.engine",
+                      (self.model_dir / "nvinfer.txt").read_text())
+        self.assertEqual(regression["published"], 0.5)                       # 当前发布在同一测试划分上的结果
+        self.assertIn(("evaluate", self.root / "runs/m" / second / "train" / ultralytics.BEST,
+                       self.root / "datasets/m" / self.dataset_id / "view/fake/data.yaml", "test", "1"),
+                      self.backend.calls)                                      # --device 只用于门槛的评估
+
+    def test_a_published_model_that_cannot_be_reevaluated_needs_explicit_acceptance(self):
+        self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
+        second = self.second_run()
+        shutil.rmtree(self.root / "runs/m" / self.run_id)                      # 当前发布的权重不在这台训练机上
+        self.gate("{map50: 0.5}")
+        code, _, err = self.train("publish", "m", second)
+        self.assertIn(f"its run '{self.run_id}' is not in this training root", err)
+        self.assertIn("--accept-metrics", err)
+        code, _, err = self.train("publish", "m", second, "--accept-metrics")
+        self.assertEqual(code, 0, err)
+        gate = json.loads((self.model_dir / "release.json").read_text())["gate"]
+        self.assertTrue(gate["accepted_without_comparison"])
+        self.assertEqual(gate["min"]["map50"]["passed"], True)
+
+    def test_an_export_that_differs_from_native_inference_is_not_published(self):
+        before = self.snapshot()
+        self.onnx.offset = 0.01                                                # 置信度差 0.01 > 0.001
+        code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertIn("does not reproduce the backend's own inference", err)
+        self.assertEqual(self.snapshot(), before)
+        record = json.loads((self.root / "runs/m" / self.run_id / "export/export.json").read_text())
+        self.assertFalse(record["consistency"]["passed"])
+        self.onnx.offset = 0.0
+        self.onnx.output = [1, 4, 5]
+        code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertIn("xyxy-confidence-class_id needs one output whose last dimension is 6", err)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_contract_problems_are_found_before_anything_changes(self):
+        nvinfer = self.model_dir / "nvinfer.txt"
+        nvinfer.write_text(NVINFER.replace("/data/engines/m/model", "/data/engines/m/fp16/model"))
+        code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertIn("cannot tell which directory of model-engine-file", err)
+        self.assertFalse((self.root / "runs/m" / self.run_id / "export").exists())  # 预检在评估与导出之前
+        nvinfer.write_text(NVINFER.replace("num-detected-classes=3", "num-detected-classes=4"))
+        before = self.snapshot()
+        code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
+        self.assertIn("fail the model check, nothing was changed", err)
+        self.assertIn("num-detected-classes=4", err)
+        self.assertEqual(self.snapshot(), before)
+
+
+class PublishListTest(RunTestCase):
+    def test_without_a_run_the_candidates_are_listed_and_nothing_is_published(self):
+        code, out, _ = self.train("publish", "m")
+        self.assertEqual(code, 0)
+        self.assertIn("no completed runs of m", out)
+        self.assertEqual(self.train("run", "m")[0], 0)
+        full = self.only_run()
+        self.backend.map50_95[full] = 0.61
+        shutil.rmtree(self.root / "runs/m" / full / "eval")
+        self.assertEqual(self.train("eval", "m", full)[0], 0)
+        self.assertEqual(self.train("run", "m", "--option", "epochs=3")[0], 0)
+        trial = next(p.name for p in (self.root / "runs/m").iterdir() if p.name != full)
+        self.backend.fail = KeyboardInterrupt()
+        self.train("run", "m", "--option", "epochs=4")
+        stopped = next(p.name for p in (self.root / "runs/m").iterdir() if p.name not in (full, trial))
+        (self.repo / "models/m/release.json").write_text(json.dumps({"release": "r1", "run": {"id": full}}))
+
+        code, out, err = self.train("publish", "m")
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertIn(f"completed runs of m (the test split of dataset {self.dataset_id}); nothing was published:",
+                      lines[0])
+        [trial_line] = [line for line in lines if trial in line]
+        [full_line] = [line for line in lines if full in line]
+        self.assertRegex(trial_line, r"^   +\S+ +0\.5000 +0\.7000 .* epochs=3$")
+        self.assertRegex(full_line, r"^  \* \S+ +0\.6100 .* -$")              # 当前发布的 run 带标记
+        self.assertLess(lines.index(trial_line), lines.index(full_line))       # 最近完成的在前
+        self.assertIn("* the run of the published release r1", out)
+        self.assertIn(f"not publishable: {stopped} (interrupted)", out)
+        self.assertIn("publish one with: train publish m <run>", out)
+        self.assertFalse((self.root / "runs/m" / full / "export").exists())
+        self.assertIn("name the run to publish", self.train("publish", "m", "--accept-metrics")[2])
+
+        image(self.tmp / "more/x/x.jpg", "white")
+        annotation(self.tmp / "more/x/x.json", LABELED, checked=True)
+        self.import_(self.tmp / "more")
+        newer = dataset.prepare(self.root, self.spec()).dataset_id            # 新数据集上还没有评估
+        out = self.train("publish", "m")[1]
+        self.assertIn(f"dataset {newer}", out)
+        self.assertIn("not evaluated on this dataset yet: train eval m <run>", out)
+
+
+@needs_numpy
+class CompareTest(unittest.TestCase):
+    def test_rows_are_compared_where_they_matter(self):
+        native = numpy.array([[[10, 10, 20, 20, 0.9, 1], [0, 0, 5, 5, 0.1, 2], [0, 0, 1, 1, 0.01, 0]]],
+                             dtype=numpy.float32)
+        same = detect.compare("xyxy-confidence-class_id", native, native.copy())
+        self.assertEqual((same["passed"], same["candidates"], same["confident"]), (True, 2, 1))
+        exported = native.copy()
+        exported[0, 2, :4] += 50                                              # 低于 compare_conf 的候选不比较
+        exported[0, 1, 5] = 0                                                 # 低于 class_conf 的类别不比较
+        self.assertTrue(detect.compare("xyxy-confidence-class_id", native, exported)["passed"])
+        exported[0, 0, 5] = 2
+        self.assertEqual(detect.compare("xyxy-confidence-class_id", native, exported)["class_mismatches"], 1)
+        exported = native.copy()
+        exported[0, 0, 0] += 0.6
+        self.assertFalse(detect.compare("xyxy-confidence-class_id", native, exported)["passed"])
+        exported = native.copy()
+        exported[0, 1, 0] = numpy.nan
+        self.assertFalse(detect.compare("xyxy-confidence-class_id", native, exported)["passed"])
+        self.assertIn("shapes differ", detect.compare("xyxy-confidence-class_id", native, native[:, :2])["reason"])
+
+    def test_letterbox_keeps_the_aspect_ratio(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = image(Path(temporary) / "a.jpg", "white", size=(200, 100))
+            array = media.letterbox(path, 64, 64)
+        self.assertEqual((array.shape, array.dtype), ((3, 64, 64), numpy.float32))
+        self.assertAlmostEqual(float(array[0, 32, 32]), 1.0, places=2)       # 图像在中间
+        self.assertAlmostEqual(float(array[0, 2, 32]), 114 / 255, places=2)   # 上下填充
+
+
+class ExportSpecTest(TrainingTestCase):
+    def test_export_settings_are_checked(self):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("  batch: 1\n", "  batch: 0\n  half: true\n")
+                        .replace("dynamic: false", "dynamic: no-thanks"))
+        with self.assertRaisesRegex(TrainError, "export.batch must be an integer >= 1(.|\n)*export.dynamic must be "
+                                                "true or false(.|\n)*unknown keys half"):
+            self.spec()
 
 
 class RepositoryModelTest(unittest.TestCase):

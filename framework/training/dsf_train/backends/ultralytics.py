@@ -1,16 +1,31 @@
 """Ultralytics 后端。模块级不导入 ultralytics：数据视图与选项检查在没有 GPU 与训练依赖的环境中也能测试，
-训练与评估只在训练镜像中运行。"""
+训练、评估、推理与导出只在训练镜像中运行。"""
 
 from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 from pathlib import Path
 
 from .. import paths
 
+# Ultralytics 在导出等操作前检查依赖，缺少时（例如无 GPU 时要 onnxruntime 而镜像中是 onnxruntime-gpu）
+# 自动 pip 安装到用户目录：它会进入训练根目录中的家目录并持续生效，使镜像固定的依赖失去意义。
+# 它在导入时读取这个变量，所以在任何导入之前设置。
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
 NAME = "ultralytics"
 TASKS = ("detect",)
+# 导出时能追加转换的输出布局：任务 → 布局。
+LAYOUTS = {"detect": ("xyxy-confidence-class_id",)}
+# 检测头的原始输出 [batch, 4 + 类别数, 候选数]：中心点与宽高（输入像素）后接各类别分数。
+# [cx, cy, w, h] 乘以它得到 [x1, y1, x2, y2]。
+_XYWH_TO_XYXY = [[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [-0.5, 0.0, 0.5, 0.0], [0.0, -0.5, 0.0, 0.5]]
+# 导出 ONNX 的输入与输出名：固定下来，不随后端版本变化。
+_UNSTABLE_METADATA = ("date", "description")
+INPUT_NAME = "input"
+OUTPUT_NAME = "output"
 # 由框架决定的参数：数据集、输出位置与续训。写在 train.options 中会让 run 的记录与实际不符。
 RESERVED = ("data", "project", "name", "exist_ok", "resume", "model", "mode", "task", "split", "save_dir")
 # 后端在训练目录中的输出：Ultralytics 写入 <训练目录>/weights/。
@@ -102,6 +117,98 @@ def predict(task: str, weights: Path, images: list[Path], options: dict, conf: f
             boxes = result.boxes
             yield [{"class": int(c), "box": [float(v) for v in xyxy], "score": float(s)}
                    for xyxy, c, s in zip(boxes.xyxy.tolist(), boxes.cls.tolist(), boxes.conf.tolist())]
+
+
+def export(task: str, weights: Path, layout: str, size: tuple[int, int], settings: dict, target: Path,
+           workdir: Path) -> None:
+    """导出 ONNX 到 target，并在输出端追加到 layout 的转换。size 是 (宽, 高)；settings 是 model.yaml 的 export
+    （opset、batch、dynamic、simplify）。在 CPU 上导出：不占用正在训练的卡，结果也不依赖显卡。"""
+    from ultralytics import YOLO
+    if layout not in LAYOUTS.get(task, ()):
+        raise ValueError(f"backend {NAME} cannot export task {task} with output layout {layout}")
+    work = target.parent / f".{target.name}.export"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        copy = work / "weights.pt"  # Ultralytics 把 ONNX 写在权重旁边：复制出来，训练目录保持不变
+        shutil.copy2(weights, copy)
+        with _settings(workdir):
+            raw = YOLO(str(copy), task=task).export(
+                format="onnx", imgsz=(size[1], size[0]), opset=settings["opset"], batch=settings["batch"],
+                dynamic=settings["dynamic"], simplify=settings["simplify"], nms=False, device="cpu")
+        _append_layout(Path(raw), target)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def reference(task: str, weights: Path, layout: str, batch):
+    """原生推理（PyTorch，CPU）在 layout 下的输出，用于与导出的 ONNX 比较：batch 是 float32 [n, 3, 高, 宽]，
+    返回 [n, 候选数, 6] 的 numpy 数组。转换与导出时追加的完全相同。"""
+    import torch
+    from ultralytics import YOLO
+    if layout not in LAYOUTS.get(task, ()):
+        raise ValueError(f"backend {NAME} has no {layout} output for task {task}")
+    model = YOLO(str(weights), task=task).model.float().eval()
+    with torch.no_grad():
+        raw = model(torch.from_numpy(batch))
+        raw = raw[0] if isinstance(raw, (list, tuple)) else raw
+        rows = raw.transpose(1, 2)
+        boxes = rows[..., :4] @ torch.tensor(_XYWH_TO_XYXY, dtype=rows.dtype)
+        scores, classes = rows[..., 4:].max(dim=-1, keepdim=True)
+        return torch.cat([boxes, scores, classes.to(rows.dtype)], dim=-1).numpy()
+
+
+def _append_layout(source: Path, target: Path) -> None:
+    """在 Ultralytics 的检测输出 [batch, 4 + 类别数, 候选数] 之后追加：转置为每行一个候选，中心点宽高换算为
+    左上右下，取最高分数作为置信度、其类别号（float）作为第 6 列。ArgMax 与 GatherElements 的轴在各 opset 中
+    都是属性，不受 ReduceMax 在 opset 18 改为输入的影响。输入与输出改为固定的名字。"""
+    import numpy
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+    model = onnx.load(str(source))
+    graph = model.graph
+    if len(graph.input) != 1 or len(graph.output) != 1:
+        raise ValueError(f"{source}: expected one input and one output, got {len(graph.input)} and "
+                         f"{len(graph.output)}")
+    raw = graph.output[0]
+    dims = [d.dim_value if d.HasField("dim_value") else d.dim_param for d in raw.type.tensor_type.shape.dim]
+    if len(dims) != 3:
+        raise ValueError(f"{source}: expected a [batch, 4 + classes, candidates] output, got {dims}")
+
+    def name(suffix: str) -> str:
+        return f"dsf_layout/{suffix}"
+
+    graph.initializer.extend([
+        numpy_helper.from_array(numpy.array(_XYWH_TO_XYXY, dtype=numpy.float32), name("xywh_to_xyxy")),
+        numpy_helper.from_array(numpy.array([0], dtype=numpy.int64), name("zero")),
+        numpy_helper.from_array(numpy.array([4], dtype=numpy.int64), name("four")),
+        numpy_helper.from_array(numpy.array([numpy.iinfo(numpy.int64).max], dtype=numpy.int64), name("end")),
+        numpy_helper.from_array(numpy.array([2], dtype=numpy.int64), name("axis")),
+    ])
+    graph.node.extend([
+        helper.make_node("Transpose", [raw.name], [name("rows")], perm=[0, 2, 1]),
+        helper.make_node("Slice", [name("rows"), name("zero"), name("four"), name("axis")], [name("xywh")]),
+        helper.make_node("Slice", [name("rows"), name("four"), name("end"), name("axis")], [name("scores")]),
+        helper.make_node("MatMul", [name("xywh"), name("xywh_to_xyxy")], [name("xyxy")]),
+        helper.make_node("ArgMax", [name("scores")], [name("class_index")], axis=2, keepdims=1),
+        helper.make_node("GatherElements", [name("scores"), name("class_index")], [name("confidence")], axis=2),
+        helper.make_node("Cast", [name("class_index")], [name("class_id")], to=TensorProto.FLOAT),
+        helper.make_node("Concat", [name("xyxy"), name("confidence"), name("class_id")], [OUTPUT_NAME], axis=2),
+    ])
+    graph.output.remove(raw)
+    graph.output.append(helper.make_tensor_value_info(OUTPUT_NAME, TensorProto.FLOAT, [dims[0], dims[2], 6]))
+    old_input = graph.input[0].name
+    graph.input[0].name = INPUT_NAME
+    for node in graph.node:
+        for index, value in enumerate(node.input):
+            if value == old_input:
+                node.input[index] = INPUT_NAME
+    # 导出时间与含本机路径的描述：去掉后同一份权重总是导出同一个文件（发布标识与 engine 指纹随之不变）。
+    keep = [item for item in model.metadata_props if item.key not in _UNSTABLE_METADATA]
+    del model.metadata_props[:]
+    model.metadata_props.extend(keep)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(target))
 
 
 def _inference_arguments(options: dict) -> dict:

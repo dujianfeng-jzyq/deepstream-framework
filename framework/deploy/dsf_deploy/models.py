@@ -136,11 +136,11 @@ def _check_release(directory: Path, spec: dict, release: dict) -> list[str]:
     labels = directory / ARTIFACTS / "labels.txt"
     if labels.is_file() and labels.read_text(encoding="utf-8").splitlines() != spec["classes"]:
         problems.append(f"{ARTIFACTS}/labels.txt must list the classes of {SPEC}, one per line, in order")
-    problems += _check_signature(spec, release.get("onnx"))
+    problems += check_signature(spec, release.get("onnx"))
     return problems
 
 
-def _check_signature(spec: dict, onnx: object) -> list[str]:
+def check_signature(spec: dict, onnx: object) -> list[str]:
     """导出的 ONNX 签名（发布工具从模型读出）与输入尺寸、输出布局对得上。"""
     if not isinstance(onnx, dict) or not onnx.get("inputs") or not onnx.get("outputs"):
         return [f"{RELEASE}: onnx must record the exported inputs and outputs"]

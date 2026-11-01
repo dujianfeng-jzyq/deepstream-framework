@@ -93,6 +93,7 @@ def _check_training(spec: dict) -> list[str]:
         task = None
     if task is not None:
         problems += _check_train(spec.get("train"), task.NAME) + _check_evaluate(spec.get("evaluate"), task)
+    problems += _check_export(spec.get("export"))
     if spec.get("cascade") is not None:
         problems.append("cascade (second-stage models) is not supported yet")
     data = spec.get("data")
@@ -158,6 +159,29 @@ def _check_evaluate(evaluate: object, task) -> list[str]:
                 not _number(regression.get("max_drop")) or regression["max_drop"] < 0:
             problems.append(f"evaluate.gate.regression must be {{metric: <{known}>, max_drop: <number >= 0>}}")
     return problems
+
+
+def _check_export(export: object) -> list[str]:
+    """导出参数决定发布的 ONNX 签名（固定 batch 时 nvinfer 的 batch-size 必须与之相等），写错时在训练前报告。"""
+    if not isinstance(export, dict):
+        return ["export must be a mapping: {format: onnx, opset, batch, dynamic, simplify}"]
+    problems = []
+    if export.get("format") != "onnx":
+        problems.append("export.format must be onnx")
+    for key, check, text in (("opset", lambda v: _integer(v) and v >= 11, "an integer >= 11"),
+                             ("batch", lambda v: _integer(v) and v >= 1, "an integer >= 1"),
+                             ("dynamic", lambda v: isinstance(v, bool), "true or false"),
+                             ("simplify", lambda v: isinstance(v, bool), "true or false")):
+        if not check(export.get(key)):
+            problems.append(f"export.{key} must be {text}")
+    unknown = sorted(set(export) - {"format", "opset", "batch", "dynamic", "simplify"})
+    if unknown:
+        problems.append(f"export: unknown keys {', '.join(unknown)}")
+    return problems
+
+
+def _integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _number(value: object) -> bool:

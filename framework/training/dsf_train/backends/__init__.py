@@ -14,8 +14,13 @@
   predict(task, weights, images, options, conf, workdir)
                                            原生推理（预标注用），逐张产出 [{"class", "box", "score"}]，
                                            box 是像素坐标 [x1, y1, x2, y2]，顺序与 images 相同
+  LAYOUTS                                  任务 → 导出时能追加转换的部署输出布局
+  export(task, weights, layout, size, settings, target, workdir)
+                                           导出 ONNX 到 target，输出已是 layout；size 是 (宽, 高)，settings 是
+                                           model.yaml 的 export
+  reference(task, weights, layout, batch)  原生推理在 layout 下的输出（与导出的 ONNX 比较一致性）：
+                                           batch 是 float32 [n, 3, 高, 宽]，返回 numpy 数组
   BEST、LAST                               训练目录中最佳与最近检查点的相对路径（续训从 LAST 开始）
-导出在后续阶段加入。
 """
 
 from __future__ import annotations

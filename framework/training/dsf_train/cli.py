@@ -1,4 +1,4 @@
-"""命令行入口：init / import / accept / prelabel / prepare / run / eval。由 framework/training/dsf-train.py 调用，
+"""命令行入口：init / import / accept / prelabel / prepare / run / eval / publish。由 framework/training/dsf-train.py 调用，
 通常经 scripts/train.sh 在训练镜像中运行。"""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, paths, prelabel, runs, sources, spec
+from . import dataset, paths, prelabel, publish, runs, sources, spec
 from .errors import TrainError
 
 
@@ -93,6 +93,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("run")
     p.add_argument("--dataset", help="dataset id (defaults to the latest train prepare)")
 
+    p = commands.add_parser("publish", help="gate, export and verify a run, then write it to models/<id>/")
+    p.add_argument("model")
+    p.add_argument("run", nargs="?", help="the run to publish; without it, list the completed runs")
+    p.add_argument("--dataset", help="dataset whose test split the gate uses (defaults to the latest train prepare)")
+    p.add_argument("--accept-metrics", action="store_true",
+                   help="publish although there is nothing to compare the metrics with (no evaluate.gate.min "
+                        "and no comparable published model); failed gates are never accepted")
+    p.add_argument("--device", help="device for the gate's evaluations (defaults to the run's device)")
+
     args = parser.parse_args(argv)
     repo = (args.repo or paths.repo_root()).resolve()
     try:
@@ -160,6 +169,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "eval":
             model = spec.load(repo, args.model)
             _evaluate(root, model, args.run, args.dataset)
+        elif args.command == "publish":
+            model = spec.load(repo, args.model)
+            if args.run is None:
+                if args.accept_metrics or args.device:
+                    raise TrainError("name the run to publish (train publish <id> without a run only lists them)")
+                print("\n".join(publish.candidates(root, model, args.dataset, repo)))
+                return 0
+            result = publish.publish(repo, root, model, args.run, args.dataset, args.accept_metrics, args.device)
+            print("\n".join(publish.report(result)))
     except (TrainError, DeployError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

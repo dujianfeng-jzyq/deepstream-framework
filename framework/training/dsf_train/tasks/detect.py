@@ -13,6 +13,12 @@ SHAPE = "rectangle"
 EDGE_TOLERANCE = 2.0
 # 测试划分上的指标：名称 → 比较方向。evaluate.gate 只能引用这些名称；每类指标是前两项与精确率、召回率。
 METRICS = {"map50_95": "higher", "map50": "higher", "precision": "higher", "recall": "higher"}
+# 支持的部署输出布局（由解析插件定义，插件在项目中提供）：唯一输出 [batch, 候选数, 6]，
+# 每行 x1, y1, x2, y2, confidence, class_id，坐标为网络输入尺寸下的像素。
+LAYOUTS = ("xyxy-confidence-class_id",)
+# 导出一致性：原生推理与 ONNX 对同一输入的逐行差异上限。只比较置信度不低于 COMPARE_CONF 的候选
+# （低分候选在现场被阈值丢弃）；类别号只在置信度不低于 CLASS_CONF 时比较，低分候选的最高类别分数常常相近。
+CONSISTENCY = {"compare_conf": 0.05, "class_conf": 0.25, "max_box_diff": 0.5, "max_conf_diff": 0.001}
 # 统计预标注的修正量时，同类别且 IoU 不低于它的人工框视为保留了这个预测。
 KEPT_IOU = 0.5
 
@@ -98,3 +104,31 @@ def _iou(a: list[float], b: list[float]) -> float:
         return 0.0
     inter = w * h
     return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+
+
+def labels_text(classes: list[str]) -> str:
+    """nvinfer 检测网络的 labels.txt：每行一个类别名，行号即类别号。"""
+    return "".join(f"{name}\n" for name in classes)
+
+
+def compare(layout: str, native, exported) -> dict:
+    """比较原生推理与导出 ONNX 的输出（同一批输入，形状 [batch, 候选数, 6]），返回差异摘要，passed 为是否一致。
+    候选按行对齐：同一个输入位置在两边是同一行。"""
+    import numpy
+    if layout not in LAYOUTS:
+        raise ValueError(f"task {NAME} has no comparison for layout {layout}")
+    limits = CONSISTENCY
+    if native.shape != exported.shape:
+        return {"passed": False, "reason": f"output shapes differ: {list(native.shape)} vs {list(exported.shape)}",
+                "limits": limits}
+    native, exported = native.reshape(-1, 6).astype(numpy.float64), exported.reshape(-1, 6).astype(numpy.float64)
+    rows = numpy.maximum(native[:, 4], exported[:, 4]) >= limits["compare_conf"]
+    confident = rows & (native[:, 4] >= limits["class_conf"])
+    box = float(numpy.abs(native[rows, :4] - exported[rows, :4]).max()) if rows.any() else 0.0
+    conf = float(numpy.abs(native[rows, 4] - exported[rows, 4]).max()) if rows.any() else 0.0
+    classes = int((native[confident, 5] != exported[confident, 5]).sum())
+    finite = bool(numpy.isfinite(exported).all())
+    passed = finite and box <= limits["max_box_diff"] and conf <= limits["max_conf_diff"] and classes == 0
+    return {"passed": passed, "candidates": int(rows.sum()), "confident": int(confident.sum()),
+            "max_box_diff": box, "max_conf_diff": conf, "class_mismatches": classes, "finite": finite,
+            "limits": limits}

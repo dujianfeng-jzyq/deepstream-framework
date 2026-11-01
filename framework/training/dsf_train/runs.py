@@ -142,9 +142,9 @@ def load(root: Path, model_id: str, run: str) -> tuple[Path, dict]:
     return run_dir, json.loads((run_dir / RECORD).read_text(encoding="utf-8"))
 
 
-def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None) -> dict:
+def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, device: str | None = None) -> dict:
     """在数据集（默认最近一次 prepare）的测试划分上评估一次完成的 run，写入 eval/<数据集>/metrics.json。
-    换用新数据集评估旧 run，是比较新旧模型的方式：测试集只增不换（§6）。"""
+    换用新数据集评估旧 run，是比较新旧模型的方式：测试集只增不换（§6）。device 只改变这次评估用的设备。"""
     run_dir, record = load(root, spec["id"], run)
     if record["status"] != "completed":
         raise TrainError(f"run {run} is {record['status']}; only completed runs can be evaluated")
@@ -159,7 +159,8 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None) ->
     backend = backends.get(record["backend"]["name"], task.NAME)
     output = run_dir / EVAL / dataset_id
     result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST,
-                              directory / paths.VIEW / backend.NAME / "data.yaml", "test", record["options"],
+                              directory / paths.VIEW / backend.NAME / "data.yaml", "test",
+                              {**record["options"], **({"device": device} if device is not None else {})},
                               output / backend.NAME, root / paths.PRETRAINED)
     instances = task.statistics(test, spec)
     classes = []

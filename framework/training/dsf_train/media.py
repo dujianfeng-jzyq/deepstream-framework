@@ -1,4 +1,4 @@
-"""图像与视频：读取尺寸、感知哈希、视频抽帧。图像用 Pillow，视频用 ffmpeg 命令行。"""
+"""图像与视频：读取尺寸、感知哈希、视频抽帧、网络输入。图像用 Pillow，视频用 ffmpeg 命令行。"""
 
 from __future__ import annotations
 
@@ -63,3 +63,21 @@ def extract_frames(video: Path, every_s: float, target: Path) -> list[tuple[Path
         raise TrainError(f"{video}: cannot extract frames ({result.stderr.strip() or result.returncode})")
     frames = sorted(target.glob("*.jpg"))
     return [(frame, round(int(frame.stem) * every_s * 1000)) for frame in frames]
+
+
+# letterbox 的填充色：与 Ultralytics 训练与推理时相同。
+LETTERBOX_FILL = (114, 114, 114)
+
+
+def letterbox(path: Path, width: int, height: int):
+    """按网络输入尺寸等比缩放、居中填充，得到 float32 [3, height, width]、RGB、取值 0..1 的数组。
+    发布时用它给原生推理与导出的 ONNX 同一份输入：比较的是导出本身，与预处理是否和现场相同无关。"""
+    import numpy
+    Image = _pillow()
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        scale = min(width / image.width, height / image.height)
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        canvas = Image.new("RGB", (width, height), LETTERBOX_FILL)
+        canvas.paste(image.resize(size, Image.BILINEAR), ((width - size[0]) // 2, (height - size[1]) // 2))
+    return numpy.asarray(canvas, dtype=numpy.float32).transpose(2, 0, 1) / 255.0

@@ -2,7 +2,7 @@
 
 本文说明从数据到现场运行的模型生命周期：导入图片或视频 → 标注 → 准备数据集 → 训练与评估 → 导出与发布 → 打包安装 → 在服务器或 Jetson 上运行。
 
-已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6），`train run`、`train eval`（§7），`train prelabel`（§5.4）；均为一级检测。其余命令按 §14 的顺序实现；分类、分割与二级模型按 §11、§12 留出扩展点。
+已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6），`train run`、`train eval`（§7），`train prelabel`（§5.4），`train publish`（§8）；均为一级检测。其余命令按 §14 的顺序实现；分类、分割与二级模型按 §11、§12 留出扩展点。
 
 ## 1. 原则
 
@@ -168,17 +168,25 @@ models/<id>/
 
 分片评估（`evaluate.slices`：按来源、按形状属性，例如“遮挡=是”的目标，或按 `difficult`）尚未实现：按来源是图片级的子集，按属性是目标级的子集，后者需要在评估时忽略其余目标，等有实际需要时再设计。
 
-## 8. 导出与发布：`train publish <id> <run>`
+## 8. 导出与发布：`train publish <id> <run> [--dataset <标识>] [--accept-metrics] [--device <设备>]`
+
+不给 `<run>` 时只列出可以发布的 run，不发布任何东西：完成的 run 按完成时间从新到旧，带各自在数据集（默认最近一次 prepare）测试划分上的指标、`--option` 覆盖参数，并标出当前发布所用的 run；还没有在该数据集上评估的 run 指标为 `-`（`train eval` 补上），中断或失败的 run 单独列出。不默认发布最近的 run：最近的往往是 `--option epochs=3` 之类的试跑，而首次发布时门槛可能只有 `--accept-metrics`，选哪个 run 是人的判断。
 
 顺序不可调换：
 
-1. **门槛**：`evaluate.gate.min` 中的每项指标达到下限；`regression` 把 `release.json` 中的当前模型在本次数据集的测试划分上重新评估，新模型的指定指标下降不超过 `max_drop`（没有当前模型时跳过，见 §5.3）。
-2. **导出**：按 `export` 导出 ONNX，按任务与 `output_layout` 在输出端追加布局转换；生成任务要求格式的 `labels.txt`。
-3. **验证**：读取 ONNX 签名，对照 `input` 与 `output_layout`；用 onnxruntime 在测试样本上与后端原生推理对比结果（一致性阈值写进 `export/`），不一致即失败。
-4. **写入**：替换 `models/<id>/artifacts/`，写 `release.json`（产物 sha256、签名、run、数据集标识、指标、发布时间）；把 `model-engine-file` 中的发布段改为本次的发布标识（`/data/engines/<id>/<发布>/…`），新旧 engine 并存，回滚不需要重建；检查 nvinfer 配置的契约键。任何失败都不改动模型目录。
+1. **门槛**（在数据集的测试划分上，默认最近一次 prepare）：`evaluate.gate.min` 中的每项指标达到下限（按任务定义的比较方向）；`regression` 把 `release.json` 中的当前模型在同一测试划分上评估，新模型的指定指标下降不超过 `max_drop`。run 在该数据集上已有评估结果时直接使用（权重与数据集都不可变），`--device` 只用于需要新做的评估。
+   - 没有当前模型（首次发布，§5.3）时跳过退化比较；此时 `min` 为空就没有任何门槛，要求显式的 `--accept-metrics`。
+   - 当前模型无法重新评估（它的 run 不在这台训练机上、权重的 sha256 不符、类别已改变）时同样要求 `--accept-metrics`，而不是悄悄跳过比较。
+   - `--accept-metrics` 只放行“没有可对照的东西”，未达到下限或退化超限时总是拒绝。门槛的结果（含是否靠 `--accept-metrics` 放行）写进 `release.json`。
+2. **导出**：后端按 `export`（`format: onnx`、`opset`、`batch`、`dynamic`、`simplify`，`model.yaml` 加载时校验）以 `input` 的尺寸在 CPU 上导出 ONNX，并在输出端追加到 `output_layout` 的转换；输入与输出名固定为 `input`、`output`；去掉导出时间与含本机路径的描述，同一份权重总是导出同一个文件。导出的 ONNX 与当前发布相同时拒绝发布：新的发布标识只会让目标机为同一个模型重建 engine。生成任务要求格式的 `labels.txt`。导出物在 `runs/<id>/<run>/export/`，每次发布重新生成。
+   - Ultralytics 检测头的原始输出是 `[batch, 4 + 类别数, 候选数]`（中心点、宽高与各类别分数）；追加的节点转置为每行一个候选，换算为左上右下，取最高分数与其类别号，得到 `xyxy-confidence-class_id` 的 `[batch, 候选数, 6]`。原生推理用同一组运算得到同一布局，两边可以逐行比较。
+3. **验证**：读取 ONNX 签名，按打包时同一套规则对照 `input` 与 `output_layout`；在 CPU 上用 onnxruntime 与后端原生推理（PyTorch）对同一批测试样本（按 sha256 取前 16 张，letterbox 到输入尺寸）的输出逐行比较：置信度不低于 0.05 的候选，框坐标差不超过 0.5 像素、置信度差不超过 0.001，置信度不低于 0.25 的候选类别号相同，输出全部有限。阈值与结果写进 `export/export.json` 与 `release.json`，不一致即失败。比较的是导出本身；现场的 TensorRT engine（FP16）与预处理只能在目标机验证。
+4. **写入**：发布标识为 `<UTC 时间>-<ONNX 摘要>`。先在暂存目录组装完整的新模型目录：`artifacts/` 只含本次的 `model.onnx` 与 `labels.txt`；`release.json` 记录发布标识、run（数据集、源码版本、后端版本、权重 sha256）、评估所用数据集、总体与每类指标、门槛结果、ONNX 签名、一致性结果与产物 sha256；各 nvinfer 配置的 `model-engine-file` 改为 `/data/engines/<id>/<发布>/<文件>`（还没有发布段时插入一段，已有的替换当前发布那一段，看不出哪一段是发布标识时报错）。组装结果通过打包时的模型校验（§10）后，才把变化的文件逐个原子替换进 `models/<id>/`，`release.json` 最后写入；校验失败时模型目录不变。新旧 engine 路径不同，目标机上新旧 engine 并存，回滚不需要重建。
 5. 提交由人完成：审阅 `release.json` 中的指标与差异后提交。
 
-`release.json` 不保存权重本身，只记录权重的 sha256 与 run 标识：权重留在训练根目录，用于续训、预标注与复现。
+nvinfer 配置是人工维护的运行参数，引用 `artifacts/model.onnx` 与 `artifacts/labels.txt`。首次发布前可以先写好（暂存目录中的校验连同新的 `release.json` 一起检查它）；还没有配置时发布照常进行并提示补写。之后发布只改动其中的 engine 路径。engine 路径的预检在评估与导出之前，路径写得无法识别时不会白等。
+
+`release.json` 不保存权重本身，只记录权重的 sha256 与 run 标识：权重留在训练根目录，用于续训、预标注、退化比较与复现。删除一个已发布的 run 之后，下一次发布无法与它比较，只能 `--accept-metrics`。
 
 ## 9. 训练机与镜像
 
@@ -251,7 +259,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | 2 | 训练镜像、`scripts/train.sh`；`train init`、`train import`（图片去重、视频抽帧）；X-AnyLabeling 读取与 `train accept`；`train prepare`（检测） | 已实现 |
 | 3 | `train run` / `train eval`（Ultralytics，检测）；分片评估除外 | 已实现 |
 | 4 | `train prelabel` | 已实现 |
-| 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 待实现 |
+| 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 已实现 |
 | 6 | 模型包与停服前构建 engine | 待实现 |
 | 7 | 分类与分割任务、二级模型及其打包校验 | 预留 |
 | 8 | INT8 校准、数据闭环 | 预留 |
