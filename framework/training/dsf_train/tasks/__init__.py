@@ -5,6 +5,10 @@
   samples(annotation, spec)    从一份已检查的标注解读出对象，返回 (objects, problems, ignored_shapes)
   statistics(samples, spec)    数据集报告中每个划分的统计（类别 → 实例数）
   METRICS                      评估指标的名称 → 比较方向（"higher" 或 "lower"），发布门槛按它比较
+  prelabel_shapes(predictions, width, height, spec)
+                               后端的预测 → 预标注写入的 X-AnyLabeling 形状
+  corrections(shapes, annotation)
+                               预标注写入的形状与人确认后的标注之间的修正量（kept、removed、added）
 新增任务只加模块并登记在 TASKS 中；规划中尚未实现的任务明确报告“尚未支持”。
 """
 

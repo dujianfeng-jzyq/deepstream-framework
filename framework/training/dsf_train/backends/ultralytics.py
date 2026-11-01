@@ -77,10 +77,7 @@ def evaluate(task: str, weights: Path, data: Path, split: str, options: dict, di
     """在指定划分上评估，曲线与混淆矩阵写到 directory。返回 {"metrics": {...}, "classes": {类别号: {...}}}，
     只含该划分中出现的类别。"""
     from ultralytics import YOLO
-    keep = ("imgsz", "batch", "device", "half", "workers")
-    arguments = {key: options[key] for key in keep if key in options}
-    if "device" in arguments:  # 评估只用一张卡：多卡训练的 device 取第一张
-        arguments["device"] = str(arguments["device"]).split(",")[0]
+    arguments = _inference_arguments(options)
     with _settings(workdir):
         result = YOLO(str(weights), task=task).val(data=str(data), split=split, project=str(directory.parent),
                                                    name=directory.name, exist_ok=True, plots=True, **arguments)
@@ -92,6 +89,28 @@ def evaluate(task: str, weights: Path, data: Path, split: str, options: dict, di
     return {"metrics": {"map50_95": float(box.map), "map50": float(box.map50), "precision": float(box.mp),
                         "recall": float(box.mr)},
             "classes": classes}
+
+
+def predict(task: str, weights: Path, images: list[Path], options: dict, conf: float, workdir: Path):
+    """逐张推理，按 images 的顺序产出 [{"class", "box", "score"}]。stream 模式按批读入图片，
+    不把全部结果留在内存中。"""
+    from ultralytics import YOLO
+    with _settings(workdir):
+        model = YOLO(str(weights), task=task)
+        for result in model.predict([str(path) for path in images], conf=conf, stream=True, verbose=False,
+                                    **_inference_arguments(options)):
+            boxes = result.boxes
+            yield [{"class": int(c), "box": [float(v) for v in xyxy], "score": float(s)}
+                   for xyxy, c, s in zip(boxes.xyxy.tolist(), boxes.cls.tolist(), boxes.conf.tolist())]
+
+
+def _inference_arguments(options: dict) -> dict:
+    """评估与推理沿用训练时的输入尺寸与设备；多卡训练的 device 取第一张。"""
+    keep = ("imgsz", "batch", "device", "half", "workers")
+    arguments = {key: options[key] for key in keep if key in options}
+    if "device" in arguments:
+        arguments["device"] = str(arguments["device"]).split(",")[0]
+    return arguments
 
 
 @contextlib.contextmanager

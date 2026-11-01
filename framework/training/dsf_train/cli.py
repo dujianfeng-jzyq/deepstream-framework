@@ -1,4 +1,4 @@
-"""命令行入口：init / import / accept / prepare / run / eval。由 framework/training/dsf-train.py 调用，
+"""命令行入口：init / import / accept / prelabel / prepare / run / eval。由 framework/training/dsf-train.py 调用，
 通常经 scripts/train.sh 在训练镜像中运行。"""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, paths, runs, sources, spec
+from . import dataset, paths, prelabel, runs, sources, spec
 from .errors import TrainError
 
 
@@ -71,6 +71,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("images", nargs="*", help="image or annotation names of the source")
     p.add_argument("--all", action="store_true", help="every labeled image of the source")
 
+    p = commands.add_parser("prelabel", help="write unchecked annotations for the unlabeled images of a source")
+    p.add_argument("model")
+    p.add_argument("--source", required=True)
+    p.add_argument("--run", help="prelabel with this completed run (defaults to the published model)")
+    p.add_argument("--conf", type=float, default=0.25, help="confidence threshold (default 0.25)")
+    p.add_argument("--device", help="inference device, e.g. 0 or cpu (defaults to the run's device)")
+
     p = commands.add_parser("prepare", help="build the dataset of a model from its checked annotations")
     p.add_argument("model")
 
@@ -120,6 +127,20 @@ def main(argv: list[str] | None = None) -> int:
             model = spec.load(repo, args.model)
             result = dataset.prepare(root, model)
             print("\n".join(dataset.report(result, model)))
+            for source in model["data"]["sources"]:
+                for line in prelabel.review(root, model, source):
+                    print(line)
+        elif args.command == "prelabel":
+            model = spec.load(repo, args.model)
+            result = prelabel.prelabel(repo, root, model, args.source, args.run, args.conf, args.device)
+            used = result.model
+            name = f"release {used['release']} (run {used['run']})" if "release" in used else f"run {used['run']}"
+            print(f"prelabeled {result.written} images of {args.source} with {name}: {result.boxes} boxes")
+            for reason, count in sorted(result.skipped.items()):
+                print(f"  skipped {count} images: {reason}")
+            if result.written:
+                print("  correct them in X-AnyLabeling and mark each finished image as checked; "
+                      "unchecked prelabels never enter a dataset")
         elif args.command == "run":
             model = spec.load(repo, args.model)
             if args.resume:

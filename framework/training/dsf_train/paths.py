@@ -18,6 +18,7 @@ DATASETS = "datasets"
 RUNS = "runs"
 SOURCE_RECORD = "source.json"
 SOURCE_LABELS = "labels.txt"
+PRELABEL_RECORD = "prelabel.json"
 MANIFEST = "manifest.json"
 VIEW = "view"
 # datasets/<id>/latest：最近一次 prepare 得到的数据集标识，train run 的默认输入。
@@ -63,10 +64,20 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def temporary_file(path: Path) -> tuple[int, str]:
+    """path 旁的临时文件，权限按 umask 与普通新建文件相同（mkstemp 固定为 0600，替换后标注与记录会
+    变得只有自己可读）。"""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    umask = os.umask(0)
+    os.umask(umask)
+    os.fchmod(fd, 0o666 & ~umask)
+    return fd, name
+
+
 def write_json(path: Path, document: object) -> None:
     """原子写入：读者（另一个命令或 X-AnyLabeling）不会看到写了一半的文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    fd, name = temporary_file(path)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(document, stream, ensure_ascii=False, indent=2)

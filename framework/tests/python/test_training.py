@@ -1,4 +1,4 @@
-"""训练工具：规格、导入、X-AnyLabeling 读写、批量确认、划分、数据集准备，以及训练与评估的记录。
+"""训练工具：规格、导入、X-AnyLabeling 读写、批量确认、划分、数据集准备，训练与评估的记录，以及预标注。
 
 用真实的 Pillow 与 ffmpeg（builder 中已安装），以及 X-AnyLabeling 实际保存的样例文件。训练与评估用
 假后端：这里验证 run 的记录、续训与评估的组织；Ultralytics 本身只在训练机上验证。
@@ -6,6 +6,7 @@
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,7 @@ from deploy_support import ROOT
 from dsf_deploy import models
 from dsf_train import backends, cli, dataset, paths, runs, sources, spec, split, xanylabeling
 from dsf_train.backends import ultralytics
+from dsf_train.tasks import detect
 from dsf_train.errors import TrainError
 
 SAMPLES = Path(__file__).resolve().parent / "data/x-anylabeling-4.0.6"
@@ -39,6 +41,12 @@ def annotation(path: Path, template: Path, checked: bool, **changes) -> Path:
     document.update({"imagePath": path.with_suffix(".jpg").name, "checked": checked, **changes})
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def new_file_mode() -> int:
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
 
 
 class TrainingTestCase(unittest.TestCase):
@@ -138,6 +146,7 @@ class ReaderTest(unittest.TestCase):
             after = json.loads(path.read_text())
             self.assertEqual(list(after), list(before))  # 键的顺序不变
             self.assertEqual(after, {**before, "checked": True})
+            self.assertEqual(path.stat().st_mode & 0o777, new_file_mode())  # 不因原子替换变成 0600
 
 
 class ImportTest(TrainingTestCase):
@@ -356,6 +365,7 @@ class FakeBackend(types.ModuleType):
     def __init__(self):
         super().__init__("fake")
         self.calls, self.fail = [], None
+        self.during_predict = None  # 推理每张图之前调用，模拟人同时在工具中保存
 
     write_view = staticmethod(ultralytics.write_view)
     check_options = staticmethod(ultralytics.check_options)
@@ -383,7 +393,18 @@ class FakeBackend(types.ModuleType):
                 "classes": {0: {"map50_95": 0.5, "map50": 0.7, "precision": 0.8, "recall": 0.6}}}
 
 
-class RunTest(TrainingTestCase):
+    def predict(self, task, weights, images, options, conf, workdir):
+        self.calls.append(("predict", weights, list(images), dict(options), conf))
+        for path in images:
+            if self.during_predict:
+                self.during_predict(path)
+            # 一个越界的框（裁剪到图像内）与一个龙门架A。
+            yield [{"class": 0, "box": [1345.8, 456.1, 1379.9, 491.6], "score": 0.9},
+                   {"class": 1, "box": [-3.0, 10.0, 400.0, 1100.0], "score": 0.4}]
+
+
+class RunTestCase(TrainingTestCase):
+    """假后端与一个三个划分都有样本的数据集。"""
     def setUp(self):
         super().setUp()
         self.backend = FakeBackend()
@@ -414,6 +435,8 @@ class RunTest(TrainingTestCase):
         [run] = [p.name for p in (self.root / "runs/m").iterdir()]
         return run
 
+
+class RunTest(RunTestCase):
     def test_a_run_is_recorded_and_evaluated_on_the_test_split(self):
         code, out, err = self.train("run", "m", "--option", "epochs=3")
         self.assertEqual(code, 0, err)
@@ -510,6 +533,129 @@ class RunTest(TrainingTestCase):
         self.assertIn("prepared with other classes", err)
         code, _, err = self.train("run", "m", "--dataset", "nope")
         self.assertIn("dataset 'nope' of m does not exist", err)
+
+
+class PrelabelTest(RunTestCase):
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.train("run", "m")[0], 0)
+        self.run_id = self.only_run()
+        for index in range(3):
+            image(self.tmp / "batch-02" / f"n_{index}.jpg", (0, 0, 100 + index * 40))
+        annotation(self.tmp / "batch-02/n_2.json", NEGATIVE, checked=False)  # 人已经开始标的图
+        self.import_(self.tmp / "batch-02", source="batch-02")
+        self.directory = self.source("batch-02")
+
+    def release(self, run, digest):
+        record = {"schema": 1, "model": "m", "release": "r1", "classes": CLASSES,
+                  "run": {"id": run, "weights_sha256": digest}}
+        (self.repo / "models/m/release.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def test_only_unlabeled_images_get_unchecked_annotations_in_the_saved_format(self):
+        code, out, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id,
+                                    "--conf", "0.3", "--device", "1")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"prelabeled 2 images of batch-02 with run {self.run_id}: 4 boxes", out)
+        self.assertIn("skipped 1 images: already labeled", out)
+        [(_, weights, images, options, conf)] = [c for c in self.backend.calls if c[0] == "predict"]
+        self.assertEqual(weights, self.root / "runs/m" / self.run_id / "train" / ultralytics.BEST)
+        self.assertEqual([p.name for p in images], ["n_0.jpg", "n_1.jpg"])
+        self.assertEqual((options["device"], conf), ("1", 0.3))
+        self.assertEqual(json.loads((self.directory / "n_2.json").read_text())["shapes"], [])  # 未被改动
+
+        written = json.loads((self.directory / "n_0.json").read_text(encoding="utf-8"))
+        sample = json.loads(LABELED.read_text(encoding="utf-8"))
+        self.assertEqual(list(written), list(sample))                 # 字段与键的顺序同 4.0.6 保存的文件
+        self.assertEqual(list(written["shapes"][0]), list(sample["shapes"][0]))
+        self.assertEqual((written["checked"], written["imagePath"]), (False, "n_0.jpg"))
+        self.assertEqual((self.directory / "n_0.json").stat().st_mode & 0o777, new_file_mode())
+        found = xanylabeling.read(self.directory / "n_0.json")
+        self.assertEqual([(s.label, s.shape_type) for s in found.shapes],
+                         [("标志牌(圆牌)", "rectangle"), ("龙门架A", "rectangle")])
+        self.assertEqual(found.shapes[1].points, [(0.0, 10.0), (400.0, 10.0), (400.0, 1080.0), (0.0, 1080.0)])
+
+        log = json.loads((self.directory / paths.PRELABEL_RECORD).read_text(encoding="utf-8"))
+        [batch] = log["batches"]
+        self.assertEqual((batch["run"], batch["images"], batch["conf"]), (self.run_id, 2, 0.3))
+        self.assertEqual(batch["weights_sha256"], paths.sha256(weights))
+        self.assertEqual(sorted(log["images"]), ["n_0.jpg", "n_1.jpg"])
+
+        code, out, _ = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
+        self.assertIn("prelabeled 0 images", out)                     # 永不覆盖已有标注
+        self.assertIn("skipped 3 images: already labeled", out)
+
+    def test_prelabels_enter_the_dataset_only_once_checked_and_corrections_are_counted(self):
+        self.set_data(sources=["batch-01", "batch-02"])
+        self.assertEqual(self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)[0], 0)
+        names = lambda: {s["image"] for s in dataset.prepare(self.root, self.spec()).manifest["samples"]
+                         if s["source"] == "batch-02"}
+        self.assertEqual(names(), set())
+        # n_0：删掉龙门架A，补一个防撞桶，微调圆牌；n_1：原样确认。
+        path = self.directory / "n_0.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["shapes"][0]["points"] = xanylabeling.rectangle_points([1346, 457, 1381, 492])
+        document["shapes"][1] = xanylabeling.new_shape("防撞桶", "rectangle",
+                                                       xanylabeling.rectangle_points([10, 10, 50, 50]))
+        document["checked"] = True
+        path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        sources.accept(self.root, "batch-02", ["n_1.jpg"])
+        self.assertEqual(names(), {"n_0.jpg", "n_1.jpg"})
+        code, out, err = self.train("prepare", "m")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"prelabel of batch-02 by run {self.run_id}", out)
+        self.assertIn("2 of 2 images checked; 3 of 4 predicted boxes kept (75%), 1 removed, 1 added", out)
+
+    def test_the_default_model_is_the_published_one(self):
+        code, _, err = self.train("prelabel", "m", "--source", "batch-02")
+        self.assertIn("no published model yet", err)
+        self.release("20990101-000000-abcdef", "0" * 64)
+        code, _, err = self.train("prelabel", "m", "--source", "batch-02")
+        self.assertIn("not in this training root", err)
+        self.release(self.run_id, "0" * 64)
+        code, _, err = self.train("prelabel", "m", "--source", "batch-02")
+        self.assertIn("differ from the published model's sha256", err)
+        self.assertFalse((self.directory / "n_0.json").exists())
+        best = self.root / "runs/m" / self.run_id / "train" / ultralytics.BEST
+        self.release(self.run_id, paths.sha256(best))
+        code, out, err = self.train("prelabel", "m", "--source", "batch-02")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"with release r1 (run {self.run_id})", out)
+        log = json.loads((self.directory / paths.PRELABEL_RECORD).read_text(encoding="utf-8"))
+        self.assertEqual(log["batches"][0]["release"], "r1")
+
+    def test_annotations_saved_during_inference_are_kept(self):
+        def save(path):
+            if path.name == "n_1.jpg":
+                annotation(path.with_suffix(".json"), NEGATIVE, checked=True)
+        self.backend.during_predict = save
+        code, out, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
+        self.assertEqual(code, 0, err)
+        self.assertIn("skipped 1 images: labeled meanwhile", out)
+        self.assertTrue(xanylabeling.read(self.directory / "n_1.json").checked)
+        log = json.loads((self.directory / paths.PRELABEL_RECORD).read_text(encoding="utf-8"))
+        self.assertEqual(sorted(log["images"]), ["n_0.jpg"])
+
+    def test_runs_that_cannot_prelabel(self):
+        code, _, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id, "--conf", "1.5")
+        self.assertIn("--conf must be between 0 and 1", err)
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))
+        code, _, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
+        self.assertIn("trained with other classes", err)
+
+
+class CorrectionsTest(unittest.TestCase):
+    def test_boxes_are_matched_by_class_and_overlap(self):
+        def shapes(*items):
+            return [xanylabeling.new_shape(label, "rectangle", xanylabeling.rectangle_points(box))
+                    for label, box in items]
+        predicted = shapes(("a", [0, 0, 10, 10]), ("a", [20, 0, 30, 10]), ("b", [0, 20, 10, 30]))
+        final = xanylabeling.Annotation(Path("x.json"), "x.jpg", 100, 100, True, {}, [
+            xanylabeling.Shape("a", "rectangle", [(1, 1), (10, 10)]),          # 保留（微调）
+            xanylabeling.Shape("c", "rectangle", [(0, 20), (10, 30)]),         # b 改成 c：删一个、加一个
+            xanylabeling.Shape("a", "rectangle", [(60, 60), (70, 70)]),        # 补上的框
+            xanylabeling.Shape("a", "polygon", [(0, 0), (5, 5), (0, 5)])])     # 其他形状不计
+        self.assertEqual(dict(detect.corrections(predicted, final)), {"kept": 1, "removed": 2, "added": 2})
 
 
 class RepositoryModelTest(unittest.TestCase):
