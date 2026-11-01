@@ -86,6 +86,14 @@ scripts/build-release.sh --with-base   # 首次部署或 base 变化时带上 ba
 
 安装器在停旧服务之前完成全部预检（完整性、平台、路径安全、数据目录、用新载荷执行 `--check-config`），失败时旧服务保持运行。
 
+只更新模型时打模型包（不含镜像与程序），在解压后的模型包中安装：engine 在旧服务运行时构建，只重启引用模型的服务，见 [构建与部署](docs/deployment.md#7-只更新模型模型包)。
+
+```bash
+scripts/build-model-package.sh road-assets   # 打包已发布的模型到 dist/
+./install.sh                                 # 目标机：更新模型
+./install.sh --rollback                      # 换回上一份模型
+```
+
 ## 新建项目与服务
 
 ```bash

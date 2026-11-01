@@ -31,6 +31,15 @@ MOUNTS = {
 # 发布包中的部署文件（目录按树复制）；服务单元只带 compose.yaml 与 templates/。
 PACKAGE_TREES = ("framework/compose", "framework/deploy", "framework/python/dsf", PROFILES, MODELS)
 PACKAGE_FILES = (COMPOSE_ROOT, SITE_FIELDS)
+# 模型包（只更新模型）：发布事实文件、包内的部署工具与安装入口。
+MODEL_PACKAGE_ENV = "model-package.env"
+MODEL_PACKAGE_TREES = ("framework/deploy", "framework/python/dsf")
+MODEL_PACKAGE_KIND = "models"
+# 安装目录中：上一份模型目录（回滚用）与停服前组装新模型目录的位置（与 models/ 同一文件系统，切换是改名）。
+PREVIOUS_MODELS = ".models-previous"
+STAGED_MODELS = ".models-staging"
+# 预构建 engine 的服务（docker-compose.yaml）。
+ENGINE_BUILDER = "model-engine-builder"
 # 设备相关的派生物不进包：engine 必须在目标机构建。
 PACKAGE_EXCLUDED_SUFFIXES = (".engine", ".fingerprint", ".lock", ".pyc")
 PACKAGE_EXCLUDED_NAMES = ("__pycache__", ".DS_Store")

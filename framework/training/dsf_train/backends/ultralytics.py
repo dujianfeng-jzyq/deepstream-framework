@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from .. import paths
@@ -42,11 +43,17 @@ def sample_name(sample: dict) -> str:
 
 def write_view(task: str, manifest: dict, root: Path, view: Path, location: Path) -> None:
     """YOLO 检测格式：images/<划分>/ 硬链接到来源图像，labels/<划分>/ 每行 `类别 cx cy w h`（归一化）。
-    负样本写空的标签文件。视图写在 view，data.yaml 指向它最终所在的 location。"""
+    负样本写空的标签文件。视图写在 view，data.yaml 指向它最终所在的 location。
+    Ultralytics 会就地重写的图像复制而不链接：否则重写经硬链接改动来源，来源的 sha256 不再与导入记录一致。"""
     for sample in manifest["samples"]:
         name = sample_name(sample)
-        paths.link_or_copy(paths.source_dir(root, sample["source"]) / sample["image"],
-                           view / "images" / sample["split"] / name)
+        source = paths.source_dir(root, sample["source"]) / sample["image"]
+        target = view / "images" / sample["split"] / name
+        if _rewritten_by_ultralytics(source):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        else:
+            paths.link_or_copy(source, target)
         width, height = sample["width"], sample["height"]
         lines = []
         for item in sample["objects"]:
@@ -60,6 +67,16 @@ def write_view(task: str, manifest: dict, root: Path, view: Path, location: Path
     splits = "".join(f"{split}: images/{split}\n" for split in ("train", "val", "test")
                      if (view / "images" / split).is_dir())
     (view / "data.yaml").write_text(f"path: {location}\n{splits}names:\n{names}", encoding="utf-8")
+
+
+def _rewritten_by_ultralytics(path: Path) -> bool:
+    """Ultralytics 检查数据集时把缺少结束标记（FF D9）的 JPEG 修复后原地保存（"corrupt JPEG restored and
+    saved"）。图像能解码，只是结尾被截断或附带了数据。判断条件与它相同。"""
+    if path.suffix.lower() not in (".jpg", ".jpeg"):
+        return False
+    with path.open("rb") as stream:
+        stream.seek(-2, os.SEEK_END)
+        return stream.read() != b"\xff\xd9"
 
 
 def check_options(options: dict) -> list[str]:
@@ -77,13 +94,25 @@ def train(task: str, data: Path, weights: Path, options: dict, directory: Path, 
     """训练到 directory（Ultralytics 的 save_dir），返回最佳权重。resume 时 weights 是中断时的 last.pt，
     Ultralytics 从其中恢复全部参数与进度。"""
     from ultralytics import YOLO
-    with _settings(workdir):
-        model = YOLO(str(weights), task=task)
-        if resume:
-            model.train(resume=True)
+
+    from .ultralytics_trainer import TRAINERS
+    # 多卡训练时 Ultralytics 另起子进程，按模块路径导入训练器类：子进程要能找到训练工具（PYTHONPATH），
+    # 导入训练器模块时设置中文字体（子进程不经过这里的 _settings）。
+    environment = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    try:
+        with _settings(workdir):
+            model = YOLO(str(weights), task=task)
+            if resume:
+                model.train(resume=True, trainer=TRAINERS[task])
+            else:
+                model.train(data=str(data), project=str(directory.parent), name=directory.name, exist_ok=True,
+                            trainer=TRAINERS[task], **options)
+    finally:
+        if environment is None:
+            os.environ.pop("PYTHONPATH", None)
         else:
-            model.train(data=str(data), project=str(directory.parent), name=directory.name, exist_ok=True,
-                        **options)
+            os.environ["PYTHONPATH"] = environment
     return directory / BEST
 
 
@@ -223,18 +252,11 @@ def _inference_arguments(options: dict) -> dict:
 @contextlib.contextmanager
 def _settings(workdir: Path):
     """Ultralytics 把下载的权重（包括 AMP 检查用的 yolo11n.pt）写到当前目录：切到训练根目录中的固定位置，
-    下载一次，以后复用。同时关闭使用统计的上报，并让图表能显示中文。"""
-    import seaborn
+    下载一次，以后复用。同时关闭使用统计的上报，并让图表能显示中文。多卡训练的子进程继承当前目录与
+    PYTHONPATH（见 train），中文字体由 ultralytics_trainer 在子进程中设置。"""
     from ultralytics import settings
     settings.update({"sync": False})
-    set_theme = seaborn.set_theme
-    if Path(CJK_FONT).is_file():
-        _use_cjk_font()
-        # 混淆矩阵绘制前调用 seaborn.set_theme，它把字体重置为 seaborn 的默认列表：之后重新加上中文字体。
-        def set_theme_with_cjk_font(*args, **kwargs):
-            set_theme(*args, **kwargs)
-            _use_cjk_font()
-        seaborn.set_theme = set_theme_with_cjk_font
+    use_cjk_font()
     previous = Path.cwd()
     workdir.mkdir(parents=True, exist_ok=True)
     os.chdir(workdir)
@@ -242,12 +264,30 @@ def _settings(workdir: Path):
         yield
     finally:
         os.chdir(previous)
-        seaborn.set_theme = set_theme
 
 
-def _use_cjk_font() -> None:
+_cjk_installed = False
+
+
+def use_cjk_font() -> None:
     """曲线与混淆矩阵中的类别名多为中文。直接登记字体文件，不依赖 matplotlib 的字体缓存（缓存在训练根目录中，
-    可能早于字体安装）；中文字体排在最前，其余字体保留作为后备。"""
+    可能早于字体安装）；中文字体排在最前，其余字体保留作为后备。混淆矩阵绘制前调用 seaborn.set_theme，
+    它把字体重置为 seaborn 的默认列表：包装它，之后重新加上中文字体。在本进程内一直生效，重复调用无害。"""
+    global _cjk_installed
+    if _cjk_installed or not Path(CJK_FONT).is_file():
+        return
+    import seaborn
+    set_theme = seaborn.set_theme
+
+    def set_theme_with_cjk_font(*args, **kwargs):
+        set_theme(*args, **kwargs)
+        _apply_cjk_font()
+    seaborn.set_theme = set_theme_with_cjk_font
+    _apply_cjk_font()
+    _cjk_installed = True
+
+
+def _apply_cjk_font() -> None:
     import matplotlib
     from matplotlib import font_manager
     font_manager.fontManager.addfont(CJK_FONT)

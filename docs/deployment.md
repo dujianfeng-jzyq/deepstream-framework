@@ -124,7 +124,7 @@ docker compose run --rm example-app --dump-pipeline   # 一次性动作覆盖入
 scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 ```
 
-先渲染，再构建 base 与 apps（`--no-build` 跳过），校验 `models/`（见 [training.md](training.md) §7，不一致时不打包），然后打包到 `dist/<项目>-v<APPS_VERSION>-ds<DS版本>.tar.gz`：
+先渲染，再构建 base 与 apps（`--no-build` 跳过），校验 `models/`（见 [training.md](training.md) §10，不一致时不打包），然后打包到 `dist/<项目>-v<APPS_VERSION>-ds<DS版本>.tar.gz`：
 
 - apps 与依赖镜像（所有非空 `*_IMAGE`，排除上游与本项目镜像）每次都带；缺失的依赖镜像按 base 的平台拉取；所有镜像必须与 base 同平台。base 只在 `--with-base` 时带。
 - 部署文件：`docker-compose.yaml`、`framework/{compose,deploy,python/dsf}`、各单元的 `compose.yaml` 与 `templates/`、`profiles/`、`models/`、`site-fields.env`、`install.sh`。不含源码、Dockerfile、渲染结果、现场答案与 engine。
@@ -159,7 +159,33 @@ scripts/build-release.sh [--no-build] [--with-base] [--profile <name>]
 - 安装不是事务：停服后的失败不自动回滚，重新安装旧包即可恢复；旧镜像与外部数据保留。停服之后、启动之前的失败或中断（包括 Ctrl-C）会说明旧服务已停止、安装目录可能写了一半，以及如何完成（用同一个包重新安装）或退回（安装旧包）。
 - 部署工具需要 Python 3.9+；版本过低时在启动时报错。
 
-## 7. 平台与现场验证
+## 7. 只更新模型：模型包
+
+模型比程序更新得频繁。模型包只含 `models/<id>/`（已发布的模型目录，见 [training.md](training.md) §8）与安装需要的部署工具，不含镜像、程序与 engine：
+
+```bash
+scripts/build-model-package.sh <模型> [<模型>…]   # 开发机：dist/<项目>-models-<模型>-<发布>.tar.gz
+./install.sh [--rollback] [--dry-run] [--install-dir <dir>] [--ready-timeout <s>]   # 目标机：在解压后的模型包中
+```
+
+- 打包要求模型已发布（有 `release.json`）并通过打包时的模型校验；模型目录有未提交的改动时警告。
+- 模型包只能装到已安装同一项目、已有这些模型的目录：新模型需要完整的发布包（应用配置随之变化）。类别或输出布局与已安装的不同时拒绝：业务规则、二级模型与解析插件依赖它们，同样需要完整的发布包。
+
+安装顺序不可调换：
+
+1. 核对包完整性与安装目录；比较新旧模型的发布标识，已是同一发布的模型跳过。
+2. 在 base 中执行模型校验；`custom-lib-path` 引用的解析插件必须在已安装的载荷中（模型包不换程序）。
+3. **旧服务继续运行时构建 engine**：按已安装的 `model-engine-builder` 定义（镜像、用户、运行时、设备、挂载）运行一次构建工具，只把 `/models` 换成组装在 `.models-staging/` 中的新模型目录。engine 路径带发布标识（`/data/engines/<id>/<发布>/…`），与正在使用的 engine 不冲突。
+4. 切换：`models/<id>` 改名为 `.models-previous/<id>`（替换更早的一份），新目录改名为 `models/<id>`；受管理清单随之更新，之后的完整安装把它们当作发布文件。只重启挂载了 `models/` 的常驻服务（`docker compose restart`），停机时间是重启的数秒，而不是 TensorRT 构建的数分钟；然后等待就绪。
+5. 清理 `/data/engines/<id>/` 中既不被当前、也不被上一份模型引用的条目（构建工具的 `--prune-engines`，`--keep-models-path` 指向 `.models-previous/`）。
+
+1–3 的任何失败都不改动安装目录、不停任何服务；`--dry-run` 到 2 为止。切换之后、重启之前失败时，再次安装会认为模型已经装好，所以错误信息直接给出重启命令。
+
+回滚：在同一个模型包中运行 `./install.sh --rollback`，换回 `.models-previous/` 中的上一份并重启，流程相同（engine 已在，构建工具直接复用）。它只撤销本包的安装：当前模型不是本包装入的发布时拒绝。完整安装覆盖 `models/` 之后，`.models-previous/` 中的上一份仍可用模型包回滚，但它可能早于完整发布包中的模型。
+
+完整安装（§6）的 `model-engine-builder` 不清理 engine：安装旧发布包回滚时，旧 engine 还在就不必重建。
+
+## 8. 平台与现场验证
 
 profile 中写平台差异：`server-ds71` 为 x86_64 服务器（独立显卡，Docker bridge 网络），`jetson-ds71` 为 Jetson（host 网络）。两者都是 DeepStream 7.1。Apple Silicon 开发机用 `jetson-ds71` 构建并自检（同为 arm64 镜像，不运行推理）。新增平台时复制一份 profile：写明 `x-platform` 与上游镜像，在 `services` 中加入所需设备与 `group_add`（`runtime: nvidia` 由需要 GPU 的单元自己声明，不写在 profile），编码器差异写在应用配置的 `encoder.properties`。
 

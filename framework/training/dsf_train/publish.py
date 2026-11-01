@@ -167,7 +167,7 @@ def candidates(root: Path, spec: dict, dataset_id: str | None = None,
                 overrides += "  (other classes than model.yaml: cannot be published)"
             finished = (record.get("finished_at") or "")[:16].replace("T", " ")
             lines.append(f"  {mark}{record['run']:<{width}}{values}  {finished:<16}  {overrides}")
-        if published:
+        if published and any(record["run"] == published for record in completed):
             lines.append(f"  * the run of the published release {current['release']}")
         if unevaluated:
             lines.append(f"  - not evaluated on this dataset yet: train eval {spec['id']} <run>")

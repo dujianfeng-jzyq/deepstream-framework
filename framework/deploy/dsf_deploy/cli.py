@@ -1,4 +1,4 @@
-"""命令行入口：render / profile-variables / check-models / pack / install / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
+"""命令行入口：render / profile-variables / check-models / pack / pack-models / install / install-models / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import json
 import sys
 from pathlib import Path
 
-from . import models, pack, project, render
+from . import modelpack, models, pack, project, render
 from .errors import DeployError
 from .install import Options, install
+from .install.models import ModelOptions, install_models
 
 
 def _root(value: str | None) -> Path:
@@ -37,6 +38,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--profile")
     p.add_argument("--with-base", action="store_true", help="include the base image (first deployment or when base changes)")
 
+    p = commands.add_parser("pack-models", help="create a model package (only models/<id>/, no images or programs)")
+    p.add_argument("models", nargs="+", metavar="MODEL")
+    p.add_argument("--root")
+
     p = commands.add_parser("install", help="在目标机安装发布包")
     p.add_argument("--package", required=True, help="解压后的发布包目录")
     p.add_argument("--install-dir", type=Path, help="默认为 INSTALL_ROOT、XDG_DATA_HOME 或 ~/.local/share 下的项目名目录")
@@ -45,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--clean-install", action="store_true", help="清空安装目录后安装（数据目录保留）")
     p.add_argument("--dry-run", action="store_true", help="只预检并打印计划，不停服、不写安装目录")
     p.add_argument("--ready-timeout", type=float, default=180.0, help="启动后的就绪等待上限（秒）")
+
+    p = commands.add_parser("install-models", help="在已安装的项目中更新模型：停服前构建 engine，只重启引用模型的服务")
+    p.add_argument("--package", required=True, help="解压后的模型包目录")
+    p.add_argument("--install-dir", type=Path, help="默认为 INSTALL_ROOT、XDG_DATA_HOME 或 ~/.local/share 下的项目名目录")
+    p.add_argument("--rollback", action="store_true", help="撤销这个模型包的安装：换回上一份模型目录")
+    p.add_argument("--dry-run", action="store_true", help="只预检并打印计划，不构建、不切换、不重启")
+    p.add_argument("--ready-timeout", type=float, default=180.0, help="重启后的就绪等待上限（秒）")
 
     p = commands.add_parser("init", help="set the name of a derived project")
     p.add_argument("name")
@@ -71,6 +83,12 @@ def main(argv: list[str] | None = None) -> int:
             install(Options(package=Path(args.package), install_dir=args.install_dir, profile=args.profile,
                             ask=args.ask, clean=args.clean_install, dry_run=args.dry_run,
                             ready_timeout=args.ready_timeout))
+        elif args.command == "pack-models":
+            modelpack.pack_models(_root(args.root), args.models)
+        elif args.command == "install-models":
+            install_models(ModelOptions(package=Path(args.package), install_dir=args.install_dir,
+                                        rollback=args.rollback, dry_run=args.dry_run,
+                                        ready_timeout=args.ready_timeout))
         elif args.command == "init":
             root = _root(args.root)
             project.init_project(root, args.name)
@@ -80,9 +98,9 @@ def main(argv: list[str] | None = None) -> int:
             project.new_unit(_root(args.root), args.name, args.kind)
     except DeployError as error:
         # 安装器面向现场，用中文；其他命令面向开发者。安装器在 base 中调用 render 等命令时按 "error: " 剥离前缀。
-        print(f"{'错误：' if args.command == 'install' else 'error: '}{error}", file=sys.stderr)
+        print(f"{'错误：' if args.command in ('install', 'install-models') else 'error: '}{error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("已中断" if args.command == "install" else "interrupted", file=sys.stderr)  # 安装器在停服之后被中断时已另行说明现场状态
+        print("已中断" if args.command in ("install", "install-models") else "interrupted", file=sys.stderr)  # 安装器在停服之后被中断时已另行说明现场状态
         return 130
     return 0

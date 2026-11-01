@@ -24,8 +24,8 @@ def answers(install_dir: Path) -> dict:
     return read(install_dir / layout.SITE_ENV, unquote=unquote_answer)
 
 
-@unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
-class PackInstallTest(ProjectTestCase):
+class InstallTestCase(ProjectTestCase):
+    """打包并安装到临时目录的公共步骤（假 Docker）；模型包的测试也用它。"""
     def setUp(self):
         super().setUp()
         # 非交互安装无法回答必填项：这里给它默认值（必填项的失败另有用例）。
@@ -81,6 +81,10 @@ class PackInstallTest(ProjectTestCase):
         build = "".join(f"  {key}: {value}\n" for key, value in values.items())
         (self.root / f"profiles/{name}.yaml").write_text(PROFILE.replace("x-build:\n", "x-build:\n" + build))
 
+
+
+@unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
+class PackInstallTest(InstallTestCase):
     # ---- pack ----
 
     def test_package_contents(self):

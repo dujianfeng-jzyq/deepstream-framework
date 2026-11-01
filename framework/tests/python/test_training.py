@@ -302,6 +302,19 @@ class PrepareTest(TrainingTestCase):
         self.assertIn('  0: "标志牌(圆牌)"\n', data_yaml)
         self.assertEqual((self.root / "datasets/m/latest").read_text().strip(), result.dataset_id)
 
+    def test_images_the_backend_rewrites_are_copied_into_the_view(self):
+        # 结尾不是 FF D9 的 JPEG 能解码，但 Ultralytics 会原地“修复”它：经硬链接会改动来源。
+        with (self.raw / "a/f_1.jpg").open("ab") as stream:
+            stream.write(b"\x00\x00")
+        self.import_(self.raw)
+        result = self.prepare()
+        sample = next(s for s in result.manifest["samples"] if s["image"] == "f_1.jpg")
+        copied = result.directory / paths.VIEW / "ultralytics/images" / sample["split"] / "batch-01__f_1.jpg"
+        self.assertNotEqual(copied.stat().st_ino, (self.source() / "f_1.jpg").stat().st_ino)
+        self.assertEqual(copied.read_bytes(), (self.source() / "f_1.jpg").read_bytes())
+        copied.write_bytes(b"rewritten")                                          # 重写视图不影响来源
+        self.assertEqual(paths.sha256(self.source() / "f_1.jpg"), sample["sha256"])
+
     def test_the_identity_follows_the_content(self):
         self.import_(self.raw)
         first = self.prepare()
@@ -879,6 +892,8 @@ class PublishListTest(RunTestCase):
         self.assertIn("publish one with: train publish m <run>", out)
         self.assertFalse((self.root / "runs/m" / full / "export").exists())
         self.assertIn("name the run to publish", self.train("publish", "m", "--accept-metrics")[2])
+        (self.repo / "models/m/release.json").write_text(json.dumps({"release": "r0", "run": {"id": "elsewhere"}}))
+        self.assertNotIn("* the run of", self.train("publish", "m")[1])           # 发布的 run 不在列表中时不标注
 
         image(self.tmp / "more/x/x.jpg", "white")
         annotation(self.tmp / "more/x/x.json", LABELED, checked=True)

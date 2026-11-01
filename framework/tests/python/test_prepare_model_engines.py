@@ -160,6 +160,30 @@ class PrepareEnginesTest(unittest.TestCase):
         self.assertTrue(all(r.returncode == 0 for r in results))
         self.assertEqual(self.builds(), 1)
 
+    def test_prune_keeps_the_current_and_the_kept_releases(self):
+        engines = self.dir / "data" / "engines"
+        self.write_config(str(engines / "m" / "r2" / "m.engine"))
+        previous = self.dir / "previous"
+        shutil.copytree(self.models / "m", previous / "m")
+        (previous / "m" / "deployment" / "config.txt").write_text(CONFIG.format(engine=engines / "m" / "r1" / "m.engine"))
+        for name in ("r0/m.engine", "r1/m.engine", "m.engine", "m.engine.fingerprint", "m.engine.lock",
+                     ".m.engine.tmp", "../other/r0/x.engine"):
+            (engines / "m" / name).parent.mkdir(parents=True, exist_ok=True)
+            (engines / "m" / name).write_text("engine")
+        result = self.run_tool("--models-path", str(self.models), "--keep-models-path", str(previous),
+                               "--prune-engines", str(engines))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.builds(), 1)                                   # 只构建当前的，保留的不构建
+        self.assertEqual(sorted(p.name for p in (engines / "m").iterdir()), [".m.engine.tmp", "r1", "r2"])
+        self.assertTrue((engines / "other" / "r0" / "x.engine").is_file())  # 没有配置引用的模型不动
+        self.assertIn("pruned", result.stderr)
+        # 仍引用顶层 engine（尚未按发布命名）时保留它与指纹、锁。
+        self.write_config(str(engines / "m" / "m.engine"))
+        (engines / "m" / "m.engine").write_text("engine")
+        self.assertEqual(self.run_tool("--models-path", str(self.models), "--prune-engines", str(engines)).returncode, 0)
+        self.assertEqual(sorted(p.name for p in (engines / "m").iterdir()),
+                         [".m.engine.tmp", "m.engine", "m.engine.fingerprint", "m.engine.lock"])
+
     def test_no_configs_is_not_an_error(self):
         empty = self.dir / "empty"
         empty.mkdir()

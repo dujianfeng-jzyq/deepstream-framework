@@ -11,6 +11,10 @@ GPU 计算能力、影响产物的 nvinfer 属性、trtexec 参数，以及 engi
 额外的 trtexec 参数（动态形状、INT8 校准等）写在配置旁的 <配置名>.trtexec 文件中，每行若干参数，
 # 开头为注释；这些参数计入指纹。
 
+--prune-engines <目录> 在构建之后清理 <目录>/<模型>/ 下不再被引用的条目（发布目录、旧的顶层 engine 与其
+指纹和锁）：引用者是扫描到的配置与 --keep-models-path 中的配置（例如回滚用的上一份模型，只保留不构建）。
+只处理有配置引用到 <目录>/<模型>/ 之内的模型；隐藏条目（构建中的临时文件）不动。
+
     python3 tools/prepare_model_engines.py --models-path /models
     python3 tools/prepare_model_engines.py /models/<model>/nvinfer.txt
 """
@@ -25,6 +29,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -288,6 +293,51 @@ def prepare(config: ModelConfig, trtexec: Path, trt: str, capability: str, extra
     return True
 
 
+def model_of(config: ModelConfig, roots: list[Path]) -> str | None:
+    """配置所属的模型：它在某个模型目录根之下的第一级目录名。"""
+    for root in roots:
+        try:
+            parts = config.path.relative_to(root.resolve()).parts
+        except ValueError:
+            continue
+        if len(parts) > 1:
+            return parts[0]
+    return None
+
+
+def prune(engines_root: Path, configs: list[ModelConfig], roots: list[Path]) -> list[Path]:
+    """删除 engines_root/<模型>/ 下不被这些配置引用的条目，返回删除的路径。引用顶层文件（尚未按发布命名的
+    engine）时保留它与指纹、锁；引用子目录中的 engine 时保留整个子目录（一次发布的全部 engine）。"""
+    keep: dict[str, set[str]] = {}
+    for config in configs:
+        model = model_of(config, roots)
+        if model is None:
+            continue
+        directory = (engines_root / model).resolve()
+        try:
+            relative = config.resolve("model-engine-file").resolve().relative_to(directory)
+        except ValueError:
+            continue
+        first = relative.parts[0]
+        names = {first, f"{first}.fingerprint", f"{first}.lock"} if len(relative.parts) == 1 else {first}
+        keep.setdefault(model, set()).update(names)
+    removed = []
+    for model, names in sorted(keep.items()):
+        directory = engines_root / model
+        if not directory.is_dir():
+            continue
+        for entry in sorted(directory.iterdir()):
+            if entry.name in names or entry.name.startswith("."):
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+            removed.append(entry)
+            log(f"pruned {entry} (no longer referenced)")
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare TensorRT engines declared by nvinfer configs.")
     parser.add_argument("configs", nargs="*", type=Path, metavar="NVINFER_CONFIG")
@@ -301,6 +351,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="追加给所有模型的 trtexec 参数（可重复）")
     parser.add_argument("--compute-cap", default=None, help="覆盖探测到的 GPU 计算能力（无 GPU 验证用）")
     parser.add_argument("--force", action="store_true", help="忽略指纹，强制重建")
+    parser.add_argument("--keep-models-path", action="append", default=[], type=Path, metavar="DIR",
+                        help="这些目录中的配置只保留它们的 engine（--prune-engines），不构建")
+    parser.add_argument("--prune-engines", type=Path, metavar="DIR",
+                        help="构建之后删除 DIR/<模型>/ 下不再被引用的 engine 与发布目录")
     args = parser.parse_args(argv)
 
     trtexec = args.trtexec or Path(os.environ.get("TRTEXEC_PATH") or DEFAULT_TRTEXEC)
@@ -322,6 +376,9 @@ def main(argv: list[str] | None = None) -> int:
                         for device in sorted({c.gpu_id for c in configs})}
         built = sum(prepare(c, trtexec, trt, capabilities[c.gpu_id], extra, args.force) for c in configs)
         log(f"done: built={built} reused={len(configs) - built}")
+        if args.prune_engines:
+            kept = load_configs([], args.keep_models_path) if args.keep_models_path else []
+            prune(args.prune_engines, configs + kept, [*scan, *args.keep_models_path])
         return 0
     except Failure as error:
         print(f"prepare-model-engines: {error}", file=sys.stderr, flush=True)

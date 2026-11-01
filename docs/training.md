@@ -66,7 +66,7 @@ models/<id>/
 - 应用配置引用 `${CONTAINER_MODELS_PATH}/<id>/nvinfer.txt`；engine 由 `model-engine-builder` 按 `model-engine-file` 在目标机构建，产物更新后指纹变化，自动重建。`model-engine-file` 必须在 `/data/engines/<id>/` 下：模型目录对所有容器只读，数据目录跨发布与清洁安装保留。
 - 一个模型目录可以有多份 nvinfer 配置（例如不同精度），每份都按同样规则检查。
 
-产物目前直接提交到仓库。模型频繁重新发布时，ONNX 会让仓库历史持续变大，可以给 `models/*/artifacts/**` 启用 Git LFS（校验与打包只看文件内容，不受影响）。
+ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）：模型频繁重新发布时，仓库历史不随每个版本增大。`labels.txt` 等文本产物照常进入 git，类别变化在评审中直接可见。克隆、训练、打包的机器都需要 git-lfs（`git lfs install`）；没有它时检出的 ONNX 是指针文件，打包前的模型校验报告产物与 sha256 不符而拒绝打包，不会把指针发出去。启用之前提交的 ONNX 仍在普通历史中，没有改写。
 
 ## 4. 训练根目录（仓库外）
 
@@ -239,13 +239,9 @@ data:
 - **部署契约**：二级模型的 nvinfer 配置使用 `process-mode=2`，`operate-on-gie-id` 等于父模型配置的 `gie-unique-id`，`operate-on-class-ids` 由 `cascade.classes` 按父模型 `classes` 换算出类别号。打包时校验这两者：父模型重新发布并改变了类别号时，二级模型的配置在打包前失败，而不是在现场作用于错误的类别。
 - 应用配置的 `inference` 链按顺序串接一级与二级模型（已支持）。
 
-## 13. 后续：只更新模型
+## 13. 只更新模型
 
-模型比程序更新得频繁。规划中的模型包只包含 `models/<id>/`：
-
-- 预检：完整性、模型校验、输出布局与已安装的解析插件匹配。
-- **停服之前构建 engine**：engine 路径带发布标识（§8），可以在旧服务继续运行时用新模型预构建；随后只重启引用该模型的服务，停机时间从 TensorRT 构建的数分钟缩短到重启的数秒。不再被任何配置引用的发布目录由 engine 构建工具清理。
-- 保留上一份模型目录，回滚即切回并重启。
+模型比程序更新得频繁。`scripts/build-model-package.sh <id>` 打出只含 `models/<id>/` 的模型包，目标机在其中运行 `./install.sh`：预检之后在旧服务继续运行时构建 engine（engine 路径带发布标识，§8），再切换模型目录并只重启引用模型的服务，停机时间从 TensorRT 构建的数分钟缩短到重启的数秒；上一份模型目录保留，`./install.sh --rollback` 切回并重启。不再被当前与上一份模型引用的 engine 由构建工具清理。细节见 [deployment.md](deployment.md) §7。
 
 INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓存并作为产物发布（`int8-calib-file` 已计入 engine 指纹）。
 
@@ -260,7 +256,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | 3 | `train run` / `train eval`（Ultralytics，检测）；分片评估除外 | 已实现 |
 | 4 | `train prelabel` | 已实现 |
 | 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 已实现 |
-| 6 | 模型包与停服前构建 engine | 待实现 |
+| 6 | 模型包与停服前构建 engine | 已实现 |
 | 7 | 分类与分割任务、二级模型及其打包校验 | 预留 |
 | 8 | INT8 校准、数据闭环 | 预留 |
 
