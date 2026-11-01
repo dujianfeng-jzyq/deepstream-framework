@@ -11,9 +11,10 @@
                                            训练到 directory，返回最佳权重；workdir 是下载与缓存的位置
   evaluate(task, weights, data, split, options, directory, workdir)
                                            在一个划分上评估，返回 {"metrics": {...}, "classes": {类别号: {...}}}
-  predict(task, weights, images, options, conf, workdir)
+  predict(task, weights, images, options, conf, workdir, *, agnostic)
                                            原生推理（预标注用），逐张产出 [{"class", "box", "score"}]，
-                                           box 是像素坐标 [x1, y1, x2, y2]，顺序与 images 相同
+                                           box 是像素坐标 [x1, y1, x2, y2]，顺序与 images 相同；agnostic 为真时
+                                           NMS 不区分类别，重叠的框只保留得分最高的一个，不论类别是否相同
   LAYOUTS                                  任务 → 导出时能追加转换的部署输出布局
   export(task, weights, layout, size, settings, target, workdir)
                                            导出 ONNX 到 target，输出已是 layout；size 是 (宽, 高)，settings 是

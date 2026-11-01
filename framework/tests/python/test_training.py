@@ -431,8 +431,8 @@ class FakeBackend(types.ModuleType):
         return numpy.array(rows, dtype=numpy.float32)
 
 
-    def predict(self, task, weights, images, options, conf, workdir):
-        self.calls.append(("predict", weights, list(images), dict(options), conf))
+    def predict(self, task, weights, images, options, conf, workdir, *, agnostic):
+        self.calls.append(("predict", weights, list(images), dict(options), conf, agnostic))
         for path in images:
             if self.during_predict:
                 self.during_predict(path)
@@ -595,10 +595,10 @@ class PrelabelTest(RunTestCase):
         self.assertEqual(code, 0, err)
         self.assertIn(f"prelabeled 2 images of batch-02 with run {self.run_id}: 4 boxes", out)
         self.assertIn("skipped 1 images: already labeled", out)
-        [(_, weights, images, options, conf)] = [c for c in self.backend.calls if c[0] == "predict"]
+        [(_, weights, images, options, conf, agnostic)] = [c for c in self.backend.calls if c[0] == "predict"]
         self.assertEqual(weights, self.root / "runs/m" / self.run_id / "train" / ultralytics.BEST)
         self.assertEqual([p.name for p in images], ["n_0.jpg", "n_1.jpg"])
-        self.assertEqual((options["device"], conf), ("1", 0.3))
+        self.assertEqual((options["device"], conf, agnostic), ("1", 0.3, True))  # 一个目标只留一个框
         self.assertEqual(json.loads((self.directory / "n_2.json").read_text())["shapes"], [])  # 未被改动
 
         written = json.loads((self.directory / "n_0.json").read_text(encoding="utf-8"))
@@ -680,6 +680,41 @@ class PrelabelTest(RunTestCase):
         path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))
         code, _, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
         self.assertIn("trained with other classes", err)
+
+
+class UltralyticsPredictTest(unittest.TestCase):
+    """适配器把 agnostic 交给 Ultralytics 的 agnostic_nms（它默认按类别分别做 NMS）。Ultralytics 用替身。"""
+
+    def test_agnostic_reaches_agnostic_nms_and_results_keep_image_order(self):
+        calls = []
+
+        class Boxes:
+            def __init__(self, rows):
+                self.xyxy = types.SimpleNamespace(tolist=lambda: [r[:4] for r in rows])
+                self.cls = types.SimpleNamespace(tolist=lambda: [r[4] for r in rows])
+                self.conf = types.SimpleNamespace(tolist=lambda: [r[5] for r in rows])
+
+        class YOLO:
+            def __init__(self, weights, task):
+                calls.append(("load", weights, task))
+
+            def predict(self, sources, **arguments):
+                calls.append(("predict", sources, arguments))
+                return [types.SimpleNamespace(boxes=Boxes([[1, 2, 3, 4, 2.0, 0.8]])),
+                        types.SimpleNamespace(boxes=Boxes([]))]
+
+        stub = types.SimpleNamespace(YOLO=YOLO, settings=types.SimpleNamespace(update=lambda _: None))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict("sys.modules", {"ultralytics": stub}), \
+                mock.patch.object(ultralytics, "use_cjk_font"):
+            for agnostic in (True, False):
+                results = list(ultralytics.predict("detect", Path(tmp) / "best.pt", [Path("/a.jpg"), Path("/b.jpg")],
+                                                   {"imgsz": 640, "device": "0,1", "epochs": 3}, 0.25, Path(tmp),
+                                                   agnostic=agnostic))
+                self.assertEqual(results, [[{"class": 2, "box": [1.0, 2.0, 3.0, 4.0], "score": 0.8}], []])
+                _, sources_, arguments = calls[-1]
+                self.assertEqual(sources_, ["/a.jpg", "/b.jpg"])
+                self.assertEqual(arguments, {"conf": 0.25, "stream": True, "verbose": False,
+                                             "agnostic_nms": agnostic, "imgsz": 640, "device": "0"})
 
 
 class CorrectionsTest(unittest.TestCase):

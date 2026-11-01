@@ -135,14 +135,15 @@ def evaluate(task: str, weights: Path, data: Path, split: str, options: dict, di
             "classes": classes}
 
 
-def predict(task: str, weights: Path, images: list[Path], options: dict, conf: float, workdir: Path):
+def predict(task: str, weights: Path, images: list[Path], options: dict, conf: float, workdir: Path, *,
+            agnostic: bool):
     """逐张推理，按 images 的顺序产出 [{"class", "box", "score"}]。stream 模式按批读入图片，
-    不把全部结果留在内存中。"""
+    不把全部结果留在内存中。Ultralytics 默认按类别分别做 NMS，agnostic 对应它的 agnostic_nms。"""
     from ultralytics import YOLO
     with _settings(workdir):
         model = YOLO(str(weights), task=task)
         for result in model.predict([str(path) for path in images], conf=conf, stream=True, verbose=False,
-                                    **_inference_arguments(options)):
+                                    agnostic_nms=agnostic, **_inference_arguments(options)):
             boxes = result.boxes
             yield [{"class": int(c), "box": [float(v) for v in xyxy], "score": float(s)}
                    for xyxy, c, s in zip(boxes.xyxy.tolist(), boxes.cls.tolist(), boxes.conf.tolist())]

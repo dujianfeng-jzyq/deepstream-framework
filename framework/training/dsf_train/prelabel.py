@@ -96,9 +96,11 @@ def prelabel(repo: Path, root: Path, spec: dict, source: str, run: str | None, c
     batch = len(log["batches"])
     log["batches"].append({"at": _now(), "model": spec["id"], **model, "conf": conf, "images": 0})
     try:
-        # 推理期间后端可能切换当前目录：这里只使用绝对路径。
-        for name, predictions in zip(pending, backend.predict(task.NAME, best, [directory / n for n in pending],
-                                                              options, conf, root / paths.PRETRAINED)):
+        # 推理期间后端可能切换当前目录：这里只使用绝对路径。NMS 不区分类别：按类别分别抑制时，同一个目标
+        # 被相邻候选判成不同类别会留下几乎重合的两个框，人要逐个删掉，修正量统计也会偏低。
+        outputs = backend.predict(task.NAME, best, [directory / n for n in pending], options, conf,
+                                  root / paths.PRETRAINED, agnostic=True)
+        for name, predictions in zip(pending, outputs):
             info = images[name]
             shapes = task.prelabel_shapes(predictions, info["width"], info["height"], spec)
             if not xanylabeling.create(xanylabeling.annotation_path(directory / name), name,
