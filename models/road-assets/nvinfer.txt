@@ -8,7 +8,7 @@ gpu-id=0
 net-scale-factor=0.0039215697906911373
 model-color-format=0
 onnx-file=artifacts/model.onnx
-model-engine-file=/data/engines/road-assets/model_b1_gpu0_fp16.engine
+model-engine-file=/data/engines/road-assets/20261101-042927-3acddb/model_b1_gpu0_fp16.engine
 labelfile-path=artifacts/labels.txt
 # ONNX 以固定 batch=1 导出（release.json 的 onnx：batch 1、dynamic false），batch-size 只能为 1。
 # 多路时 nvinfer 逐帧推理；需要批处理时以 dynamic 重新导出，并在 nvinfer.trtexec 中给出形状。
