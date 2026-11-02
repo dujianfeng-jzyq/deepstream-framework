@@ -242,10 +242,21 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
     spdlog::warn("removed {} unfinished segment(s) from {}", stale, tracker_.Directory());
   }
   Prune();
+  // video 是 AddSegmentSink 请求的 pad；splitmuxsink 的请求 pad 是 ghost pad。
+  GstPad* video = gst_element_get_static_pad(sink_, "video");
+  if (video == nullptr || !GST_IS_GHOST_PAD(video)) {
+    if (video != nullptr) gst_object_unref(video);
+    throw std::runtime_error("recording element '" + options_.element + "' has no ghost pad 'video'");
+  }
+  GstProxyPad* internal = gst_proxy_pad_get_internal(GST_PROXY_PAD(video));
+  gst_object_unref(video);
+  sink_data_.Attach(GST_PAD(internal),
+                    static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM),
+                    &SegmentRecorder::OnSinkData, this);
+  gst_object_unref(internal);
   handler_ = g_signal_connect(sink_, "format-location", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
                               this);
   if (options_.split_on_gap.count() > 0) {
-    // video 是 AddSegmentSink 请求的 pad。
     input_.Attach(GST_BIN(bin), options_.element, "video", GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput,
                   this);
   }
@@ -300,10 +311,24 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
   return GST_PAD_PROBE_DROP;
 }
 
+GstPadProbeReturn SegmentRecorder::OnSinkData(GstPad* /*pad*/, GstPadProbeInfo* info, gpointer self) {
+  auto* recorder = static_cast<SegmentRecorder*>(self);
+  if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) {
+    recorder->received_.store(true);
+    return GST_PAD_PROBE_OK;
+  }
+  if (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) != GST_EVENT_EOS || recorder->received_.load()) {
+    return GST_PAD_PROBE_OK;
+  }
+  spdlog::info("{}: end of stream before any frame; nothing to record", recorder->options_.element);
+  return GST_PAD_PROBE_DROP;
+}
+
 void SegmentRecorder::OnReleased() {
   fallback_.Cancel();
   pipeline_ = nullptr;
   input_.Remove();
+  sink_data_.Remove();
   if (sink_ == nullptr) return;
   if (handler_ != 0) g_signal_handler_disconnect(sink_, handler_);
   handler_ = 0;

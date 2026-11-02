@@ -250,7 +250,7 @@ recorder.MarkDetected();   // 任意线程：当前分段出现过目标
 
 直播源断流恢复后，下一帧的时间戳比上一帧晚整个断流时长（running-time 在断流期间照常前进），splitmuxsink 会把这段时间计入分段时长，文件中留下长时间的静止画面。录像入口相邻两帧相差超过 `RecorderOptions::split_on_gap`（默认 2 秒，0 关闭）时，录像器请求 `split-at-running-time`：断流前的帧留在当前分段，新分段从恢复后第一个关键帧开始，其间的帧不写入录像（留在旧分段会把断流带进去，又不能作为新分段的开头），统计 `<element>_gap_splits`。编码器却会延续断流前的 GOP，所以还要在编码器输入上登记 `app::KeyframeOnGap`（阈值不大于 `split_on_gap`）：它在恢复后的第一帧之前请求关键帧——标准的 GstForceKeyUnit、dGPU 的 nvv4l2h26xenc 只认的 `nv-enc-force-idr` 事件（实测晚一帧生效，录像丢一帧），以及编码器存在时 Jetson 的 nvv4l2h26xenc 只认的 `force-IDR` 动作信号（实测正好在恢复后的第一帧生效）——RTSP 观看端也随之立即恢复画面，统计 `<encoder>_gap_keyframes`。不登记时录像最多丢一个关键帧间隔。断流期间当前分段保持打开，恢复或停止时收尾。
 
-停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。
+停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。录像入口一帧都没有收到就停止时（例如直播源离线时重启服务），录像器不把 EOS 交给 splitmuxsink：GStreamer 1.20 的 splitmuxsink 在没有数据时收到 EOS 会断言失败并终止进程，而此时也没有需要封装的分段，排空照常完成。
 
 ## 9. Python 服务
 

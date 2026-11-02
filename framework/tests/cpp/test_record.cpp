@@ -140,6 +140,26 @@ class TimestampGap : public gst::Component {
   GstClockTime shift_;
 };
 
+// 离线的直播源：名为 offline 的 identity 之后只有 EOS 能通过，帧与 caps、segment 等事件都被丢弃。
+// 与离线的 RTSP 源一致：nvurisrcbin 没有输出 pad，下游只会收到停止时注入的 EOS。
+class OfflineSource : public gst::Component {
+ public:
+  std::string_view Name() const override { return "offline-source"; }
+  void OnCreated(gst::Pipeline& pipeline, GstElement* /*bin*/) override {
+    GstPad* pad = gst_element_get_static_pad(pipeline.Element("offline"), "src");
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_DATA_DOWNSTREAM,
+                      +[](GstPad*, GstPadProbeInfo* info, gpointer) {
+                        if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM &&
+                            GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) == GST_EVENT_EOS) {
+                          return GST_PAD_PROBE_OK;
+                        }
+                        return GST_PAD_PROBE_DROP;
+                      },
+                      nullptr, nullptr);
+    gst_object_unref(pad);
+  }
+};
+
 // 统计经过 identity 的帧。
 class FrameCounter : public gst::Component {
  public:
@@ -689,6 +709,41 @@ TEST(recorder_finishes_last_segment_on_drain_stop) {
   for (const auto& entry : fs::directory_iterator(dir.path / "cam/osd")) {
     CHECK(entry.path().extension() == ".mp4");
   }
+}
+
+// 源没有送来任何一帧就停止（直播源离线时重启服务）：GStreamer 1.20 的 splitmuxsink 在没有数据时
+// 收到 EOS 会断言失败并终止进程。排空应正常完成，且不留下任何分段。
+TEST(recorder_stops_cleanly_before_any_input) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  Events events;
+  SegmentRecorder recorder({dir.path.string(), "cam", "osd", "rec"}, events.Callbacks());
+  gst::Graph graph;
+  gst::Element encoder = graph.Add("x264enc", "enc").Set("tune", "zerolatency").Set("speed-preset", "ultrafast");
+  graph.Chain({graph.Add("videotestsrc", "src").Set("is-live", true),
+               graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"), graph.Add("videoconvert"),
+               graph.Add("identity", "offline"), encoder});
+  record::AddSegmentSink(graph, encoder, "h264", 1, "rec");
+  gst::Pipeline pipeline("record-no-input", graph);
+  OfflineSource offline;
+  pipeline.Add(offline);
+  pipeline.Add(recorder);
+  gst::Timer timer;
+  pipeline.Post([&] {
+    timer = pipeline.After(std::chrono::milliseconds(500), [&] { pipeline.RequestStop(); });
+  });
+  gst::Options options;
+  options.handle_signals = false;
+  options.stop_timeout = std::chrono::milliseconds(5000);
+  const auto begin = std::chrono::steady_clock::now();
+  const gst::Result result = pipeline.Run(options);
+  CHECK_EQ(std::string(gst::ToString(result.reason)), std::string("stopped"));
+  // 排空应在 EOS 到达后立即完成，而不是等到 stop_timeout 或录像器的 eos_fallback。
+  CHECK(std::chrono::steady_clock::now() - begin < std::chrono::milliseconds(2500));
+  CHECK(recorder.Healthy());
+  CHECK(events.started.empty());
+  CHECK(events.finished.empty());
+  CHECK(!fs::exists(dir.path / "cam/osd") || fs::is_empty(dir.path / "cam/osd"));
 }
 
 DSF_TEST_MAIN()

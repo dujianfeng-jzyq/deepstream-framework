@@ -5,10 +5,13 @@
 // 写入期间使用 .mp4.tmp 后缀；splitmuxsink 报告 fragment-closed 后改名为 .mp4，
 // 分段内出现过目标时最终文件名带 -detected；改名成功才通知 finished，消费者因此不会读到未写完的文件。
 // 可选的保留策略在启动时与每个分段收尾后清理本目录中的旧分段，见 Retention。
+// 录像入口一帧都没有收到时（直播源离线时停止）不把 EOS 交给 splitmuxsink：GStreamer 1.20 的
+// splitmuxsink 在没有数据时收到 EOS 会断言失败并终止进程，而此时也没有需要封装的分段。
 
 #ifndef DSF_RECORD_SEGMENT_RECORDER_H
 #define DSF_RECORD_SEGMENT_RECORDER_H
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -136,6 +139,7 @@ class SegmentRecorder : public gst::Component {
  private:
   static gchar* OnFormatLocation(GstElement* sink, guint fragment, gpointer self);
   static GstPadProbeReturn OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self);
+  static GstPadProbeReturn OnSinkData(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   void Prune();  // 控制线程
 
   RecorderOptions options_;
@@ -157,6 +161,10 @@ class SegmentRecorder : public gst::Component {
   GstClockTime last_duration_ = GST_CLOCK_TIME_NONE;
   bool awaiting_keyframe_ = false;  // 断流后丢弃关键帧之前的帧
   std::uint64_t skipped_ = 0;
+  // 挂在录像入口（ghost pad）的内部 pad 上：管线在 ghost pad 上记录 EOS 到达，之后才轮到这里，
+  // 丢弃无数据的 EOS 不会让排空等到超时。received_ 由流线程与兜底 EOS 的控制线程访问。
+  gst::PadProbe sink_data_;
+  std::atomic<bool> received_{false};
   gst::Pipeline* pipeline_ = nullptr;  // OnCreated 到 OnReleased 之间有效
   gst::Timer fallback_;
 };
