@@ -1,4 +1,4 @@
-# deepstream-example
+# deepstream-framework
 
 能实现任意 DeepStream 应用与服务的基础框架。产品项目从本仓库派生，在 `services/` 中增加自己的应用和服务，框架（`framework/`）负责建图、生命周期、元数据、消息、录像，以及构建、配置、打包与离线安装。
 
