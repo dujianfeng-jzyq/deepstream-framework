@@ -5,7 +5,8 @@ cmake_minimum_required(VERSION 3.22)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL "Generate compile_commands.json for editors")
 
-project(deepstream_example LANGUAGES C CXX)
+# 固定的构建工程名，不是项目身份：项目名只写在 project.env 中（apps 镜像在编译之后才复制它）。
+project(dsf LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

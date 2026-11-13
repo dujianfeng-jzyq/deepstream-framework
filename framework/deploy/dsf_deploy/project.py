@@ -11,6 +11,7 @@ from .errors import DeployError
 
 NAME = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
 TEMPLATES = Path(__file__).resolve().parents[2] / "templates"
+README = "README.md"
 
 
 def _rewrite(path: Path, key: str, value: str) -> None:
@@ -24,14 +25,26 @@ def _rewrite(path: Path, key: str, value: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _retitle(readme: Path, name: str) -> None:
+    """README 的第一行一级标题是项目名，其余内容不改。没有 README 或第一行不是一级标题时不动。"""
+    if not readme.is_file():
+        return
+    lines = readme.read_text(encoding="utf-8").split("\n")
+    if lines and lines[0].startswith("# "):
+        lines[0] = f"# {name}"
+        readme.write_text("\n".join(lines), encoding="utf-8")
+
+
 def init_project(root: Path, name: str) -> None:
-    """改项目名（其余字段与注释保留），并清除属于旧名称的渲染产物。
+    """改项目名（其余字段与注释保留）与 README 标题，并清除属于旧名称的渲染产物。
+    项目名只存在于 project.env（和 README 标题）中，其余位置都从 PROJECT_NAME 派生，所以不做全文替换。
     HOST_DATA_PATH 留空时随项目名取默认位置；显式写的值不改动。"""
     if not NAME.match(name):
         raise DeployError(f"invalid project name {name!r}: lowercase letters, digits and '-', "
                           "starting with a letter (it names images, volumes and containers)")
     project_env = root / layout.PROJECT_ENV
     _rewrite(project_env, "PROJECT_NAME", name)
+    _retitle(root / README, name)
     for stale in (root / layout.ENV, root / layout.GENERATED):
         if stale.is_dir():
             shutil.rmtree(stale)

@@ -58,7 +58,7 @@ sudo systemctl restart docker                        # 会重启正在运行的�
 
 ```bash
 scripts/apply-profile.sh server-ds71           # 选择部署方案，渲染 .env 与 generated/
-mkdir -p ~/deepstream-example/data             # 数据目录（默认 ~/<项目名>/data）
+mkdir -p ~/<项目名>/data                         # 数据目录（默认值；项目名见 project.env）
 docker compose build deepstream-base deepstream-apps
 docker compose up -d
 docker compose logs -f example-app

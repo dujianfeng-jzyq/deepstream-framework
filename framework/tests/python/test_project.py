@@ -76,10 +76,12 @@ class InitProjectTest(unittest.TestCase):
         (root / layout.PROJECT_ENV).write_text("# 项目名\nPROJECT_NAME=old\nAPPS_VERSION=1.0.0\n")
         (root / layout.ENV).write_text("PROJECT_NAME=old\n")
         (root / layout.GENERATED / "config").mkdir(parents=True)
+        (root / "README.md").write_text("# old\n\nold 的说明\n")
         with redirect_stdout(StringIO()):
             project.init_project(root, "acme-vision")
         self.assertEqual((root / layout.PROJECT_ENV).read_text(),
                          "# 项目名\nPROJECT_NAME=acme-vision\nAPPS_VERSION=1.0.0\n")
+        self.assertEqual((root / "README.md").read_text(), "# acme-vision\n\nold 的说明\n")  # 只改标题
         self.assertFalse((root / layout.ENV).exists())
         self.assertFalse((root / layout.GENERATED).exists())
         with self.assertRaisesRegex(DeployError, "invalid project name"):
