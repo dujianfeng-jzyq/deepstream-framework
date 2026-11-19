@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run", help="prelabel with this completed run (defaults to the published model)")
     p.add_argument("--conf", type=float, default=0.25, help="confidence threshold (default 0.25)")
     p.add_argument("--device", help="inference device, e.g. 0 or cpu (defaults to the run's device)")
+    p.add_argument("--class", dest="class_", metavar="CLASS",
+                   help="add CLASS candidates to the images that wait for review of CLASS (existing shapes stay)")
 
     p = commands.add_parser("prepare", help="build the dataset of a model from its checked annotations")
     p.add_argument("model")
@@ -163,10 +165,12 @@ def main(argv: list[str] | None = None) -> int:
                     print(line)
         elif args.command == "prelabel":
             model = spec.load(repo, args.model)
-            result = prelabel.prelabel(repo, root, model, args.source, args.run, args.conf, args.device)
+            result = prelabel.prelabel(repo, root, model, args.source, args.run, args.conf, args.device,
+                                       args.class_)
             used = result.model
             name = f"release {used['release']} (run {used['run']})" if "release" in used else f"run {used['run']}"
-            print(f"prelabeled {result.written} images of {args.source} with {name}: {result.boxes} boxes")
+            kind = f"{args.class_} boxes added" if args.class_ else "boxes"
+            print(f"prelabeled {result.written} images of {args.source} with {name}: {result.boxes} {kind}")
             for reason, count in sorted(result.skipped.items()):
                 print(f"  skipped {count} images: {reason}")
             if result.written:

@@ -62,23 +62,36 @@ def statistics(samples_: list[dict], spec: dict) -> Counter:
     return Counter(spec["classes"][o["class"]] for sample in samples_ for o in sample["objects"])
 
 
-def prelabel_shapes(predictions: list[dict], width: int, height: int, spec: dict) -> list[dict]:
-    """后端的预测 → X-AnyLabeling 矩形。框裁剪到图像内，坐标保留两位小数。"""
+def prelabel_shapes(predictions: list[dict], width: int, height: int, classes: list[str]) -> list[dict]:
+    """后端的预测 → X-AnyLabeling 矩形，类别号按预标注模型的 classes 换成名称。框裁剪到图像内，坐标保留两位小数。"""
     shapes = []
     for item in predictions:
         x1, y1, x2, y2 = item["box"]
         box = [round(min(max(x1, 0.0), width), 2), round(min(max(y1, 0.0), height), 2),
                round(min(max(x2, 0.0), width), 2), round(min(max(y2, 0.0), height), 2)]
-        shapes.append(xanylabeling.new_shape(spec["classes"][item["class"]], SHAPE,
+        shapes.append(xanylabeling.new_shape(classes[item["class"]], SHAPE,
                                              xanylabeling.rectangle_points(box)))
     return shapes
 
 
-def corrections(predicted: list[dict], annotation: Annotation) -> Counter:
+def added_shapes(shapes: list[dict], annotation: Annotation, label: str) -> list[dict]:
+    """按类别预标注（§15.4）：标注中已有同类别框（IoU 不低于 KEPT_IOU）的候选不写，重复运行不会叠加。"""
+    existing = [_box(s.points) for s in annotation.shapes
+                if s.shape_type == SHAPE and s.label == label and len(s.points) >= 2]
+    added = []
+    for shape in shapes:
+        box = _box(shape["points"])
+        if all(_iou(box, other) < KEPT_IOU for other in existing):
+            added.append(shape)
+            existing.append(box)
+    return added
+
+
+def corrections(predicted: list[dict], annotation: Annotation, label: str | None = None) -> Counter:
     """预标注写入的形状与人确认后的标注相比：kept（保留，可能微调了位置）、removed（删除或改了类别）、
-    added（人补上的框）。按 IoU 从高到低贪心配对。"""
+    added（人补上的框）。按 IoU 从高到低贪心配对。给出 label 时只看这个类别的框：按类别预标注只写了它。"""
     final = [(shape.label, _box(shape.points)) for shape in annotation.shapes
-             if shape.shape_type == SHAPE and len(shape.points) >= 2]
+             if shape.shape_type == SHAPE and len(shape.points) >= 2 and label in (None, shape.label)]
     proposed = [(shape["label"], _box(shape["points"])) for shape in predicted]
     pairs = sorted(((_iou(a[1], b[1]), i, j) for i, a in enumerate(proposed) for j, b in enumerate(final)
                     if a[0] == b[0]), reverse=True)

@@ -996,9 +996,77 @@ class PrelabelTest(RunTestCase):
         code, _, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id, "--conf", "1.5")
         self.assertIn("--conf must be between 0 and 1", err)
         path = spec.path(self.repo, "m")
-        path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))
+        original = path.read_text()
+        path.write_text(original.replace("  - 防撞桶\n", ""))
         code, _, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
-        self.assertIn("trained with other classes", err)
+        self.assertIn(f"run {self.run_id} cannot prelabel: it has classes that m/model.yaml does not (防撞桶)", err)
+        # 规格新增了类别：训练于旧类别的模型仍可预标注旧类别，人只补新类别（§15.4）
+        path.write_text(original.replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))
+        code, out, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
+        self.assertEqual(code, 0, err)
+        labels = [s.label for s in xanylabeling.read(self.directory / "n_0.json").shapes]
+        self.assertEqual(labels, ["标志牌(圆牌)", "龙门架A"])
+
+
+class ClassPrelabelTest(RunTestCase):
+    """按类别预标注（docs/training.md §15.4）：新增 防撞墩 后，用认识它的 v0 只给复核名单中的图片追加候选框。"""
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.train("run", "m")[0], 0)
+        self.run_id = self.only_run()
+        self.assertEqual(self.train("update", "m", "add", "防撞墩")[0], 0)
+        self.listed = sources.read_record(self.source())["reviews"][0]["files"]
+
+    def v0(self, classes):
+        """把 run 当作训练于这些类别的 v0（假后端预测类别 0 与 1）。"""
+        record = self.record(self.run_id)
+        record["classes"] = classes
+        paths.write_json(self.root / "runs/m" / self.run_id / runs.RECORD, record)
+
+    def prelabel(self):
+        return self.train("prelabel", "m", "--source", "batch-01", "--class", "防撞墩", "--run", self.run_id)
+
+    def labels(self, name):
+        return [s.label for s in xanylabeling.read(self.source() / name).shapes]
+
+    def test_candidates_are_added_to_the_unchecked_images_of_the_review_list(self):
+        code, _, err = self.prelabel()
+        self.assertIn(f"run {self.run_id} cannot prelabel: it does not know 防撞墩", err)
+        self.v0(["防撞墩", "龙门架A"])  # 只需认识这个类别，类别列表不必与规格相同
+        first = xanylabeling.annotation_path(self.source() / self.listed[0])
+        self.backend.during_predict = lambda path: path.name == self.listed[0] and \
+            xanylabeling.update(first, flags={"夜间": True})  # 推理期间人保存了第一张
+        code, out, err = self.prelabel()
+        self.assertEqual(code, 0, err)
+        count = len(self.listed)
+        self.assertIn(f"prelabeled {count - 1} images of batch-01 with run {self.run_id}: {count - 1} 防撞墩 boxes "
+                      "added", out)
+        self.assertIn("skipped 1 images: saved meanwhile", out)
+        [(_, _, images, _, _, agnostic)] = [c for c in self.backend.calls if c[0] == "predict"]
+        self.assertEqual(([p.name for p in images], agnostic), (self.listed, False))
+        second = self.source() / self.listed[1].replace(".jpg", ".json")
+        self.assertEqual(self.labels(second.name), ["标志牌(圆牌)", "防撞墩"])  # 已有的框不动，只追加
+        self.assertFalse(xanylabeling.read(second).checked)
+        self.assertEqual(self.labels(first.name), ["标志牌(圆牌)"])
+        self.backend.during_predict = None
+        code, out, _ = self.prelabel()  # 重复运行不叠加，跳过的那张这次补上
+        self.assertIn(f"prelabeled 1 images of batch-01 with run {self.run_id}: 1 防撞墩 boxes added", out)
+        self.assertIn(f"skipped {count - 1} images: no new candidates", out)
+        xanylabeling.update(second, checked=True)
+        code, out, err = self.train("prepare", "m")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"prelabel of batch-01 by run {self.run_id} for 防撞墩 at ", out)
+        self.assertIn(f": 1 of {count - 1} images checked; 1 of 1 predicted boxes kept (100%), 0 removed, 0 added",
+                      out)
+        code, out, _ = self.prelabel()
+        self.assertIn("skipped 1 images: already checked", out)
+
+    def test_only_classes_with_a_review_list(self):
+        self.v0(CLASSES)
+        code, _, err = self.train("prelabel", "m", "--source", "batch-01", "--class", "龙门架A", "--run", self.run_id)
+        self.assertIn("source batch-01 has no review list for 龙门架A", err)
+        code, _, err = self.train("prelabel", "m", "--source", "batch-01", "--class", "护栏", "--run", self.run_id)
+        self.assertIn("护栏 is not a class of m", err)
 
 
 class UltralyticsPredictTest(unittest.TestCase):

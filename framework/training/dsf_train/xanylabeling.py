@@ -82,6 +82,17 @@ def update(path: Path, **fields) -> None:
     paths.write_json(path, document)
 
 
+def append_shapes(path: Path, shapes: list[dict], expected_sha256: str) -> bool:
+    """在已有标注上追加形状，其余内容原样保留。文件内容与 expected_sha256 不同（选中之后人在工具中保存过）
+    时不写并返回 False。"""
+    if paths.sha256(path) != expected_sha256:
+        return False
+    document = _load(path)
+    document["shapes"] = [*(document.get("shapes") or []), *shapes]
+    paths.write_json(path, document)
+    return True
+
+
 def relabel(path: Path, mapping: dict[str, str]) -> bool:
     """按 mapping 改写形状的类别名，其余内容（包括 checked）原样保留；没有要改的形状时不写，返回是否改写。"""
     document = _load(path)
