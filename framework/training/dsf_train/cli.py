@@ -1,4 +1,4 @@
-"""命令行入口：init / import / accept / prelabel / prepare / run / eval / publish。由 framework/training/dsf-train.py 调用，
+"""命令行入口：init / import / accept / prelabel / prepare / run / eval / publish / update。由 framework/training/dsf-train.py 调用，
 通常经 scripts/train.sh 在训练镜像中运行。"""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, paths, prelabel, publish, runs, sources, spec
+from . import dataset, lock, paths, prelabel, publish, runs, sources, spec
 from .errors import TrainError
 
 
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--display-name", default="")
 
     p = commands.add_parser("import", help="import images and videos into a source for labeling")
-    p.add_argument("model", help="the model whose classes go into the source's labels.txt")
+    p.add_argument("model", help="the model whose classes a new source gets (an existing source must have them)")
     p.add_argument("paths", nargs="+", type=Path, help="image or video files, or directories of them")
     p.add_argument("--source", required=True, help="source name under <train-root>/sources/ (created or extended)")
     p.add_argument("--every", type=float, default=1.0, help="seconds between extracted video frames (default 1)")
@@ -102,6 +102,12 @@ def main(argv: list[str] | None = None) -> int:
                         "and no comparable published model); failed gates are never accepted")
     p.add_argument("--device", help="device for the gate's evaluations (defaults to the run's device)")
 
+    p = commands.add_parser("update", help="show the class dependencies of a model, or confirm its sources' classes")
+    p.add_argument("model")
+    p.add_argument("--confirm", action="store_true",
+                   help="record the current classes of every source in sources.lock.json after reviewing the "
+                        "differences")
+
     args = parser.parse_args(argv)
     repo = (args.repo or paths.repo_root()).resolve()
     try:
@@ -134,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"marked {count} annotations of {args.source} as checked")
         elif args.command == "prepare":
             model = spec.load(repo, args.model)
-            result = dataset.prepare(root, model)
+            result = dataset.prepare(repo, root, model)
             print("\n".join(dataset.report(result, model)))
             for source in model["data"]["sources"]:
                 for line in prelabel.review(root, model, source):
@@ -152,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                       "unchecked prelabels never enter a dataset")
         elif args.command == "run":
             model = spec.load(repo, args.model)
+            lock.check(repo, root, model)
             if args.resume:
                 if args.dataset or args.option:
                     raise TrainError("--resume continues with the run's own dataset and options; "
@@ -176,8 +183,18 @@ def main(argv: list[str] | None = None) -> int:
                     raise TrainError("name the run to publish (train publish <id> without a run only lists them)")
                 print("\n".join(publish.candidates(root, model, args.dataset, repo)))
                 return 0
+            lock.check(repo, root, model)
             result = publish.publish(repo, root, model, args.run, args.dataset, args.accept_metrics, args.device)
             print("\n".join(publish.report(result)))
+        elif args.command == "update":
+            model = spec.load(repo, args.model)
+            if args.confirm:
+                lines = lock.confirm(repo, root, model)
+                print(f"confirmed the classes of the sources of {args.model} in {lock.path(repo, args.model)}")
+                print("\n".join(lines))
+                print(f"  commit {lock.FILE} with the model")
+            else:
+                print("\n".join(lock.status(repo, root, model)))
     except (TrainError, DeployError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

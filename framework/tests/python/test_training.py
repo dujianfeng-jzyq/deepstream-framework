@@ -18,8 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 from deploy_support import ROOT
-from dsf_deploy import models
-from dsf_train import backends, cli, dataset, media, paths, publish, runs, sources, spec, split, xanylabeling
+from dsf_deploy import classes as class_diff, models
+from dsf_train import backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, xanylabeling
 from dsf_train.backends import ultralytics
 from dsf_train.tasks import detect
 from dsf_train.errors import TrainError
@@ -270,7 +270,7 @@ class PrepareTest(TrainingTestCase):
         annotation(self.raw / "a/f_2.json", LABELED, checked=False)
 
     def prepare(self):
-        return dataset.prepare(self.root, self.spec())
+        return dataset.prepare(self.repo, self.root, self.spec())
 
     def test_only_checked_images_enter_the_dataset(self):
         self.import_(self.raw)
@@ -375,6 +375,113 @@ class PrepareTest(TrainingTestCase):
             self.prepare()
 
 
+class ClassDiffTest(unittest.TestCase):
+    def test_differences_by_name_and_position(self):
+        self.assertEqual(class_diff.diff(["a", "b"], ["a", "b"]), [])
+        self.assertEqual(class_diff.diff(["a", "b"], ["a", "b", "c"]), ["added c (class 2)"])
+        self.assertEqual(class_diff.diff(["a", "b", "c"], ["a", "x", "c"]), ["class 1: b -> x"])
+        self.assertEqual(class_diff.diff(["a", "b", "c"], ["b", "c"]),
+                         ["removed a (was class 0)", "renumbered b 1->0, c 2->1"])
+
+
+class ClassDependencyTest(TrainingTestCase):
+    """来源 → 模型的类别依赖：sources.lock.json（docs/training.md §15.1）。"""
+    def setUp(self):
+        super().setUp()
+        image(self.raw / "a/f_0.jpg", "red")
+        image(self.raw / "a/f_1.jpg", "blue")
+        annotation(self.raw / "a/f_0.json", LABELED, checked=True)
+        annotation(self.raw / "a/f_1.json", NEGATIVE, checked=True)
+        self.import_(self.raw)
+
+    def prepare(self):
+        return dataset.prepare(self.repo, self.root, self.spec())
+
+    def set_source_classes(self, names, source="batch-01"):
+        record = sources.read_record(self.source(source))
+        record["classes"] = names
+        paths.write_json(self.source(source) / paths.SOURCE_RECORD, record)
+
+    def recorded(self):
+        return json.loads(lock.path(self.repo, "m").read_text(encoding="utf-8"))
+
+    def test_prepare_records_the_sources_and_refuses_changes_until_confirmed(self):
+        self.assertEqual(sources.read_record(self.source())["classes"], CLASSES)
+        result = self.prepare()
+        self.assertIn("  note: recorded the classes of source batch-01 in "
+                      f"{lock.path(self.repo, 'm')} (commit it with the model)", dataset.report(result, self.spec()))
+        self.assertEqual(self.recorded(), {"schema": 1, "sources": {"batch-01": CLASSES}})
+        self.assertEqual(self.prepare().notes, [])  # 记录不变时不再写入
+        self.set_source_classes(CLASSES + ["新类别"])  # 另一个模型给共用的来源新增了类别
+        with self.assertRaisesRegex(TrainError, "changed since m confirmed them(.|\n)*source batch-01:\n"
+                                                "    added 新类别 \\(class 3\\)(.|\n)*train update m --confirm"):
+            self.prepare()
+        code, _, err = self.train("run", "m")
+        self.assertEqual(code, 1)
+        self.assertIn("added 新类别 (class 3)", err)
+        code, out, _ = self.train("update", "m")
+        self.assertEqual(code, 0)
+        self.assertIn("  source batch-01: changed since confirmed:\n    added 新类别 (class 3)", out)
+        code, out, _ = self.train("update", "m", "--confirm")
+        self.assertEqual(code, 0)
+        self.assertIn("  source batch-01:\n    added 新类别 (class 3)", out)
+        self.assertEqual(self.recorded()["sources"]["batch-01"], CLASSES + ["新类别"])
+        self.prepare()
+        self.assertIn("  source batch-01: confirmed", self.train("update", "m")[1])
+
+    def test_classes_of_the_source_the_model_does_not_use_are_ignored(self):
+        self.set_source_classes(CLASSES + ["护栏"])
+        annotation(self.source() / "f_0.json", LABELED, checked=True,
+                   shapes=[{"label": "护栏", "points": [[1, 1], [9, 9]], "shape_type": "rectangle"}])
+        sample = next(s for s in self.prepare().manifest["samples"] if s["image"] == "f_0.jpg")
+        self.assertEqual(sample["objects"], [])
+        annotation(self.source() / "f_0.json", LABELED, checked=True,
+                   shapes=[{"label": "护拦", "points": [[1, 1], [9, 9]], "shape_type": "rectangle"}])
+        with self.assertRaisesRegex(TrainError, "batch-01/f_0.jpg: unknown class '护拦'"):
+            self.prepare()  # 两边都没有的标签仍是错误：拼写错误不会悄悄变成新类别
+
+    def test_every_class_of_the_model_must_be_in_every_source(self):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))  # 手改规格
+        with self.assertRaisesRegex(TrainError, "source batch-01 has no class 新类别(.|\n)*train update m add"):
+            self.prepare()
+        self.assertFalse(lock.path(self.repo, "m").exists())
+        code, _, err = self.train("update", "m", "--confirm")
+        self.assertEqual(code, 1)
+        self.assertIn("source batch-01 has no class 新类别", err)
+        with self.assertRaisesRegex(TrainError, "source batch-01 has no class 新类别"):
+            sources.Importer(self.root, "batch-01", CLASSES + ["新类别"])  # 导入也不能绕过
+
+    def test_sources_without_recorded_classes_use_labels_txt(self):
+        record = sources.read_record(self.source())
+        del record["classes"]  # 实现类别依赖之前导入的来源
+        (self.source() / paths.SOURCE_LABELS).write_text("\n".join(CLASSES + ["护栏"]) + "\n", encoding="utf-8")
+        paths.write_json(self.source() / paths.SOURCE_RECORD, record)
+        self.assertEqual(sources.class_list(self.source(), record), CLASSES + ["护栏"])
+        self.prepare()
+        self.assertEqual(self.recorded()["sources"]["batch-01"], CLASSES + ["护栏"])
+        image(self.tmp / "more/x.jpg", "white")
+        sources.Importer(self.root, "batch-01", CLASSES[:2]).run([self.tmp / "more"])  # 另一个模型继续导入
+        self.assertEqual(sources.read_record(self.source())["classes"], CLASSES + ["护栏"])
+        self.assertEqual((self.source() / paths.SOURCE_LABELS).read_text(encoding="utf-8").splitlines(),
+                         CLASSES + ["护栏"])
+
+    def test_sources_added_to_or_removed_from_the_model(self):
+        self.prepare()
+        image(self.tmp / "more/x.jpg", "white")
+        annotation(self.tmp / "more/x.json", NEGATIVE, checked=True)
+        self.import_(self.tmp / "more", source="batch-02")
+        self.set_data(sources=["batch-01", "batch-02"])
+        code, _, err = self.train("run", "m")
+        self.assertIn("does not record the classes of batch-02: run train prepare m first", err)
+        self.assertEqual(self.prepare().notes, [f"recorded the classes of source batch-02 in "
+                                                f"{lock.path(self.repo, 'm')} (commit it with the model)"])
+        self.set_data(sources=["batch-02"])
+        self.assertEqual(self.prepare().notes,
+                         [f"dropped source batch-01 from {lock.path(self.repo, 'm')}: it is no longer in data.sources"])
+        self.assertEqual(sorted(self.recorded()["sources"]), ["batch-02"])
+
+
 class FakeBackend(types.ModuleType):
     """记录调用的假后端；fail 设为异常时训练在写出 last 之后抛出它。"""
     NAME = "fake"
@@ -460,7 +567,7 @@ class RunTestCase(TrainingTestCase):
                 annotation(self.raw / group / f"{group}.json", LABELED, checked=True)
             index += 1
         self.import_(self.raw)
-        self.dataset_id = dataset.prepare(self.root, self.spec()).dataset_id
+        self.dataset_id = dataset.prepare(self.repo, self.root, self.spec()).dataset_id
 
     def tearDown(self):
         del backends.BACKENDS["fake"]
@@ -558,7 +665,7 @@ class RunTest(RunTestCase):
         image(self.tmp / "more/x/x.jpg", "white")
         annotation(self.tmp / "more/x/x.json", LABELED, checked=True)
         self.import_(self.tmp / "more")
-        newer = dataset.prepare(self.root, self.spec()).dataset_id
+        newer = dataset.prepare(self.repo, self.root, self.spec()).dataset_id
         code, out, err = self.train("eval", "m", run)
         self.assertEqual(code, 0, err)
         self.assertEqual(sorted(self.record(run)["evaluations"]), sorted([self.dataset_id, newer]))
@@ -625,7 +732,7 @@ class PrelabelTest(RunTestCase):
     def test_prelabels_enter_the_dataset_only_once_checked_and_corrections_are_counted(self):
         self.set_data(sources=["batch-01", "batch-02"])
         self.assertEqual(self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)[0], 0)
-        names = lambda: {s["image"] for s in dataset.prepare(self.root, self.spec()).manifest["samples"]
+        names = lambda: {s["image"] for s in dataset.prepare(self.repo, self.root, self.spec()).manifest["samples"]
                          if s["source"] == "batch-02"}
         self.assertEqual(names(), set())
         # n_0：删掉龙门架A，补一个防撞桶，微调圆牌；n_1：原样确认。
@@ -933,7 +1040,7 @@ class PublishListTest(RunTestCase):
         image(self.tmp / "more/x/x.jpg", "white")
         annotation(self.tmp / "more/x/x.json", LABELED, checked=True)
         self.import_(self.tmp / "more")
-        newer = dataset.prepare(self.root, self.spec()).dataset_id            # 新数据集上还没有评估
+        newer = dataset.prepare(self.repo, self.root, self.spec()).dataset_id            # 新数据集上还没有评估
         out = self.train("publish", "m")[1]
         self.assertIn(f"dataset {newer}", out)
         self.assertIn("not evaluated on this dataset yet: train eval m <run>", out)

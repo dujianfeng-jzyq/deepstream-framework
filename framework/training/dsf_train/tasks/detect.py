@@ -23,10 +23,10 @@ CONSISTENCY = {"compare_conf": 0.05, "class_conf": 0.25, "max_box_diff": 0.5, "m
 KEPT_IOU = 0.5
 
 
-def samples(annotation: Annotation, spec: dict) -> tuple[list[dict], list[str], Counter]:
-    """返回 (对象, 问题, 被忽略的其他形状类型计数)。对象的 box 是像素坐标 [x1, y1, x2, y2]。"""
+def samples(annotation: Annotation, spec: dict, ignore: set[str]) -> tuple[list[dict], list[str], Counter]:
+    """返回 (对象, 问题, 被忽略的其他形状类型计数)。对象的 box 是像素坐标 [x1, y1, x2, y2]。
+    ignore 中的标签丢弃（来源中本模型不用的类别与 data.ignore_classes），其余不在 classes 中的标签是错误。"""
     classes = {name: index for index, name in enumerate(spec["classes"])}
-    ignore = set(spec["data"].get("ignore_classes") or [])
     objects, problems, ignored = [], [], Counter()
     for shape in annotation.shapes:
         if shape.shape_type != SHAPE:

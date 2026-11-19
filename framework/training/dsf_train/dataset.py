@@ -18,7 +18,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import backends, paths, sources, split, tasks, xanylabeling
+from . import backends, lock, paths, sources, split, tasks, xanylabeling
 from .errors import TrainError
 
 SCHEMA = 1
@@ -33,20 +33,31 @@ class Result:
     manifest: dict
     skipped: Counter = field(default_factory=Counter)  # (来源, 原因) → 数量
     ignored_shapes: Counter = field(default_factory=Counter)
+    notes: list[str] = field(default_factory=list)
 
 
-def prepare(root: Path, spec: dict) -> Result:
+def prepare(repo: Path, root: Path, spec: dict) -> Result:
+    """类别依赖（§15.1）先于读取标注检查：模型的类别必须都在每个来源中，来源的类别必须与 sources.lock.json
+    的记录相同（记录中没有的来源在这里补记）。"""
     task = tasks.get(spec["task"])
     backend = backends.get(spec["train"]["backend"] if isinstance(spec.get("train"), dict) else None, task.NAME)
     data = spec["data"]
     if not data["sources"]:
         raise TrainError(f"data.sources of {spec['id']} is empty: add the sources you imported to model.yaml")
+    source_classes = lock.current(root, spec)
+    problems = lock.missing_classes(spec, source_classes)
+    if problems:
+        raise TrainError("\n".join(problems))
+    notes = lock.check(repo, root, spec, record_new=True, now=source_classes)
     params = data["split"]
+    declared_ignore = set(data.get("ignore_classes") or [])
     samples, problems = [], []
     skipped, ignored = Counter(), Counter()
     for source in data["sources"]:
         directory = paths.source_dir(root, source)
         record = sources.read_record(directory)
+        # 来源中有、模型不用的类别（其他模型的类别，或本模型 retire 的类别）在读取时忽略。
+        ignore = declared_ignore | (set(source_classes[source]) - set(spec["classes"]))
         for name, info in sorted(record["images"].items()):
             image = directory / name
             annotation_path = xanylabeling.annotation_path(image)
@@ -68,7 +79,7 @@ def prepare(root: Path, spec: dict) -> Result:
                 problems.append(f"{where}: the annotation is for a {annotation.width}x{annotation.height} image, "
                                 f"the image is {info['width']}x{info['height']}")
                 continue
-            objects, found, other_shapes = task.samples(annotation, spec)
+            objects, found, other_shapes = task.samples(annotation, spec, ignore)
             problems += [f"{where}: {problem}" for problem in found]
             ignored.update(other_shapes)
             samples.append({"source": source, "image": name, "sha256": info["sha256"],
@@ -105,7 +116,7 @@ def prepare(root: Path, spec: dict) -> Result:
             shutil.rmtree(staging, ignore_errors=True)
             raise
     (models_root / paths.LATEST).write_text(dataset_id + "\n", encoding="utf-8")
-    return Result(dataset_id, directory, reused, manifest, skipped, ignored)
+    return Result(dataset_id, directory, reused, manifest, skipped, ignored, notes)
 
 
 def locate(root: Path, spec: dict, dataset_id: str | None = None) -> tuple[str, Path, dict]:
@@ -132,7 +143,8 @@ def report(result: Result, spec: dict) -> list[str]:
     task = tasks.get(spec["task"])
     manifest = result.manifest
     state = "reused" if result.reused else "created"
-    lines = [f"dataset {result.dataset_id} ({state}): {result.directory}"]
+    lines = [f"  note: {note}" for note in result.notes]
+    lines.append(f"dataset {result.dataset_id} ({state}): {result.directory}")
     by_split = {name: [s for s in manifest["samples"] if s["split"] == name] for name in split.SPLITS}
     for name, items in by_split.items():
         negatives = sum(1 for s in items if not s["objects"])

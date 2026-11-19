@@ -5,7 +5,8 @@ sources/<来源>/source.json 记录每张图：
   origin   原始文件；视频帧另有 time_ms
   group    采集组，决定划分：video:<视频摘要>、prefix:<文件名前缀>、dir:<来源>/<子目录>
   width/height
-以及 accepted：用 train accept 批量确认的记录。
+以及 classes：来源的类别列表，labels.txt 是它给 X-AnyLabeling 的副本（§15.1）；accepted：用 train accept
+批量确认的记录。
 """
 
 from __future__ import annotations
@@ -41,6 +42,26 @@ def read_record(directory: Path) -> dict:
     return record
 
 
+def class_list(directory: Path, record: dict) -> list[str]:
+    """来源的类别列表。记录还没有 classes 时取 labels.txt：导入一向按模型的类别写出它（迁移，§15.1）。"""
+    value = record.get("classes")
+    if value is None:
+        labels = directory / paths.SOURCE_LABELS
+        if not labels.is_file():
+            raise TrainError(f"{directory}: neither {paths.SOURCE_RECORD} nor {paths.SOURCE_LABELS} gives the "
+                             "classes of the source")
+        value = [line.strip() for line in labels.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not isinstance(value, list) or not all(isinstance(c, str) and c for c in value) or \
+            len(set(value)) != len(value):
+        raise TrainError(f"{directory}: the classes of the source must be distinct names")
+    return value
+
+
+def write_labels(directory: Path, names: list[str]) -> None:
+    """标注工具的预设类别：导入 labels.txt，避免手输类别名。"""
+    (directory / paths.SOURCE_LABELS).write_text("".join(f"{c}\n" for c in names), encoding="utf-8")
+
+
 def known_images(root: Path) -> dict[str, str]:
     """全部来源中图像的 sha256 → "来源/文件名"：同一张图不能进入两个来源（可能一边训练一边测试）。"""
     known = {}
@@ -62,12 +83,20 @@ class Importer:
             raise TrainError(f"--group-by must be one of {', '.join(GROUP_BY)}")
         self.directory = paths.source_dir(root, source)
         self.source = source
-        self.classes = classes
         self.group_by = group_by
         self.every_s, self.dedupe, self.max_frames = every_s, dedupe, max_frames
         self.record_path = self.directory / paths.SOURCE_RECORD
-        self.record = read_record(self.directory) if self.record_path.is_file() else \
-            {"schema": SCHEMA, "source": source, "created": _now(), "images": {}, "accepted": []}
+        if self.record_path.is_file():
+            # 已有的来源保留自己的类别：其他模型可能也在用它，模型的类别只需都在其中（§15.1）。
+            self.record = read_record(self.directory)
+            self.record["classes"] = existing = class_list(self.directory, self.record)
+            missing = [name for name in classes if name not in existing]
+            if missing:
+                raise TrainError(f"source {source} has no class {', '.join(missing)}; add the classes to the model "
+                                 f"with train update first, which also adds them to the source")
+        else:
+            self.record = {"schema": SCHEMA, "source": source, "created": _now(), "classes": list(classes),
+                           "images": {}, "accepted": []}
         self.known = known_images(root)
         self.report: Counter = Counter()
         self.notes: list[str] = []
@@ -87,8 +116,7 @@ class Importer:
                     self._video(path)
                 elif suffix != ".json":  # 标注随同名图像导入
                     self.report["other files skipped"] += 1
-        # 标注工具的预设类别：导入 labels.txt，避免手输类别名。
-        (self.directory / paths.SOURCE_LABELS).write_text("".join(f"{c}\n" for c in self.classes), encoding="utf-8")
+        write_labels(self.directory, self.record["classes"])
         paths.write_json(self.record_path, self.record)
 
     def _name(self, stem: str, suffix: str, digest: str) -> str:
