@@ -82,6 +82,19 @@ def update(path: Path, **fields) -> None:
     paths.write_json(path, document)
 
 
+def relabel(path: Path, mapping: dict[str, str]) -> bool:
+    """按 mapping 改写形状的类别名，其余内容（包括 checked）原样保留；没有要改的形状时不写，返回是否改写。"""
+    document = _load(path)
+    changed = False
+    for shape in document.get("shapes") or []:
+        if isinstance(shape, dict) and shape.get("label") in mapping:
+            shape["label"] = mapping[shape["label"]]
+            changed = True
+    if changed:
+        paths.write_json(path, document)
+    return changed
+
+
 # 预标注写出的文件按这个版本保存的格式：顶层与形状的字段、键的顺序都与样例相同。
 VERSION = "4.0.6"
 

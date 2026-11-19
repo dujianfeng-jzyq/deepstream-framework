@@ -302,7 +302,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 
 ### 15.3 操作：`train update <id> <操作>`
 
-每次运行先完成全部检查（冲突、可写），再写入：来源记录 → 标注文件 → `labels.txt` → `model.yaml`。打印每个来源与模型的类别变化、撤销的图片数、自动修复的内容与需要人处理的依赖。改写来源期间不要在 X-AnyLabeling 中保存这个来源的图片；完成后在工具中重新打开目录并重新导入 `labels.txt`。
+每次运行先完成全部检查（冲突、可写；起点必须是确认过的状态），再写入：标注文件 → 来源记录与 `labels.txt` → `sources.lock.json` → 其他模型的 `model.yaml` → 本模型的 `model.yaml`。标注先改：中断时来源记录还是旧名称，`prepare` 遇到新名称报未知类别，不会在不一致的状态下训练；重新执行同一命令即可完成，已改过的文件跳过。`model.yaml` 只改写类别列表中受影响的行，注释与其他内容不变。打印每个来源与模型的类别变化、撤销的图片数、自动修复的内容与需要人处理的依赖。改写来源期间不要在 X-AnyLabeling 中保存这个来源的图片；完成后在工具中重新打开目录并重新导入 `labels.txt`。
 
 | 操作 | 本模型 | 来源 | 其他模型与服务 |
 |---|---|---|---|
@@ -355,7 +355,7 @@ train prepare road-assets && train run road-assets && train publish road-assets 
 ### 15.7 实现顺序
 
 1. `sources.lock.json` 与迁移；`prepare`、`run`、`publish` 的依赖检查、差异报告与 `--confirm`；读取时忽略来源中本模型不用的类别。**已实现**
-2. `rename`、`retire`（含 `--into`）及其自动修复与冲突检查。
+2. `rename`、`retire`（含 `--into`）及其自动修复与冲突检查。**已实现**；规格还不支持 `cascade`，二级模型的 `cascade.classes` 改写与引用检查随二级模型（§12）实现。
 3. `add`：撤销与复核名单、`--from`、`--skip-source`；`prepare` 的复核进度；`accept` 的限制。
 4. `prelabel --class` 与放宽的类别检查。
 5. `lock-models` 与服务的打包校验；共有类别上的退化比较；`release.json` 中的类别变化。

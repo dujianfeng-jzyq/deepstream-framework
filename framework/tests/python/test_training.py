@@ -19,7 +19,8 @@ from unittest import mock
 
 from deploy_support import ROOT
 from dsf_deploy import classes as class_diff, models
-from dsf_train import backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, xanylabeling
+from dsf_train import (backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, update,
+                       xanylabeling)
 from dsf_train.backends import ultralytics
 from dsf_train.tasks import detect
 from dsf_train.errors import TrainError
@@ -480,6 +481,132 @@ class ClassDependencyTest(TrainingTestCase):
         self.assertEqual(self.prepare().notes,
                          [f"dropped source batch-01 from {lock.path(self.repo, 'm')}: it is no longer in data.sources"])
         self.assertEqual(sorted(self.recorded()["sources"]), ["batch-02"])
+
+
+class WriteClassesTest(TrainingTestCase):
+    def test_classes_are_rewritten_in_place(self):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("  - 龙门架A\n", "  - 龙门架A  # 门架\n"))
+        spec.write_classes(self.repo, "m", ["标志牌(圆牌)", "门架", "防撞桶"])
+        text = path.read_text()
+        self.assertIn("  - 门架  # 门架\n", text)
+        self.assertIn("# 顺序即类别号", text)  # 注释与其他字段不变
+        spec.write_classes(self.repo, "m", ["标志牌(圆牌)", "防撞桶"])
+        self.assertEqual(self.spec()["classes"], ["标志牌(圆牌)", "防撞桶"])
+        self.assertNotIn("门架", path.read_text())  # 删除的项连同行尾注释删去
+        spec.write_classes(self.repo, "m", ["标志牌(圆牌)", "防撞桶", "a: b"])
+        self.assertEqual(self.spec()["classes"], ["标志牌(圆牌)", "防撞桶", "a: b"])
+        text = path.read_text()
+        start = text.index("classes:\n")
+        end = text.index("\n\n", start)
+        path.write_text(text[:start] + "classes: [x, y]" + text[end:])  # 流式列表
+        spec.write_classes(self.repo, "m", ["x"])
+        self.assertEqual(self.spec()["classes"], ["x"])
+
+
+class UpdateTest(TrainingTestCase):
+    """train update rename / retire（docs/training.md §15.3）。m 与 m2 共用 batch-01，m2 只用其中两类。"""
+    def setUp(self):
+        super().setUp()
+        image(self.raw / "a/f_0.jpg", "red")
+        image(self.raw / "a/f_1.jpg", "blue")
+        annotation(self.raw / "a/f_0.json", LABELED, checked=True)  # 一个 标志牌(圆牌) 框
+        annotation(self.raw / "a/f_1.json", LABELED, checked=False,
+                   shapes=[{"label": "龙门架A", "points": [[1, 1], [9, 9]], "shape_type": "rectangle"}])
+        self.import_(self.raw)
+        (self.repo / "models/m2").mkdir()
+        text = spec.skeleton("m2", "detect", ["龙门架A", "防撞桶"]).replace("  sources: []", "  sources: [batch-01]")
+        spec.path(self.repo, "m2").write_text(text, encoding="utf-8")
+        for model_id in ("m", "m2"):
+            dataset.prepare(self.repo, self.root, spec.load(self.repo, model_id))
+
+    def labels(self, name):
+        return [s.label for s in xanylabeling.read(self.source() / name).shapes]
+
+    def source_classes(self):
+        return sources.read_record(self.source())["classes"]
+
+    def locked(self, model_id):
+        return lock.read(self.repo, model_id)["batch-01"]
+
+    def test_rename_rewrites_the_sources_and_follows_the_models_sharing_them(self):
+        code, out, err = self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  source batch-01: 1 annotations rewritten", out)
+        self.assertEqual(self.labels("f_0.json"), ["圆牌"])
+        self.assertTrue(xanylabeling.read(self.source() / "f_0.json").checked)  # checked 不变
+        renamed = ["圆牌", "龙门架A", "防撞桶"]
+        self.assertEqual(self.source_classes(), renamed)
+        self.assertEqual((self.source() / paths.SOURCE_LABELS).read_text(encoding="utf-8").splitlines(), renamed)
+        self.assertEqual(self.spec()["classes"], renamed)
+        self.assertEqual(spec.load(self.repo, "m2")["classes"], ["龙门架A", "防撞桶"])  # 不用它的模型不变
+        self.assertEqual((self.locked("m"), self.locked("m2")), (renamed, renamed))  # 两边的记录都自动更新
+        for model_id in ("m", "m2"):
+            dataset.prepare(self.repo, self.root, spec.load(self.repo, model_id))
+        # 共用的类别：m2 一起改名
+        code, out, err = self.train("update", "m", "rename", "龙门架A", "门架")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(spec.load(self.repo, "m2")["classes"], ["门架", "防撞桶"])
+        self.assertIn("  model m2: class 0 renamed", out)
+        self.assertEqual(self.labels("f_1.json"), ["门架"])
+        dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2"))
+
+    def test_rename_conflicts_are_found_before_anything_changes(self):
+        code, _, err = self.train("update", "m", "rename", "龙门架A", "防撞桶")
+        self.assertIn("m already has a class 防撞桶", err)
+        record = sources.read_record(self.source())
+        record["classes"] = CLASSES + ["圆牌"]
+        paths.write_json(self.source() / paths.SOURCE_RECORD, record)
+        code, _, err = self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")
+        self.assertIn("not confirmed for m", err)  # 起点必须是确认过的状态
+        self.train("update", "m", "--confirm")
+        code, _, err = self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")
+        self.assertIn("source batch-01 already has a class 圆牌", err)
+        self.assertEqual(self.labels("f_0.json"), ["标志牌(圆牌)"])
+
+    def test_retire_removes_the_class_from_the_model_only(self):
+        code, out, err = self.train("update", "m", "retire", "标志牌(圆牌)")
+        self.assertEqual(code, 0, err)
+        self.assertIn("龙门架A is now class 0", out)
+        self.assertEqual(self.spec()["classes"], ["龙门架A", "防撞桶"])
+        self.assertEqual(self.source_classes(), CLASSES)  # 来源不变
+        self.assertEqual(self.labels("f_0.json"), ["标志牌(圆牌)"])
+        sample = next(s for s in dataset.prepare(self.repo, self.root, self.spec()).manifest["samples"]
+                      if s["image"] == "f_0.jpg")
+        self.assertEqual(sample["objects"], [])  # 读取时忽略
+
+    def test_retire_into_merges_in_the_sources(self):
+        code, _, err = self.train("update", "m", "retire", "龙门架A", "--into", "防撞桶")
+        self.assertEqual(code, 1)
+        self.assertIn("model m2 has 龙门架A as a class of its own", err)
+        code, out, err = self.train("update", "m", "retire", "标志牌(圆牌)", "--into", "防撞桶")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.labels("f_0.json"), ["防撞桶"])
+        self.assertEqual(self.source_classes(), ["龙门架A", "防撞桶"])
+        self.assertEqual(self.spec()["classes"], ["龙门架A", "防撞桶"])
+        self.assertEqual(self.locked("m"), ["龙门架A", "防撞桶"])
+        self.assertIn("m2 must review the changed sources: train update m2 --confirm", out)
+        dataset.prepare(self.repo, self.root, self.spec())
+        with self.assertRaisesRegex(TrainError, "removed 标志牌\\(圆牌\\) \\(was class 0\\)"):
+            dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2"))
+
+    def test_an_interrupted_update_completes_when_run_again(self):
+        original = spec.write_classes
+
+        def interrupted(*args):
+            raise KeyboardInterrupt
+        with mock.patch.object(spec, "write_classes", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                update.rename(self.repo, self.root, self.spec(), "龙门架A", "门架")
+        self.assertEqual(self.source_classes(), ["标志牌(圆牌)", "门架", "防撞桶"])  # 来源已改，规格未改
+        with self.assertRaisesRegex(TrainError, "unknown class '门架'|has no class 龙门架A"):
+            dataset.prepare(self.repo, self.root, self.spec())
+        self.assertIs(spec.write_classes, original)
+        update.rename(self.repo, self.root, self.spec(), "龙门架A", "门架")
+        self.assertEqual(self.spec()["classes"], ["标志牌(圆牌)", "门架", "防撞桶"])
+        self.assertEqual(spec.load(self.repo, "m2")["classes"], ["门架", "防撞桶"])
+        for model_id in ("m", "m2"):
+            dataset.prepare(self.repo, self.root, spec.load(self.repo, model_id))
 
 
 class FakeBackend(types.ModuleType):

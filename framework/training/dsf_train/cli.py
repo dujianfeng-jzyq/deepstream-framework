@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, lock, paths, prelabel, publish, runs, sources, spec
+from . import dataset, lock, paths, prelabel, publish, runs, sources, spec, update
 from .errors import TrainError
 
 
@@ -102,8 +102,15 @@ def main(argv: list[str] | None = None) -> int:
                         "and no comparable published model); failed gates are never accepted")
     p.add_argument("--device", help="device for the gate's evaluations (defaults to the run's device)")
 
-    p = commands.add_parser("update", help="show the class dependencies of a model, or confirm its sources' classes")
+    p = commands.add_parser("update", help="change the classes of a model, or show and confirm its class dependencies",
+                            description="Without an operation, show the classes and the state of every source.")
     p.add_argument("model")
+    p.add_argument("operation", nargs="?", choices=("rename", "retire"),
+                   help="rename <old> <new>: rename a class here, in the sources and in the models sharing them; "
+                        "retire <class>: remove a class from this model (the sources keep it)")
+    p.add_argument("names", nargs="*", help="the class names the operation takes")
+    p.add_argument("--into", metavar="CLASS",
+                   help="with retire: merge the class into CLASS in the sources too (relabels the annotations)")
     p.add_argument("--confirm", action="store_true",
                    help="record the current classes of every source in sources.lock.json after reviewing the "
                         "differences")
@@ -188,7 +195,16 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(publish.report(result)))
         elif args.command == "update":
             model = spec.load(repo, args.model)
-            if args.confirm:
+            arity = {"rename": 2, "retire": 1, None: 0}[args.operation]
+            if len(args.names) != arity or (args.into and args.operation != "retire") or \
+                    (args.confirm and args.operation):
+                raise TrainError("usage: train update <id> [rename <old> <new> | retire <class> [--into <class>] "
+                                 "| --confirm]")
+            if args.operation == "rename":
+                print("\n".join(update.rename(repo, root, model, *args.names).lines))
+            elif args.operation == "retire":
+                print("\n".join(update.retire(repo, root, model, args.names[0], args.into).lines))
+            elif args.confirm:
                 lines = lock.confirm(repo, root, model)
                 print(f"confirmed the classes of the sources of {args.model} in {lock.path(repo, args.model)}")
                 print("\n".join(lines))
