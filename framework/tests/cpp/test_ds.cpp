@@ -142,6 +142,16 @@ TEST(mux_infer_and_outputs_build_expected_graph) {
   CHECK(graph.Contains("enc"));
   CHECK_EQ(graph.nodes()[static_cast<std::size_t>(graph.Find("enc").Pad("").element)].factory,
            std::string("nvv4l2h265enc"));
+  // 关键帧只能是 IDR：间隔由 idrinterval 决定，普通 I 帧关闭。录像分段与中途加入的观看端
+  // 从任一关键帧开始都能解码。
+  CHECK_EQ(Property(graph, "enc", "idrinterval"), std::string("30"));
+  CHECK_EQ(Property(graph, "enc", "iframeinterval"), std::string("2147483647"));
+  EncoderSpec custom;
+  custom.iframe_interval = 50;
+  custom.properties = {{"iframeinterval", "25", "encoder.properties.iframeinterval"}};
+  AddEncoder(graph, tiler, custom, "enc2");
+  CHECK_EQ(Property(graph, "enc2", "idrinterval"), std::string("50"));
+  CHECK_EQ(Property(graph, "enc2", "iframeinterval"), std::string("25"));  // properties 优先
   const std::string text = graph.Describe();
   CHECK(text.find("src1_nvmm -> mux.sink_1") != std::string::npos);
   CHECK(text.find("pgie -> sgie") != std::string::npos);

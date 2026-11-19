@@ -187,7 +187,7 @@ Element AddDemux(Graph& graph, const gst::Endpoint& input, const std::string& na
 struct EncoderSpec {
   std::string codec = "h264";  // h264 | h265
   int bitrate = 4000000;
-  int iframe_interval = 30;
+  int iframe_interval = 30;  // 关键帧间隔（帧）；关键帧都是 IDR，每个都能独立起播
   // 输入时间戳相邻两帧相差超过该值（直播源断流恢复）时请求关键帧，由应用为每个编码器登记
   // app::KeyframeOnGap 实现；块本身只组图。0 表示不请求。
   int keyframe_on_gap_ms = 1000;

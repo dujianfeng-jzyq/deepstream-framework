@@ -3,6 +3,7 @@
 #include "dsf/ds/blocks.h"
 
 #include <cmath>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -415,7 +416,15 @@ Element AddEncoder(Graph& graph, const gst::Endpoint& input, const EncoderSpec& 
                    const std::string& name) {
   Element convert = graph.Add("nvvideoconvert", name + "_conv");
   Element encoder = graph.Add(spec.codec == "h265" ? "nvv4l2h265enc" : "nvv4l2h264enc", name);
-  encoder.Set("bitrate", spec.bitrate).Set("iframeinterval", spec.iframe_interval).Apply(spec.properties);
+  // 关键帧只能是 IDR：普通 I 帧之后的 P 帧仍可参考它之前的帧，而录像在任意关键帧处切分、
+  // 观看端在任意关键帧处加入，从普通 I 帧开始解码会缺参考帧而花屏。所以关键帧间隔由 idrinterval
+  // 决定，iframeinterval 设为不会到达的值以关闭普通 I 帧：dGPU 上两者相等时编码器在每个 IDR 之后
+  // 紧跟一个普通 I 帧（h264；实测 DeepStream 7.1），iframeinterval 为 0 或默认值 2^32-1 时同样如此。
+  constexpr int kNoIntraFrames = std::numeric_limits<int>::max();
+  encoder.Set("bitrate", spec.bitrate)
+      .Set("iframeinterval", kNoIntraFrames)
+      .Set("idrinterval", spec.iframe_interval)
+      .Apply(spec.properties);
   graph.Link(input, convert);
   graph.Link(convert, encoder);
   return encoder;

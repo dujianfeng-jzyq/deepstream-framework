@@ -115,7 +115,7 @@ sometimes pad（nvurisrcbin、decodebin）在 pad 出现时自动连接。属性
 | `AddMetaTap` | `ImageSpec::Read` | 元数据采集点（identity）；启用图片编码时前面加 queue |
 | `AddOsd` | `OsdSpec::Read` | nvdsosd（前后各一次格式转换） |
 | `AddTiler` / `AddDemux` | `TilerSpec::Read` | 多路拼接 / 按源拆分（`demux.Pad("src_i")`） |
-| `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；编码器属性在 Jetson 与 dGPU 不同，用 `properties`；`keyframe_on_gap_ms`（默认 1000）供应用登记 `app::KeyframeOnGap` |
+| `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；关键帧只能是 IDR：`iframe_interval` 设为 `idrinterval`，普通 I 帧关闭（`iframeinterval` 取 int 最大值；它与 `idrinterval` 相等时 dGPU 编码器在每个 IDR 后紧跟一个普通 I 帧），录像分段与中途加入的观看端都能从关键帧起播；编码器属性在 Jetson 与 dGPU 不同，用 `properties`；`keyframe_on_gap_ms`（默认 1000）供应用登记 `app::KeyframeOnGap` |
 | `AddRtspOut` / `AddFakeSink` | — | rtspclientsink / fakesink |
 | `record::AddSegmentSink` | — | parser + splitmuxsink(mp4mux) |
 
