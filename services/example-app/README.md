@@ -7,6 +7,7 @@
 - `src/main.cpp`：元数据采集、录像器、发布通道与就绪指标的装配
 - `templates/config/example-app.yaml`：配置模板，渲染到 `generated/config/example-app.yaml`；测试保证模板的每个字段都被读取
 - `compose.yaml`：服务定义；GPU 等平台差异写在 `profiles/*.yaml` 的 `services.example-app`
+- `models.lock.json`：确认过的 `road-assets` 发布类别（工具写入，不手改；`docs/training.md` §15.1）。模型重新发布时类别变了，打包前的模型校验失败并打印差异；看过差异、确认本服务的配置与下游不需要修改（或已改好）后运行 `framework/deploy/dsf-deploy.py lock-models example-app` 重写并提交。示例按检测消息的 `label` 名称而不是类别号识别类别，所以通常只需确认
 
 现场参数：`CAMERA_ID`（也是 RTSP 输出路径 `<编号>-out`，只用字母、数字与 `_ . ~ - :`）、`RTSP_URL`、`RTSP_PASSWORD`、`REDIS_PASSWORD`、`MEDIAMTX_PUBLISH_PASSWORD`。
 
