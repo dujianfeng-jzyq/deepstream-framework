@@ -70,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("source")
     p.add_argument("images", nargs="*", help="image or annotation names of the source")
     p.add_argument("--all", action="store_true", help="every labeled image of the source")
+    p.add_argument("--reason", default="",
+                   help="accept images that wait for review of a new class anyway (recorded in the review list)")
 
     p = commands.add_parser("prelabel", help="write unchecked annotations for the unlabeled images of a source")
     p.add_argument("model")
@@ -105,12 +107,19 @@ def main(argv: list[str] | None = None) -> int:
     p = commands.add_parser("update", help="change the classes of a model, or show and confirm its class dependencies",
                             description="Without an operation, show the classes and the state of every source.")
     p.add_argument("model")
-    p.add_argument("operation", nargs="?", choices=("rename", "retire"),
-                   help="rename <old> <new>: rename a class here, in the sources and in the models sharing them; "
+    p.add_argument("operation", nargs="?", choices=("add", "rename", "retire"),
+                   help="add <class>: append a class and uncheck the checked images of the sources for review; "
+                        "rename <old> <new>: rename a class here, in the sources and in the models sharing them; "
                         "retire <class>: remove a class from this model (the sources keep it)")
     p.add_argument("names", nargs="*", help="the class names the operation takes")
     p.add_argument("--into", metavar="CLASS",
                    help="with retire: merge the class into CLASS in the sources too (relabels the annotations)")
+    p.add_argument("--from", dest="from_class", metavar="CLASS",
+                   help="with add: the new class used to be labeled as CLASS; only images with CLASS boxes are "
+                        "unchecked")
+    p.add_argument("--skip-source", action="append", default=[], metavar="SOURCE",
+                   help="with add: add the class to SOURCE without unchecking anything (needs --reason)")
+    p.add_argument("--reason", default="", help="with --skip-source: why the source has no objects of the class")
     p.add_argument("--confirm", action="store_true",
                    help="record the current classes of every source in sources.lock.json after reviewing the "
                         "differences")
@@ -143,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.source not in model["data"]["sources"]:
                 print(f"  add {args.source} to data.sources in {spec.path(repo, args.model)} to train on it")
         elif args.command == "accept":
-            count = sources.accept(root, args.source, args.images, args.all)
+            count = sources.accept(root, args.source, args.images, args.all, args.reason)
             print(f"marked {count} annotations of {args.source} as checked")
         elif args.command == "prepare":
             model = spec.load(repo, args.model)
@@ -195,12 +204,18 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(publish.report(result)))
         elif args.command == "update":
             model = spec.load(repo, args.model)
-            arity = {"rename": 2, "retire": 1, None: 0}[args.operation]
+            arity = {"add": 1, "rename": 2, "retire": 1, None: 0}[args.operation]
+            adding = args.from_class or args.skip_source or args.reason
             if len(args.names) != arity or (args.into and args.operation != "retire") or \
-                    (args.confirm and args.operation):
-                raise TrainError("usage: train update <id> [rename <old> <new> | retire <class> [--into <class>] "
-                                 "| --confirm]")
-            if args.operation == "rename":
+                    (adding and args.operation != "add") or (args.confirm and args.operation):
+                raise TrainError("usage: train update <id> [add <class> [--from <class>] [--skip-source <source> "
+                                 "--reason <text>] | rename <old> <new> | retire <class> [--into <class>] | --confirm]")
+            if bool(args.skip_source) != bool(args.reason):
+                raise TrainError("--skip-source and --reason go together")
+            if args.operation == "add":
+                skip = {source: args.reason for source in args.skip_source}
+                print("\n".join(update.add(repo, root, model, args.names[0], args.from_class, skip).lines))
+            elif args.operation == "rename":
                 print("\n".join(update.rename(repo, root, model, *args.names).lines))
             elif args.operation == "retire":
                 print("\n".join(update.retire(repo, root, model, args.names[0], args.into).lines))

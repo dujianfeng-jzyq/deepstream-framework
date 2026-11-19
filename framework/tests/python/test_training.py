@@ -513,6 +513,8 @@ class UpdateTest(TrainingTestCase):
         annotation(self.raw / "a/f_0.json", LABELED, checked=True)  # 一个 标志牌(圆牌) 框
         annotation(self.raw / "a/f_1.json", LABELED, checked=False,
                    shapes=[{"label": "龙门架A", "points": [[1, 1], [9, 9]], "shape_type": "rectangle"}])
+        image(self.raw / "a/f_2.jpg", "green")
+        annotation(self.raw / "a/f_2.json", NEGATIVE, checked=True)
         self.import_(self.raw)
         (self.repo / "models/m2").mkdir()
         text = spec.skeleton("m2", "detect", ["龙门架A", "防撞桶"]).replace("  sources: []", "  sources: [batch-01]")
@@ -589,6 +591,89 @@ class UpdateTest(TrainingTestCase):
         dataset.prepare(self.repo, self.root, self.spec())
         with self.assertRaisesRegex(TrainError, "removed 标志牌\\(圆牌\\) \\(was class 0\\)"):
             dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2"))
+
+    def checked(self, name):
+        return xanylabeling.read(self.source() / f"{name}.json").checked
+
+    def reviews(self):
+        return sources.read_record(self.source())["reviews"]
+
+    def test_add_unchecks_the_checked_images_for_review(self):
+        code, out, err = self.train("update", "m", "add", "防撞墩")
+        self.assertEqual(code, 0, err)
+        self.assertIn("added 防撞墩 to m as class 3", out)
+        self.assertIn("  source batch-01: class added, 2 checked images unchecked for review", out)
+        self.assertIn("m2 must review the changed sources: train update m2 --confirm", out)
+        self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, False))
+        self.assertEqual(self.labels("f_0.json"), ["标志牌(圆牌)"])  # 只改 checked
+        [review] = self.reviews()
+        self.assertEqual((review["class"], review["from"], review["files"], review["revoked"]),
+                         ("防撞墩", None, ["f_0.jpg", "f_2.jpg"], True))
+        self.assertEqual(self.source_classes(), CLASSES + ["防撞墩"])
+        self.assertEqual(self.spec()["classes"], CLASSES + ["防撞墩"])
+        self.assertEqual(self.locked("m"), CLASSES + ["防撞墩"])
+        with self.assertRaisesRegex(TrainError, "no checked images"):
+            dataset.prepare(self.repo, self.root, self.spec())
+        xanylabeling.update(self.source() / "f_0.json", checked=True)  # 人补框后重新勾选
+        result = dataset.prepare(self.repo, self.root, self.spec())
+        self.assertEqual(result.skipped[("batch-01", "waiting for review of 防撞墩")], 1)
+        self.assertEqual(result.skipped[("batch-01", "not checked")], 1)
+        self.assertIn("    review of 防撞墩 since ", self.train("update", "m")[1])
+        self.assertIn(": 1 of 2 checked again", self.train("update", "m")[1])
+        # 名单中的图片不能批量确认，除非给出理由
+        code, _, err = self.train("accept", "batch-01", "f_2")
+        self.assertIn("1 of these images wait for review of 防撞墩 (f_2.jpg)", err)
+        code, _, err = self.train("accept", "batch-01", "--all", "--reason", "夜间画面，没有防撞墩")
+        self.assertEqual(code, 0, err)
+        [accepted] = self.reviews()[0]["accepted"]
+        self.assertEqual((accepted["reason"], accepted["images"]), ("夜间画面，没有防撞墩", ["f_2.jpg"]))
+
+    def test_add_from_a_class_unchecks_only_the_images_with_it(self):
+        code, out, err = self.train("update", "m", "add", "标志牌(方牌)", "--from", "标志牌(圆牌)")
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 checked images with 标志牌(圆牌) boxes unchecked", out)
+        self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, True))
+        self.assertEqual(self.reviews()[0]["from"], "标志牌(圆牌)")
+
+    def test_add_with_a_skipped_source_unchecks_nothing(self):
+        code, _, err = self.train("update", "m", "add", "防撞墩", "--skip-source", "batch-01")
+        self.assertIn("--skip-source and --reason go together", err)
+        code, out, err = self.train("update", "m", "add", "防撞墩", "--skip-source", "batch-01",
+                                    "--reason", "隧道内素材")
+        self.assertEqual(code, 0, err)
+        self.assertIn("class added, nothing unchecked (隧道内素材)", out)
+        self.assertEqual((self.checked("f_0"), self.checked("f_2")), (True, True))
+        self.assertEqual(self.reviews()[0]["skipped"], "隧道内素材")
+        self.assertEqual(self.source_classes(), CLASSES + ["防撞墩"])
+
+    def test_a_source_that_has_the_class_already_is_not_reviewed_again(self):
+        self.assertEqual(self.train("update", "m2", "add", "防撞墩")[0], 0)
+        xanylabeling.update(self.source() / "f_0.json", checked=True)
+        # 来源的变化正是 m 要做的这次修改，不必先 --confirm
+        code, out, err = self.train("update", "m", "add", "防撞墩")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  source batch-01: already has 防撞墩, unchanged", out)
+        self.assertTrue(self.checked("f_0"))
+        self.assertEqual(len(self.reviews()), 1)
+
+    def test_an_interrupted_add_continues_with_its_list(self):
+        original = xanylabeling.update
+
+        def once(path, **fields):
+            original(path, **fields)
+            raise KeyboardInterrupt
+        with mock.patch.object(xanylabeling, "update", once):
+            with self.assertRaises(KeyboardInterrupt):
+                update.add(self.repo, self.root, self.spec(), "防撞墩")
+        self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, True))
+        self.assertFalse(self.reviews()[0]["revoked"])
+        with self.assertRaisesRegex(TrainError, "changed since m2 confirmed"):
+            dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2"))  # 其他模型不会用撤销了一半的来源
+        update.add(self.repo, self.root, self.spec(), "防撞墩")
+        self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, False))
+        [review] = self.reviews()
+        self.assertEqual((review["files"], review["revoked"]), (["f_0.jpg", "f_2.jpg"], True))
+        self.assertEqual(self.spec()["classes"], CLASSES + ["防撞墩"])
 
     def test_an_interrupted_update_completes_when_run_again(self):
         original = spec.write_classes

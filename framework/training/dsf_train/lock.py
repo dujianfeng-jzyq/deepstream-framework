@@ -136,5 +136,10 @@ def status(repo: Path, root: Path, spec: dict) -> list[str]:
         else:
             state = "confirmed"
         lines.append(f"  source {source}: {state}")
+        directory = paths.source_dir(root, source)
+        for review, checked, total in sources.review_progress(directory, sources.read_record(directory)):
+            scope = f" (images with {review['from']})" if review.get("from") else ""
+            lines.append(f"    review of {review['class']}{scope} since {review['at']}: {checked} of {total} "
+                         "checked again")
     lines += [f"  {problem}" for problem in missing_classes(spec, now)]
     return lines

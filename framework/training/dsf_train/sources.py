@@ -6,7 +6,11 @@ sources/<来源>/source.json 记录每张图：
   group    采集组，决定划分：video:<视频摘要>、prefix:<文件名前缀>、dir:<来源>/<子目录>
   width/height
 以及 classes：来源的类别列表，labels.txt 是它给 X-AnyLabeling 的副本（§15.1）；accepted：用 train accept
-批量确认的记录。
+批量确认的记录；reviews：新增类别时撤销 checked 的复核名单（§15.2），每项
+  class/from/at  新类别、只撤销含哪个类别框的图片（--from，没有时为 null）、时间
+  files          被撤销的图片；revoked 在全部撤销完成后才为 true（中断后重新执行 train update 按名单继续）
+  skipped        不撤销的理由（--skip-source），files 为空
+  accepted       用 train accept --reason 跳过复核的记录
 """
 
 from __future__ import annotations
@@ -55,6 +59,30 @@ def class_list(directory: Path, record: dict) -> list[str]:
             len(set(value)) != len(value):
         raise TrainError(f"{directory}: the classes of the source must be distinct names")
     return value
+
+
+def review_classes(record: dict) -> dict[str, list[str]]:
+    """图像名 → 它在哪些已生效的复核名单中（类别）。名单只用于报告与预标注，收录仍然只看 checked。"""
+    result: dict[str, list[str]] = {}
+    for review in record.get("reviews") or []:
+        if review.get("revoked"):
+            for name in review["files"]:
+                result.setdefault(name, []).append(review["class"])
+    return result
+
+
+def review_progress(directory: Path, record: dict) -> list[tuple[dict, int, int]]:
+    """每份已生效的复核名单：(名单, 已重新勾选的数量, 总数)。"""
+    progress = []
+    for review in record.get("reviews") or []:
+        if not review.get("revoked") or review.get("skipped"):
+            continue
+        checked = 0
+        for name in review["files"]:
+            path = xanylabeling.annotation_path(directory / name)
+            checked += path.is_file() and xanylabeling.read(path).checked
+        progress.append((review, checked, len(review["files"])))
+    return progress
 
 
 def write_labels(directory: Path, names: list[str]) -> None:
@@ -198,8 +226,9 @@ class Importer:
         self.report["videos"] += 1
 
 
-def accept(root: Path, source: str, files: list[str], everything: bool = False) -> int:
-    """把指定图像的标注标为已检查（checked: true），并记录这次批量确认（docs/training.md §5.2）。"""
+def accept(root: Path, source: str, files: list[str], everything: bool = False, reason: str = "") -> int:
+    """把指定图像的标注标为已检查（checked: true），并记录这次批量确认（docs/training.md §5.2）。
+    复核名单中还没有重新勾选的图片要有人为新类别看过，批量确认它们必须给出理由，理由记入名单（§15.2）。"""
     directory = paths.source_dir(root, source)
     record = read_record(directory)
     if everything == bool(files):
@@ -214,12 +243,24 @@ def accept(root: Path, source: str, files: list[str], everything: bool = False) 
     missing = [name for name, path in targets if not path.is_file()]
     if missing and not everything:
         raise TrainError(f"these images have no annotation yet, label them first: {', '.join(missing[:10])}")
+    pending = [(name, path) for name, path in targets if path.is_file() and not xanylabeling.read(path).checked]
+    reviewing = review_classes(record)
+    waiting = [name for name, _ in pending if name in reviewing]
+    if waiting and not reason:
+        classes = sorted({c for name in waiting for c in reviewing[name]})
+        raise TrainError(f"{len(waiting)} of these images wait for review of {', '.join(classes)} "
+                         f"({', '.join(waiting[:5])}{' …' if len(waiting) > 5 else ''}): label the new classes in "
+                         "them and check them in X-AnyLabeling, or give --reason to accept them as they are")
     accepted = []
-    for name, path in targets:
-        if path.is_file() and not xanylabeling.read(path).checked:
-            xanylabeling.update(path, checked=True)
-            accepted.append(name)
+    for name, path in pending:
+        xanylabeling.update(path, checked=True)
+        accepted.append(name)
     if accepted:
-        record.setdefault("accepted", []).append({"at": _now(), "images": accepted})
+        now = _now()
+        record.setdefault("accepted", []).append({"at": now, "images": accepted})
+        for review in record.get("reviews") or []:
+            skipped = [name for name in waiting if review.get("revoked") and name in review["files"]]
+            if skipped:
+                review.setdefault("accepted", []).append({"at": now, "reason": reason, "images": skipped})
         paths.write_json(directory / paths.SOURCE_RECORD, record)
     return len(accepted)

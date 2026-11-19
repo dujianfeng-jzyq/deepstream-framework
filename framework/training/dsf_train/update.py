@@ -1,7 +1,8 @@
 """train update <id> <操作>：修改模型的类别，连同来源与其他模型（docs/training.md §15.3）。
 
 每次运行先完成全部检查（冲突、可写），再写入。写入顺序保证中断后重新执行同一命令即可完成：
-标注文件 → 来源记录与 labels.txt → sources.lock.json → 其他模型的 model.yaml → 本模型的 model.yaml。标注先改，
+标注文件 → 来源记录与 labels.txt → sources.lock.json → 其他模型的 model.yaml → 本模型的 model.yaml（add 例外，
+见 add）。标注先改，
 来源记录还写着旧名称时 prepare 遇到新名称报“未知类别”，不会在不一致的状态下训练；重新执行时已改过的文件
 没有可改的形状，跳过；本模型的规格最后改，它改完即全部完成。
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dsf_deploy import layout
@@ -208,6 +210,108 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
     result.lines += _lock_lines(updated, pending)
     result.lines += _republish_lines(repo, [spec["id"]], sources_changed=True)
     return result
+
+
+def add(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = None,
+        skip: dict[str, str] | None = None) -> Result:
+    """追加一个类别。已有这个类别的来源不变（之前已为它标注过）；其余来源追加类别，并把已检查的图片（--from 时
+    只是含 from_class 框的）改为未检查、记入复核名单：画面中可能有新类别的目标，不能再当作背景。skip 中的来源
+    （来源 → 理由）只追加类别、不撤销。
+
+    来源记录先写（名单、类别与 revoked: false 一次原子写入），再改标注，最后标记 revoked：中断后来源已有这个
+    类别，但名单未完成，重新执行时按名单继续撤销。"""
+    skip = skip or {}
+    if not name.strip() or name != name.strip():
+        raise TrainError(f"invalid class name {name!r}")
+    if name in spec["classes"]:
+        raise TrainError(f"{spec['id']} already has a class {name}")
+    if from_class is not None and from_class not in spec["classes"]:
+        raise TrainError(f"--from must name a class of {spec['id']}")
+    own = spec["data"]["sources"]
+    unknown = sorted(set(skip) - set(own))
+    if unknown:
+        raise TrainError(f"--skip-source: {', '.join(unknown)} is not a source of {spec['id']}")
+    if not own:
+        raise TrainError(f"data.sources of {spec['id']} is empty")
+
+    def added(names: list[str]) -> list[str]:
+        return names if name in names else [*names, name]
+
+    _require_confirmed(repo, root, spec, added)
+    models = _models(repo)
+    plans = {}  # 来源 → 这次的复核名单（None：来源已有这个类别且名单已完成）
+    for source in own:
+        directory = paths.source_dir(root, source)
+        record = sources.read_record(directory)
+        unfinished = [r for r in record.get("reviews") or [] if r["class"] == name and not r.get("revoked")]
+        if unfinished:
+            plans[source] = unfinished[-1]
+        elif name in sources.class_list(directory, record):
+            plans[source] = None
+        elif source in skip:
+            plans[source] = {"class": name, "from": from_class, "at": _now(), "files": [], "skipped": skip[source],
+                             "revoked": False}
+        else:
+            plans[source] = {"class": name, "from": from_class, "at": _now(),
+                             "files": _checked(directory, record, from_class), "revoked": False}
+    _check_writable(_source_files(root, [s for s, plan in plans.items() if plan is not None]) +
+                    [specs.path(repo, spec["id"])])
+
+    result = Result([f"added {name} to {spec['id']} as class {len(spec['classes'])}"])
+    after = {}
+    for source, plan in plans.items():
+        directory = paths.source_dir(root, source)
+        record = sources.read_record(directory)
+        after[source] = added(sources.class_list(directory, record))
+        if plan is None:
+            result.lines.append(f"  source {source}: already has {name}, unchanged")
+            continue
+        reviews = record.setdefault("reviews", [])
+        if plan not in reviews:
+            reviews.append(plan)
+        record["classes"] = after[source]
+        paths.write_json(directory / paths.SOURCE_RECORD, record)
+        sources.write_labels(directory, after[source])
+        for image in plan["files"]:
+            path = xanylabeling.annotation_path(directory / image)
+            if path.is_file():
+                xanylabeling.update(path, checked=False)
+        record = sources.read_record(directory)
+        next(r for r in record["reviews"] if r == plan)["revoked"] = True
+        paths.write_json(directory / paths.SOURCE_RECORD, record)
+        if plan.get("skipped"):
+            result.lines.append(f"  source {source}: class added, nothing unchecked ({plan['skipped']})")
+        else:
+            which = f"with {from_class} boxes " if from_class else ""
+            result.lines.append(f"  source {source}: class added, {len(plan['files'])} checked images {which}"
+                                f"unchecked for review")
+    changed = {source: names for source, names in after.items() if plans[source] is not None}
+    updated, pending = _refresh_locks(
+        repo, root, models, changed, lambda model_id, names: added(names) if model_id == spec["id"] else names)
+    specs.write_classes(repo, spec["id"], [*spec["classes"], name])
+    result.lines += _lock_lines(updated, pending)
+    result.lines += _republish_lines(repo, [spec["id"]], sources_changed=bool(changed))
+    if any(plan and plan["files"] for plan in plans.values()):
+        result.lines.append(f"  next: label {name} in a few dozen of these images and check them, train v0, then "
+                            f"train prelabel {spec['id']} --source <source> --class {name} --run <v0>")
+    return result
+
+
+def _checked(directory: Path, record: dict, from_class: str | None) -> list[str]:
+    """来源中已检查的图片；from_class 时只取含这个类别形状的。"""
+    found = []
+    for image in sorted(record["images"]):
+        path = xanylabeling.annotation_path(directory / image)
+        if not path.is_file():
+            continue
+        annotation = xanylabeling.read(path)
+        if annotation.checked and (from_class is None or any(s.label == from_class for s in annotation.shapes)):
+            found.append(image)
+    return found
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _renumber_lines(classes: list[str], name: str) -> list[str]:

@@ -58,6 +58,7 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
         record = sources.read_record(directory)
         # 来源中有、模型不用的类别（其他模型的类别，或本模型 retire 的类别）在读取时忽略。
         ignore = declared_ignore | (set(source_classes[source]) - set(spec["classes"]))
+        reviewing = sources.review_classes(record)
         for name, info in sorted(record["images"].items()):
             image = directory / name
             annotation_path = xanylabeling.annotation_path(image)
@@ -70,7 +71,9 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
                 continue
             annotation = xanylabeling.read(annotation_path)
             if not annotation.checked:
-                skipped[(source, "not checked")] += 1
+                # 新增类别时撤销的图片单独报告：它们以前检查过，只差新类别（§15.2）。
+                reason = f"waiting for review of {', '.join(reviewing[name])}" if name in reviewing else "not checked"
+                skipped[(source, reason)] += 1
                 continue
             if paths.sha256(image) != info["sha256"]:
                 problems.append(f"{where}: the image changed after it was imported")
