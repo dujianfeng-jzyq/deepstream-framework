@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -36,7 +37,7 @@ struct Segment {
   std::string id;
   std::string temp_path;
   std::string final_path;  // 收尾前不带检测标记；Close 后为实际的最终路径
-  std::uint64_t start_ms = 0;
+  std::uint64_t start_ms = 0;  // 分段第一帧进入录像器时的主机墙钟（毫秒）
   bool detected = false;
 };
 
@@ -142,7 +143,7 @@ class SegmentRecorder : public gst::Component {
   std::size_t open_count() const;
 
  private:
-  static gchar* OnFormatLocation(GstElement* sink, guint fragment, gpointer self);
+  static gchar* OnFormatLocation(GstElement* sink, guint fragment, GstSample* first, gpointer self);
   static GstPadProbeReturn OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   static GstPadProbeReturn OnSinkData(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   void Prune();  // 控制线程
@@ -150,7 +151,7 @@ class SegmentRecorder : public gst::Component {
   RecorderOptions options_;
   Events events_;
   std::string name_;
-  mutable std::mutex mutex_;  // format-location 在流线程，fragment-closed 在控制线程
+  mutable std::mutex mutex_;  // 录像入口与 format-location 在两个流线程，fragment-closed 在控制线程
   SegmentTracker tracker_;
   std::uint64_t failures_ = 0;
   std::uint64_t pruned_ = 0;
@@ -159,6 +160,9 @@ class SegmentRecorder : public gst::Component {
   // 断流前最后一帧结束时的 running-time。fragment-closed 报告的是下一分段的起点（含断流），
   // 落在分段起止之间的断流以这里为分段的结束。
   std::vector<GstClockTime> gap_ends_;
+  // 分段起点（录像器请求切分的关键帧）的 running-time 与它进入录像器时的墙钟。splitmuxsink 要收齐
+  // 一个 GOP 才打开新文件，format-location 时的墙钟晚一个关键帧间隔，所以按文件第一帧查这里。
+  std::deque<std::pair<GstClockTime, std::uint64_t>> starts_;
   GstElement* sink_ = nullptr;
   gulong handler_ = 0;
   gst::PadProbe input_;  // 录像入口：按时长与断流请求切分

@@ -87,12 +87,12 @@ record::RecorderOptions ShortSegments(const fs::path& root, const std::string& b
   return options;
 }
 
-gst::Graph RecordingGraph(int buffers, bool live) {
+gst::Graph RecordingGraph(int buffers, bool live, int key_interval = 10) {
   gst::Graph graph;
   gst::Element source = graph.Add("videotestsrc", "src").Set("is-live", live);
   if (buffers > 0) source.Set("num-buffers", buffers);
   gst::Element encoder = graph.Add("x264enc", "enc")
-                             .Set("key-int-max", 10)
+                             .Set("key-int-max", key_interval)
                              .Set("tune", "zerolatency")
                              .Set("speed-preset", "ultrafast");
   graph.Chain({source, graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"),
@@ -493,6 +493,34 @@ TEST(recorder_closes_segments_at_eos) {
   for (const Segment& segment : events.finished) {
     CHECK(fs::file_size(segment.final_path) > 0);
     CHECK(!fs::exists(segment.temp_path));
+  }
+}
+
+TEST(recorder_starts_segments_when_their_first_frame_arrives) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // 活源、分段 1 秒、关键帧间隔 1 秒：splitmuxsink 收齐一个 GOP 才打开新文件，那时的墙钟晚 1 秒。
+  // 分段起点取第一帧进入录像器的时间，后一分段紧接前一分段的结束（end_ms 按画面时长计算）。
+  std::vector<std::pair<Segment, std::uint64_t>> finished;
+  std::mutex mutex;
+  SegmentRecorder::Events callbacks;
+  callbacks.finished = [&](const Segment& segment, std::uint64_t end_ms) {
+    std::lock_guard<std::mutex> lock(mutex);
+    finished.emplace_back(segment, end_ms);
+  };
+  SegmentRecorder recorder(ShortSegments(dir.path, "raw"), callbacks);
+  gst::Pipeline pipeline("record-start-time", RecordingGraph(0, true, 30));
+  pipeline.Add(recorder);
+  gst::Timer timer;
+  pipeline.Post([&] { timer = pipeline.After(std::chrono::milliseconds(3500), [&] { pipeline.RequestStop(); }); });
+  gst::Options options;
+  options.handle_signals = false;
+  CHECK(pipeline.Run(options).ok());
+  CHECK(finished.size() >= 3);
+  for (std::size_t i = 1; i < finished.size(); ++i) {
+    const auto previous_end = static_cast<std::int64_t>(finished[i - 1].second);
+    const auto start = static_cast<std::int64_t>(finished[i].first.start_ms);
+    CHECK(std::abs(start - previous_end) <= 200);
   }
 }
 

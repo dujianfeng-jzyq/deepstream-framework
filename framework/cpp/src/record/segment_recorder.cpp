@@ -226,7 +226,7 @@ void SegmentRecorder::MarkDetected() {
 }
 
 void SegmentRecorder::Require(gst::Requirements& requirements) const {
-  requirements.Signal("splitmuxsink", "format-location", options_.element);
+  requirements.Signal("splitmuxsink", "format-location-full", options_.element);
   requirements.Signal("splitmuxsink", "split-at-running-time", options_.element);
 }
 
@@ -253,13 +253,18 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
                     static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM),
                     &SegmentRecorder::OnSinkData, this);
   gst_object_unref(internal);
-  handler_ = g_signal_connect(sink_, "format-location", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
+  handler_ = g_signal_connect(sink_, "format-location-full", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
                               this);
   input_.Attach(GST_BIN(bin), options_.element, "video", GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput,
                 this);
 }
 
 namespace {
+
+// 录像入口与 format-location-full 用同一个时间戳计算 running-time，两边才能对上。
+GstClockTime Timestamp(GstBuffer* buffer) {
+  return GST_BUFFER_PTS_IS_VALID(buffer) ? GST_BUFFER_PTS(buffer) : GST_BUFFER_DTS(buffer);
+}
 
 GstClockTime RunningTime(GstPad* pad, GstClockTime timestamp) {
   GstEvent* event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0);
@@ -278,7 +283,7 @@ GstClockTime RunningTime(GstPad* pad, GstClockTime timestamp) {
 GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self) {
   auto* recorder = static_cast<SegmentRecorder*>(self);
   GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-  const GstClockTime pts = GST_BUFFER_PTS_IS_VALID(buffer) ? GST_BUFFER_PTS(buffer) : GST_BUFFER_DTS(buffer);
+  const GstClockTime pts = Timestamp(buffer);
   if (!GST_CLOCK_TIME_IS_VALID(pts)) return GST_PAD_PROBE_OK;
   const GstClockTime last = recorder->last_input_;
   const GstClockTime last_duration = recorder->last_duration_;
@@ -321,12 +326,13 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
   if (!GST_CLOCK_TIME_IS_VALID(running)) return GST_PAD_PROBE_OK;
   const auto length =
       static_cast<GstClockTime>(std::chrono::nanoseconds(recorder->options_.segment_length).count());
-  if (!GST_CLOCK_TIME_IS_VALID(recorder->segment_begin_)) {
-    recorder->segment_begin_ = running;
-  } else if (running >= recorder->segment_begin_ + length) {
+  if (GST_CLOCK_TIME_IS_VALID(recorder->segment_begin_)) {
+    if (running < recorder->segment_begin_ + length) return GST_PAD_PROBE_OK;
     g_signal_emit_by_name(recorder->sink_, "split-at-running-time", static_cast<guint64>(running));
-    recorder->segment_begin_ = running;
   }
+  recorder->segment_begin_ = running;
+  std::lock_guard<std::mutex> lock(recorder->mutex_);
+  recorder->starts_.emplace_back(running, ds::WallMilliseconds());
   return GST_PAD_PROBE_OK;
 }
 
@@ -355,13 +361,29 @@ void SegmentRecorder::OnReleased() {
   sink_ = nullptr;
 }
 
-gchar* SegmentRecorder::OnFormatLocation(GstElement* /*sink*/, guint /*fragment*/, gpointer self) {
+gchar* SegmentRecorder::OnFormatLocation(GstElement* /*sink*/, guint /*fragment*/, GstSample* first,
+                                        gpointer self) {
   auto* recorder = static_cast<SegmentRecorder*>(self);
+  GstClockTime running = GST_CLOCK_TIME_NONE;
+  if (GstBuffer* buffer = first != nullptr ? gst_sample_get_buffer(first) : nullptr) {
+    const GstSegment* segment = gst_sample_get_segment(first);
+    running = segment != nullptr && segment->format == GST_FORMAT_TIME
+                  ? gst_segment_to_running_time(segment, GST_FORMAT_TIME, Timestamp(buffer))
+                  : Timestamp(buffer);
+  }
   try {
     Segment segment;
     {
       std::lock_guard<std::mutex> lock(recorder->mutex_);
-      segment = recorder->tracker_.Open(ds::WallMilliseconds());
+      // 文件从录像器登记的起点开始时用它进入录像器的墙钟；不是（例如通过 properties 设置了
+      // splitmuxsink 自己的切分条件）时退回现在的墙钟。更早的起点属于已经打开的分段。
+      std::uint64_t start_ms = ds::WallMilliseconds();
+      auto& starts = recorder->starts_;
+      while (!starts.empty() && GST_CLOCK_TIME_IS_VALID(running) && starts.front().first <= running) {
+        if (starts.front().first == running) start_ms = starts.front().second;
+        starts.pop_front();
+      }
+      segment = recorder->tracker_.Open(start_ms);
     }
     if (recorder->events_.started) recorder->events_.started(segment);
     return g_strdup(segment.temp_path.c_str());  // splitmuxsink 接管所有权

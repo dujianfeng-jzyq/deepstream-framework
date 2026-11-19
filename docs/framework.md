@@ -205,7 +205,7 @@ tap.SetImageFilter([](const dsf::ds::FrameRecord& f) { return !f.objects.empty()
 | event_type | 字段 |
 |---|---|
 | `detection` | `frame_num` `pts_ns` `ntp_ms`(有值时) `frame_width` `frame_height` `objects[]`：`class_id` `label` `confidence`(三位小数) `bbox{x,y,width,height}`（裁剪到帧内后取整，零面积丢弃）`track_id`(被跟踪时) `classes[]`(有值时) `extra`(有值时)；帧级 `extra`；`image{format,width,height,size}`(帧带图片时，只是描述) |
-| `recording_started` | `branch` `segment_id` `start_ms` |
+| `recording_started` | `branch` `segment_id` `start_ms`（分段第一帧进入录像器时的主机墙钟） |
 | `recording_finished` | 另加 `end_ms` `duration_ms`（`start_ms` 加分段内画面的时长，不含断流；得不到时长时为收尾时的墙钟）`detected` `path`（已封装完成、可直接读取的文件） |
 
 发布：
