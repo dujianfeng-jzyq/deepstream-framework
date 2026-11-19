@@ -167,6 +167,40 @@ class OfflineSource : public gst::Component {
   }
 };
 
+// 活源断流：identity "outage" 在第一帧之后的 [from, to) 内丢弃全部帧（主机时钟），统计断流前放行的帧数。
+class LiveOutage : public gst::Component {
+ public:
+  LiveOutage(std::chrono::milliseconds from, std::chrono::milliseconds to) : from_(from), to_(to) {}
+  std::string_view Name() const override { return "live-outage"; }
+  void OnCreated(gst::Pipeline& pipeline, GstElement* /*bin*/) override {
+    GstPad* pad = gst_element_get_static_pad(pipeline.Element("outage"), "src");
+    gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                      +[](GstPad*, GstPadProbeInfo*, gpointer self) {
+                        auto* outage = static_cast<LiveOutage*>(self);
+                        const auto now = std::chrono::steady_clock::now();
+                        if (!outage->started_) {
+                          outage->started_ = true;
+                          outage->first_ = now;
+                        }
+                        const auto elapsed = now - outage->first_;
+                        if (elapsed >= outage->from_ && elapsed < outage->to_) return GST_PAD_PROBE_DROP;
+                        if (elapsed < outage->from_) ++outage->before_;
+                        return GST_PAD_PROBE_OK;
+                      },
+                      this, nullptr);
+    gst_object_unref(pad);
+  }
+  std::chrono::steady_clock::time_point first() const { return first_; }
+  int before() const { return before_; }
+
+ private:
+  std::chrono::milliseconds from_;
+  std::chrono::milliseconds to_;
+  bool started_ = false;  // 以下三项只在流线程写，管线结束后读
+  std::chrono::steady_clock::time_point first_;
+  int before_ = 0;
+};
+
 // 统计经过 identity 的帧。
 class FrameCounter : public gst::Component {
  public:
@@ -667,6 +701,122 @@ TEST(recorder_splits_by_frame_time_and_keeps_the_last_gop_before_a_gap) {
   const std::uint64_t second = run.finished[1].second - run.finished[1].first.start_ms;
   CHECK(second >= 450 && second <= 550);  // 不含断流
   CHECK(run.stats.find("rec_gap_splits=1") != std::string::npos);
+}
+
+namespace {
+
+struct StallRun {
+  std::vector<std::pair<Segment, std::chrono::steady_clock::time_point>> finished;
+  std::chrono::steady_clock::time_point first;  // 第一帧到达断流点的时刻
+  std::chrono::steady_clock::duration stopping;  // 请求停止到管线结束
+  int before = 0;                                // 断流前的帧数
+  std::vector<std::string> during_outage;        // 断流 1.5 秒时录像目录中的文件
+  bool healthy = false;
+  std::string stats;
+};
+
+// 活源 1 秒后断流到 outage_end，stop_at 时停止。断流阈值 0.5 秒。
+StallRun RecordThroughStall(const fs::path& root, std::chrono::milliseconds outage_end,
+                            std::chrono::milliseconds stop_at) {
+  StallRun result;
+  std::mutex mutex;
+  SegmentRecorder::Events callbacks;
+  callbacks.finished = [&](const Segment& segment, std::uint64_t) {
+    std::lock_guard<std::mutex> lock(mutex);
+    result.finished.emplace_back(segment, std::chrono::steady_clock::now());
+  };
+  record::RecorderOptions options{root.string(), "cam", "osd", "rec"};
+  options.split_on_gap = std::chrono::milliseconds(500);
+  SegmentRecorder recorder(options, callbacks);
+  gst::Graph graph;
+  gst::Element encoder = graph.Add("x264enc", "enc")
+                             .Set("key-int-max", 10)
+                             .Set("tune", "zerolatency")
+                             .Set("speed-preset", "ultrafast");
+  graph.Chain({graph.Add("videotestsrc", "src").Set("is-live", true),
+               graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"), graph.Add("videoconvert"),
+               graph.Add("identity", "outage"), encoder});
+  record::AddSegmentSink(graph, encoder, "h264", "rec");
+  LiveOutage outage(std::chrono::milliseconds(1000), outage_end);
+  app::KeyframeOnGap keyframes("enc", std::chrono::milliseconds(1000));
+  gst::Pipeline pipeline("record-stall", graph);
+  pipeline.Add(outage);
+  pipeline.Add(keyframes);
+  pipeline.Add(recorder);
+  gst::Timer timer;
+  std::chrono::steady_clock::time_point stop_requested;
+  gst::Timer look;
+  pipeline.Post([&] {
+    timer = pipeline.After(stop_at, [&] {
+      stop_requested = std::chrono::steady_clock::now();
+      pipeline.RequestStop();
+    });
+    look = pipeline.After(std::chrono::milliseconds(2500), [&] {
+      std::error_code code;
+      for (const auto& entry : fs::directory_iterator(root / "cam/osd", code)) {
+        result.during_outage.push_back(entry.path().filename().string());
+      }
+    });
+  });
+  gst::Options run;
+  run.handle_signals = false;
+  run.stop_timeout = std::chrono::milliseconds(5000);
+  CHECK(pipeline.Run(run).ok());
+  result.stopping = std::chrono::steady_clock::now() - stop_requested;
+  result.first = outage.first();
+  result.before = outage.before();
+  result.healthy = recorder.Healthy();
+  gst::Stats stats;
+  recorder.Report(stats);
+  result.stats = stats.Text();
+  return result;
+}
+
+// 目录中只剩已收尾的分段（占位文件已删除）。
+int FinishedFilesIn(const fs::path& directory) {
+  int files = 0;
+  for (const auto& entry : fs::directory_iterator(directory)) {
+    ++files;
+    CHECK(entry.path().extension() == ".mp4");
+  }
+  return files;
+}
+
+}  // namespace
+
+TEST(recorder_closes_the_segment_while_the_input_is_stalled) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // 断流 2 秒：断流 0.5 秒后断流前的分段就应收尾（不等恢复），帧数完整；恢复后录成新的分段。
+  const StallRun run = RecordThroughStall(dir.path, std::chrono::milliseconds(3000), std::chrono::milliseconds(4500));
+  CHECK(run.healthy);
+  CHECK_EQ(run.finished.size(), std::size_t{2});
+  if (run.finished.size() != 2) return;
+  const auto closed_after = run.finished[0].second - run.first;
+  CHECK(closed_after > std::chrono::milliseconds(1400) && closed_after < std::chrono::milliseconds(2900));
+  // 断流中目录里只有已收尾的分段，看不到占位文件。
+  CHECK_EQ(run.during_outage.size(), std::size_t{1});
+  if (run.during_outage.size() == 1) {
+    CHECK_EQ(run.during_outage[0], fs::path(run.finished[0].first.final_path).filename().string());
+  }
+  CHECK_EQ(FramesIn(run.finished[0].first.final_path), run.before);
+  CHECK(FramesIn(run.finished[1].first.final_path) > 0);
+  CHECK_EQ(FinishedFilesIn(dir.path / "cam/osd"), 2);
+  CHECK(run.stats.find("rec_stall_closes=1") != std::string::npos);
+  CHECK(run.stats.find("rec_gap_splits=1") != std::string::npos);
+}
+
+TEST(recorder_stops_cleanly_while_the_input_is_stalled) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // 断流后不再恢复，断流中停止：占位文件随 EOS 收尾并删除，排空不等到超时。
+  const StallRun run = RecordThroughStall(dir.path, std::chrono::hours(1), std::chrono::milliseconds(2500));
+  CHECK(run.healthy);
+  CHECK_EQ(run.finished.size(), std::size_t{1});
+  if (run.finished.size() == 1) CHECK_EQ(FramesIn(run.finished[0].first.final_path), run.before);
+  CHECK(run.stopping < std::chrono::milliseconds(2000));
+  CHECK_EQ(FinishedFilesIn(dir.path / "cam/osd"), 1);
+  CHECK(run.stats.find("rec_stall_closes=1") != std::string::npos);
 }
 
 namespace {

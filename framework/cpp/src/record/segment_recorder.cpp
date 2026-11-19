@@ -257,9 +257,23 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
                               this);
   input_.Attach(GST_BIN(bin), options_.element, "video", GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput,
                 this);
+  if (options_.split_on_gap.count() > 0) {
+    // 检查间隔取阈值的 1/4（不超过 0.5 秒），收尾在断流 1～1.25 倍阈值之间发生。
+    const auto interval = std::clamp(options_.split_on_gap / 4, std::chrono::milliseconds(10),
+                                     std::chrono::milliseconds(500));
+    stall_check_ = pipeline.Every(interval, [this] { CloseOnStall(); });
+  }
 }
 
 namespace {
+
+// 断流收尾时补入的占位帧。缓冲区标志中 GST_BUFFER_FLAG_LAST 以上的位留给使用者，下游元件不解释。
+constexpr auto kPlaceholder = static_cast<GstBufferFlags>(GST_BUFFER_FLAG_LAST << 1);
+
+std::int64_t SteadyMilliseconds() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 // 录像入口与 format-location-full 用同一个时间戳计算 running-time，两边才能对上。
 GstClockTime Timestamp(GstBuffer* buffer) {
@@ -283,6 +297,14 @@ GstClockTime RunningTime(GstPad* pad, GstClockTime timestamp) {
 GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self) {
   auto* recorder = static_cast<SegmentRecorder*>(self);
   GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+  if (GST_BUFFER_FLAG_IS_SET(buffer, kPlaceholder)) {
+    // CloseOnStall 补入的占位帧；恢复的帧已经先到时丢弃，不能让时间戳倒退。
+    if (!recorder->stalled_.load()) return GST_PAD_PROBE_DROP;
+    recorder->after_placeholders_ = true;
+    return GST_PAD_PROBE_OK;
+  }
+  recorder->last_arrival_ms_.store(SteadyMilliseconds());
+  recorder->stalled_.store(false);
   const GstClockTime pts = Timestamp(buffer);
   if (!GST_CLOCK_TIME_IS_VALID(pts)) return GST_PAD_PROBE_OK;
   const GstClockTime last = recorder->last_input_;
@@ -292,7 +314,9 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
   const bool keyframe = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
   const auto gap =
       static_cast<GstClockTime>(std::chrono::nanoseconds(recorder->options_.split_on_gap).count());
-  if (gap > 0 && GST_CLOCK_TIME_IS_VALID(last) && pts > last && pts - last > gap) {
+  const bool after_placeholders = recorder->after_placeholders_;
+  recorder->after_placeholders_ = false;
+  if (after_placeholders || (gap > 0 && GST_CLOCK_TIME_IS_VALID(last) && pts > last && pts - last > gap)) {
     const GstClockTime running = RunningTime(pad, pts);
     const GstClockTime last_end =
         RunningTime(pad, last + (GST_CLOCK_TIME_IS_VALID(last_duration) ? last_duration : 0));
@@ -302,7 +326,8 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
     {
       std::lock_guard<std::mutex> lock(recorder->mutex_);
       ++recorder->gap_splits_;
-      if (GST_CLOCK_TIME_IS_VALID(last_end)) recorder->gap_ends_.push_back(last_end);
+      // 占位帧之后切分时，被收尾的是占位文件：断流前的分段已经在补帧时收尾。
+      if (!after_placeholders && GST_CLOCK_TIME_IS_VALID(last_end)) recorder->gap_ends_.push_back(last_end);
     }
     spdlog::info("{}: input resumed after {:.1f} s; starting a new segment", recorder->options_.element,
                  static_cast<double>(pts - last) / GST_SECOND);
@@ -321,6 +346,12 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
                  recorder->options_.element, recorder->skipped_);
     recorder->awaiting_keyframe_ = false;
   }
+  {
+    std::lock_guard<std::mutex> lock(recorder->mutex_);
+    const GstClockTime duration = GST_BUFFER_DURATION(buffer);
+    recorder->last_step_ = duration;
+    recorder->last_end_ = pts + (GST_CLOCK_TIME_IS_VALID(duration) ? duration : 0);
+  }
   if (!keyframe) return GST_PAD_PROBE_OK;
   const GstClockTime running = RunningTime(pad, pts);
   if (!GST_CLOCK_TIME_IS_VALID(running)) return GST_PAD_PROBE_OK;
@@ -334,6 +365,49 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
   std::lock_guard<std::mutex> lock(recorder->mutex_);
   recorder->starts_.emplace_back(running, ds::WallMilliseconds());
   return GST_PAD_PROBE_OK;
+}
+
+// 断流超过 split_on_gap：在最后一帧之后请求切分并补两帧占位关键帧。第一帧让断流前的 GOP 收齐写入
+// 当前分段；第二帧收齐第一帧组成的 GOP，splitmuxsink 据切分请求收尾当前分段，占位帧进入占位文件。
+// 补帧经 gst_pad_chain 进入录像入口，与恢复的帧由 pad 的流锁串行化，OnInput 按 stalled_ 决定取舍。
+void SegmentRecorder::CloseOnStall() {
+  if (sink_ == nullptr || !received_.load() || stalled_.load() || awaiting_keyframe_.load()) return;
+  const std::int64_t idle = SteadyMilliseconds() - last_arrival_ms_.load();
+  if (idle < options_.split_on_gap.count()) return;
+  GstClockTime end = GST_CLOCK_TIME_NONE;
+  GstClockTime step = GST_CLOCK_TIME_NONE;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    end = last_end_;
+    step = last_step_;
+  }
+  if (!GST_CLOCK_TIME_IS_VALID(end)) return;
+  if (!GST_CLOCK_TIME_IS_VALID(step) || step == 0) step = 40 * GST_MSECOND;
+  GstPad* video = gst_element_get_static_pad(sink_, "video");
+  if (video == nullptr) return;
+  stalled_.store(true);
+  g_signal_emit_by_name(sink_, "split-at-running-time", static_cast<guint64>(RunningTime(video, end)));
+  for (GstClockTime i = 0; i < 2; ++i) {
+    constexpr gsize kSize = 16;
+    GstBuffer* placeholder = gst_buffer_new_allocate(nullptr, kSize, nullptr);
+    gst_buffer_memset(placeholder, 0, 0, kSize);
+    GST_BUFFER_PTS(placeholder) = GST_BUFFER_DTS(placeholder) = end + i * step;
+    GST_BUFFER_DURATION(placeholder) = step;
+    GST_BUFFER_FLAG_SET(placeholder, kPlaceholder);
+    gst_pad_chain(video, placeholder);
+  }
+  gst_object_unref(video);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++stall_closes_;
+  }
+  spdlog::info("{}: no input for {:.1f} s; closing the current segment", options_.element,
+               static_cast<double>(idle) / 1000);
+}
+
+bool SegmentRecorder::Drained() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return tracker_.open_count() == 0 && placeholders_.empty();
 }
 
 GstPadProbeReturn SegmentRecorder::OnSinkData(GstPad* /*pad*/, GstPadProbeInfo* info, gpointer self) {
@@ -351,6 +425,7 @@ GstPadProbeReturn SegmentRecorder::OnSinkData(GstPad* /*pad*/, GstPadProbeInfo* 
 
 void SegmentRecorder::OnReleased() {
   fallback_.Cancel();
+  stall_check_.Cancel();
   pipeline_ = nullptr;
   input_.Remove();
   sink_data_.Remove();
@@ -372,6 +447,15 @@ gchar* SegmentRecorder::OnFormatLocation(GstElement* /*sink*/, guint /*fragment*
                   : Timestamp(buffer);
   }
   try {
+    if (GstBuffer* buffer = first != nullptr ? gst_sample_get_buffer(first) : nullptr;
+        buffer != nullptr && GST_BUFFER_FLAG_IS_SET(buffer, kPlaceholder)) {
+      std::lock_guard<std::mutex> lock(recorder->mutex_);
+      const std::string path = (fs::path(recorder->tracker_.Directory()) /
+                                ("placeholder-" + std::to_string(recorder->placeholder_sequence_++) + ".mp4.tmp"))
+                                   .string();
+      recorder->placeholders_.insert(path);
+      return g_strdup(path.c_str());
+    }
     Segment segment;
     {
       std::lock_guard<std::mutex> lock(recorder->mutex_);
@@ -411,6 +495,13 @@ void SegmentRecorder::OnMessage(GstMessage* message) {
   gst_structure_get_clock_time(structure, "running-time", &running);
   if (gst_structure_has_name(structure, "splitmuxsink-fragment-opened")) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 占位文件：splitmuxsink 发出 fragment-opened 时 filesink 已经打开它，删除目录项后写入照常进行，
+    // 内容在关闭时释放；目录中看不到占位文件，进程异常终止也不会留下它。
+    if (placeholders_.count(location) > 0) {
+      std::error_code code;
+      fs::remove(location, code);
+      return;
+    }
     opened_at_[location] = running;
     return;
   }
@@ -418,6 +509,11 @@ void SegmentRecorder::OnMessage(GstMessage* message) {
   GstClockTime opened = GST_CLOCK_TIME_NONE;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (placeholders_.erase(location) > 0) {
+      std::error_code code;
+      fs::remove(location, code);  // 通常已在打开时删除
+      return;
+    }
     if (const auto it = opened_at_.find(location); it != opened_at_.end()) {
       opened = it->second;
       opened_at_.erase(it);
@@ -474,6 +570,7 @@ void SegmentRecorder::Prune() {
 }
 
 void SegmentRecorder::OnStopping() {
+  stall_check_.Cancel();
   // 不在这里立即向 splitmuxsink 发送 EOS：停止时管线在每个源之后注入 EOS，它跟在最后一帧后面
   // 依次流经编码器、parser 与队列。提前在录像入口发 EOS 会让分段立即封装，上游仍在处理的帧
   // （编码器内部、tee 分支的队列）随后到达时被丢弃。排空完成以 fragment-closed 为准（见 Drained）。
@@ -499,6 +596,7 @@ void SegmentRecorder::Report(gst::Stats& stats) const {
   stats.Add(options_.element + "_segments", tracker_.closed_count());
   stats.Add(options_.element + "_pruned", pruned_);
   if (gap_splits_ > 0) stats.Add(options_.element + "_gap_splits", gap_splits_);
+  if (stall_closes_ > 0) stats.Add(options_.element + "_stall_closes", stall_closes_);
   if (failures_ > 0) stats.Add(options_.element + "_failures", failures_);
 }
 

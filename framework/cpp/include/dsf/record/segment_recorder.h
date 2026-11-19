@@ -19,6 +19,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -106,10 +107,18 @@ struct RecorderOptions {
   // 必须小于管线的 stop_timeout，否则兜底来不及生效。0 表示不兜底。
   std::chrono::milliseconds eos_fallback{3000};
   Retention retention{};  // 默认不清理
-  // 录像入口相邻两帧的时间戳相差超过这个值（直播源断流后恢复）时，从恢复后的第一个关键帧开始
-  // 新分段：断流前的分段只含断流前的画面，不把断流时长计入分段，也不在文件中留下长时间的静止。
-  // 恢复后、第一个关键帧之前的帧不写入录像。编码器在断流处给出关键帧（app::KeyframeOnGap）时
-  // 不丢或只丢一帧（NVIDIA 编码器晚一帧生效），否则最多丢一个关键帧间隔。0 表示不切分。
+  // 断流处理。录像入口持续这么久（主机时钟）没有新帧时，不等恢复就收尾当前分段（文件可读、触发
+  // finished）；恢复后的第一帧开始新分段。断流前的分段只含断流前的画面，不把断流时长计入，也不在文件中
+  // 留下长时间的静止。0 表示关闭：断流留在文件中，分段在恢复或停止时收尾。
+  //
+  // 收尾：splitmuxsink 要收到下一个关键帧才写出最后一个 GOP，录像器在最后一帧之后请求切分并在入口补两帧
+  // 占位关键帧（内容无效，只用于推动切分）；占位帧落在单独的临时文件中，文件打开后立即删除目录项，
+  // 不产生事件。
+  // 断流恢复后还没等到关键帧时不收尾（切分点尚未生效），分段在恢复或停止时收尾。
+  // 恢复：相邻两帧的时间戳相差超过这个值，或断流中已经收尾时，从恢复后的第一个关键帧开始新分段，
+  // 之前的帧不写入录像。编码器在断流处给出关键帧（app::KeyframeOnGap）时不丢或只丢一帧（NVIDIA 编码器
+  // 晚一帧生效），否则最多丢一个关键帧间隔。管线卡顿使帧晚到这么久（时间戳并不跳变）时同样会开始新分段，
+  // 并丢弃到下一个关键帧。
   std::chrono::milliseconds split_on_gap{2000};
 };
 
@@ -135,7 +144,7 @@ class SegmentRecorder : public gst::Component {
   void OnMessage(GstMessage* message) override;
   void OnStopping() override;
   void OnReleased() override;
-  bool Drained() const override { return open_count() == 0; }
+  bool Drained() const override;
   bool Healthy() const override;
   void Report(gst::Stats& stats) const override;
 
@@ -147,6 +156,7 @@ class SegmentRecorder : public gst::Component {
   static GstPadProbeReturn OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   static GstPadProbeReturn OnSinkData(GstPad* pad, GstPadProbeInfo* info, gpointer self);
   void Prune();  // 控制线程
+  void CloseOnStall();  // 控制线程
 
   RecorderOptions options_;
   Events events_;
@@ -156,6 +166,7 @@ class SegmentRecorder : public gst::Component {
   std::uint64_t failures_ = 0;
   std::uint64_t pruned_ = 0;
   std::uint64_t gap_splits_ = 0;
+  std::uint64_t stall_closes_ = 0;
   std::map<std::string, GstClockTime> opened_at_;  // 临时路径 → 分段起点的 running-time
   // 断流前最后一帧结束时的 running-time。fragment-closed 报告的是下一分段的起点（含断流），
   // 落在分段起止之间的断流以这里为分段的结束。
@@ -163,20 +174,31 @@ class SegmentRecorder : public gst::Component {
   // 分段起点（录像器请求切分的关键帧）的 running-time 与它进入录像器时的墙钟。splitmuxsink 要收齐
   // 一个 GOP 才打开新文件，format-location 时的墙钟晚一个关键帧间隔，所以按文件第一帧查这里。
   std::deque<std::pair<GstClockTime, std::uint64_t>> starts_;
+  // 断流收尾：最后写入的一帧结束时的时间戳与帧长（占位帧接在它后面）；占位文件的临时路径。
+  GstClockTime last_end_ = GST_CLOCK_TIME_NONE;
+  GstClockTime last_step_ = GST_CLOCK_TIME_NONE;
+  std::set<std::string> placeholders_;
+  std::uint64_t placeholder_sequence_ = 0;
   GstElement* sink_ = nullptr;
   gulong handler_ = 0;
   gst::PadProbe input_;  // 录像入口：按时长与断流请求切分
   GstClockTime last_input_ = GST_CLOCK_TIME_NONE;  // 以下五项只在流线程访问
   GstClockTime last_duration_ = GST_CLOCK_TIME_NONE;
   GstClockTime segment_begin_ = GST_CLOCK_TIME_NONE;  // 当前分段第一个关键帧的 running-time
-  bool awaiting_keyframe_ = false;  // 断流后丢弃关键帧之前的帧
+  bool after_placeholders_ = false;  // 占位帧已写入：下一帧开始新分段
   std::uint64_t skipped_ = 0;
+  // 以下三项由流线程写、控制线程（断流收尾）读。
+  std::atomic<bool> awaiting_keyframe_{false};  // 断流后丢弃关键帧之前的帧
+  std::atomic<std::int64_t> last_arrival_ms_{0};  // 最后一帧到达录像入口的主机单调时钟
+  // 已决定补占位帧、尚未收到恢复后的帧。恢复的帧先于占位帧到达时清除它，占位帧随之丢弃。
+  std::atomic<bool> stalled_{false};
   // 挂在录像入口（ghost pad）的内部 pad 上：管线在 ghost pad 上记录 EOS 到达，之后才轮到这里，
   // 丢弃无数据的 EOS 不会让排空等到超时。received_ 由流线程与兜底 EOS 的控制线程访问。
   gst::PadProbe sink_data_;
   std::atomic<bool> received_{false};
   gst::Pipeline* pipeline_ = nullptr;  // OnCreated 到 OnReleased 之间有效
   gst::Timer fallback_;
+  gst::Timer stall_check_;
 };
 
 // 分段事件对应的消息事件（dsf::ds::RecordingMessage 的输入）；source_id 与 branch 取自 options。

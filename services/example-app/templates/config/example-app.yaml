@@ -77,8 +77,9 @@ recording:
   root: ${CONTAINER_DATA_PATH}/recordings
   # 分段内画面的时长（秒），在达到它之后的第一个关键帧处切分，断流时长不计入。
   segment_seconds: 60
-  # 输入断流超过该时长后恢复时开始新分段：断流前的分段只含断流前的画面，事件中的时长不含断流。
-  # 不小于 encoder.keyframe_on_gap_ms，切分才正好落在恢复后的第一帧；0 关闭。
+  # 输入断流超过该时长时立即收尾当前分段（文件可读、发出 recording_finished），恢复后开始新分段：
+  # 断流前的分段只含断流前的画面，事件中的时长不含断流。不小于 encoder.keyframe_on_gap_ms，
+  # 新分段才正好从恢复后的第一帧开始。0 关闭：断流以静止画面留在文件中，恢复或停止时收尾。
   split_on_gap_ms: 2000
   # 每个录像器（每路源的每个分支）独立计数。保留最新 keep_files 个分段；超过 max_files 时在其余分段中
   # 先删无目标的、再删有目标的（文件名带 -detected）。剩余空间低于 min_free_mb 时继续删，可删到最新的分段。
