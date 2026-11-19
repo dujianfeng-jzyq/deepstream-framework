@@ -7,7 +7,6 @@
 - `src/main.cpp`：元数据采集、录像器、发布通道与就绪指标的装配
 - `templates/config/example-app.yaml`：配置模板，渲染到 `generated/config/example-app.yaml`；测试保证模板的每个字段都被读取
 - `compose.yaml`：服务定义；GPU 等平台差异写在 `profiles/*.yaml` 的 `services.example-app`
-- `models.lock.json`：确认过的 `road-assets` 发布类别（工具写入，不手改；`docs/training.md` §15.1）。模型重新发布时类别变了，打包前的模型校验失败并打印差异；看过差异、确认本服务的配置与下游不需要修改（或已改好）后运行 `framework/deploy/dsf-deploy.py lock-models example-app` 重写并提交。示例按检测消息的 `label` 名称而不是类别号识别类别，所以通常只需确认
 
 现场参数：`CAMERA_ID`（也是 RTSP 输出路径 `<编号>-out`，只用字母、数字与 `_ . ~ - :`）、`RTSP_URL`、`RTSP_PASSWORD`、`REDIS_PASSWORD`、`MEDIAMTX_PUBLISH_PASSWORD`。
 
@@ -17,3 +16,4 @@
 - RTSP 输出断线时先排空再退出（`drain_on_error`），录像器封装当前分段，重启后恢复推流。
 - 有目标的帧发检测消息，并给该路当前的录像分段打 `-detected` 标记；可选整帧 JPEG 随消息发送（`redis.image`）。
 - 消息格式见 `docs/framework.md` 的“消息”一节，消费示例见 `services/example-service`。
+- 类别原样透传（OSD 标签与消息的 `label` 都来自模型的 `labels.txt`），所以不锁定模型的类别：与模型的兼容由打包前的模型校验保证，模型增删类别时这里不需要修改。按类别处理的服务（`services/example-service`）锁定类别（`docs/training.md` §15.1）。
