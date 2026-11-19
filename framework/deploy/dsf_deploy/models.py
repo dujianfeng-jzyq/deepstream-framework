@@ -10,6 +10,9 @@ engine 是目标机生成的派生物，必须写到 /data/engines/<id>/ 下：�
 模型目录对所有容器只读。
 
 还没有发布的模型（只有 model.yaml）可以存在，但不能有引用它的 nvinfer 配置。
+
+服务 → 模型的类别依赖（docs/training.md §15.1）：services/<服务>/models.lock.json 记录服务确认时各模型发布的
+类别列表，由 lock-models 写入。与模型的 release.json 不同时校验失败并打印差异；没有这个文件的服务不检查。
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from . import classes as class_diff
 from . import layout
 from .errors import DeployError
 
@@ -28,6 +32,7 @@ SCHEMA = 1
 # 已知输出布局的最后一维（每个候选的字段数）。未列出的布局不做形状检查：
 # 新的解析插件可以引入新布局而不修改框架，代价是导出形状只由插件自己的测试保证。
 OUTPUT_FIELDS = {"xyxy-confidence-class_id": 6}
+SERVICE_LOCK = "models.lock.json"
 
 
 def sha256(path: Path) -> str:
@@ -44,11 +49,90 @@ def model_dirs(root: Path) -> list[Path]:
 
 
 def check(root: Path) -> None:
-    """校验 root/models 下的全部模型；有任何问题时一次列出全部问题。"""
+    """校验 root/models 下的全部模型与各服务的模型锁记录；有任何问题时一次列出全部问题。"""
     problems = [f"{directory.relative_to(root)}: {problem}"
                 for directory in model_dirs(root) for problem in check_model(directory)]
+    problems += check_service_locks(root)
     if problems:
         raise DeployError("model check failed:\n  " + "\n  ".join(problems))
+
+
+def published_classes(root: Path, model: str) -> list[str] | None:
+    """模型发布的类别（release.json）；还没有发布时为 None。"""
+    path = root / layout.MODELS / model / RELEASE
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("classes")
+    except ValueError as error:
+        raise DeployError(f"{path}: {error}") from error
+    return value if isinstance(value, list) else None
+
+
+def read_service_lock(path: Path) -> dict[str, list[str]]:
+    if not path.is_file():
+        return {}
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise DeployError(f"{path}: {error}") from error
+    recorded = document.get("models") if isinstance(document, dict) else None
+    if document.get("schema") != SCHEMA or not isinstance(recorded, dict) or \
+            not all(isinstance(v, list) and all(isinstance(c, str) for c in v) for v in recorded.values()):
+        raise DeployError(f"{path}: not a models lock of schema {SCHEMA}; it is written by dsf-deploy.py lock-models")
+    return recorded
+
+
+def check_service_locks(root: Path) -> list[str]:
+    """服务记录的模型类别与模型发布的类别一致。发布包里没有 services/（只带服务的 compose 与模板），这里只在
+    开发机打包时检查。"""
+    problems = []
+    for path in sorted((root / layout.SERVICES).glob(f"*/{SERVICE_LOCK}")):
+        relative = path.relative_to(root)
+        service = path.parent.name
+        try:
+            recorded = read_service_lock(path)
+        except DeployError as error:
+            problems.append(str(error))
+            continue
+        for model, names in sorted(recorded.items()):
+            published = published_classes(root, model)
+            if published is None:
+                problems.append(f"{relative}: model {model} has not been published")
+            elif published != names:
+                problems.append(f"{relative}: the published classes of {model} changed since {service} confirmed "
+                                f"them:\n    " + "\n    ".join(class_diff.diff(names, published)) +
+                                f"\n    review {service}, then: framework/deploy/dsf-deploy.py lock-models {service}")
+    return problems
+
+
+def lock_models(root: Path, service: str, models: list[str]) -> list[str]:
+    """把模型当前发布的类别记入 services/<服务>/models.lock.json，返回每个模型相对旧记录的差异。不给模型时
+    重新确认记录中已有的全部模型。"""
+    directory = root / layout.SERVICES / service
+    if not service or "/" in service or not (directory / layout.UNIT_COMPOSE).is_file():
+        raise DeployError(f"{service!r} is not a service (no {layout.SERVICES}/{service}/{layout.UNIT_COMPOSE})")
+    path = directory / SERVICE_LOCK
+    recorded = read_service_lock(path)
+    targets = models or sorted(recorded)
+    if not targets:
+        raise DeployError(f"{path.relative_to(root)} does not exist yet: name the models {service} uses")
+    lines, updated = [], dict(recorded)
+    for model in targets:
+        published = published_classes(root, model)
+        if published is None:
+            raise DeployError(f"model {model} has not been published (no {layout.MODELS}/{model}/{RELEASE})")
+        if model not in recorded:
+            lines.append(f"  {model}: recorded ({len(published)} classes)")
+        elif recorded[model] != published:
+            lines.append(f"  {model}:\n    " + "\n    ".join(class_diff.diff(recorded[model], published)))
+        else:
+            lines.append(f"  {model}: unchanged")
+        updated[model] = published
+    if updated != recorded or not path.is_file():
+        path.write_text(json.dumps({"schema": SCHEMA, "models": dict(sorted(updated.items()))}, ensure_ascii=False,
+                                   indent=2) + "\n", encoding="utf-8")
+    return lines
 
 
 def check_model(directory: Path) -> list[str]:

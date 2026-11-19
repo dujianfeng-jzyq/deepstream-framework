@@ -1069,6 +1069,93 @@ class ClassPrelabelTest(RunTestCase):
         self.assertIn("护栏 is not a class of m", err)
 
 
+class ChangedClassesGateTest(RunTestCase):
+    """类别改变之后的发布（docs/training.md §15.6）：在共有类别上比较，release.json 记录类别变化与按来源统计。
+    假后端只报告类别 0 的每类指标，值按 run 区分。"""
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.train("run", "m")[0], 0)
+        self.first = self.only_run()
+        self.current = {"schema": 1, "model": "m", "release": "r1", "classes": CLASSES,
+                        "run": {"id": self.first, "weights_sha256": self.record(self.first)["weights"]["best_sha256"]}}
+
+    def retrain(self, *update):
+        """train update，重新勾选被撤销的图片，prepare 并训练；返回 (新 run, 它在新数据集上的评估)。"""
+        code, _, err = self.train("update", "m", *update)
+        self.assertEqual(code, 0, err)
+        for review in sources.read_record(self.source()).get("reviews") or []:
+            for name in review["files"]:
+                xanylabeling.update(self.source() / name.replace(".jpg", ".json"), checked=True)
+        self.dataset_id = dataset.prepare(self.repo, self.root, self.spec()).dataset_id
+        self.assertEqual(self.train("run", "m")[0], 0)
+        second = max(p.name for p in (self.root / "runs/m").iterdir() if p.name != self.first)
+        return second, publish._metrics(self.root, self.spec(), second, self.dataset_id, None)
+
+    def gate(self, evaluation, accept=False):
+        return publish.check_gate(self.repo, self.root, self.spec(), evaluation, self.current, accept)
+
+    def test_a_new_class_is_compared_on_the_classes_both_models_know(self):
+        second, evaluation = self.retrain("add", "防撞墩")
+        self.backend.map50_95 = {self.first: 0.6, second: 0.5}
+        with self.assertRaisesRegex(TrainError, "map50_95 \\(mean over the 1 shared classes\\) 0.5000 is 0.1000 "
+                                                "below the published release r1"):
+            self.gate(evaluation)
+        evaluated = [c for c in self.backend.calls if c[0] == "evaluate" and c[1].parents[2].name == self.first]
+        self.assertIn(f"/eval/{self.dataset_id}-as-", str(evaluated[-1][2]))  # 旧模型在换算过类别号的视图上评估
+        self.backend.map50_95 = {self.first: 0.6, second: 0.65}
+        shutil.rmtree(self.root / "runs/m" / second / "eval")  # 去掉缓存的评估，按新的假指标重新评估
+        evaluation = publish._metrics(self.root, self.spec(), second, self.dataset_id, None)
+        regression = self.gate(evaluation)["regression"]
+        self.assertEqual((regression["classes"], regression["published"], regression["passed"]),
+                         (["标志牌(圆牌)"], 0.6, True))
+        self.assertEqual(publish.class_changes(self.repo, self.spec(), self.current),
+                         {"renamed": {}, "removed": [], "added": ["防撞墩"]})
+
+    def test_renamed_classes_are_matched_by_the_recorded_rename(self):
+        second, evaluation = self.retrain("rename", "标志牌(圆牌)", "圆牌")
+        self.assertEqual(lock.renamed(self.repo, "m"), {"标志牌(圆牌)": "圆牌"})
+        regression = self.gate(evaluation)["regression"]
+        self.assertEqual((regression["classes"], regression["renamed"]), (["圆牌"], {"标志牌(圆牌)": "圆牌"}))
+        self.assertEqual(publish.class_changes(self.repo, self.spec(), self.current),
+                         {"renamed": {"标志牌(圆牌)": "圆牌"}, "removed": [], "added": []})
+        self.assertTrue(lock.clear_renamed(self.repo / "models/m"))  # 发布后清空
+        self.assertEqual(lock.renamed(self.repo, "m"), {})
+
+    def test_the_class_a_new_class_was_split_from_is_not_compared(self):
+        second, evaluation = self.retrain("add", "标志牌(方牌)", "--from", "标志牌(圆牌)")
+        with self.assertRaisesRegex(TrainError, "cannot compare with the published release r1: no class it shares "
+                                                "with model.yaml has test instances.*--accept-metrics"):
+            self.gate(evaluation)
+        self.assertTrue(self.gate(evaluation, accept=True)["accepted_without_comparison"])
+
+    def test_training_data_is_counted_per_source(self):
+        code, _, err = self.train("update", "m", "add", "防撞墩")
+        self.assertEqual(code, 0, err)
+        [review] = sources.read_record(self.source())["reviews"]
+        for name in review["files"][1:]:  # 第一张还没复核
+            xanylabeling.update(self.source() / name.replace(".jpg", ".json"), checked=True)
+        dataset_id = dataset.prepare(self.repo, self.root, self.spec()).dataset_id
+        count = len(review["files"])
+        entry = publish.training_data(self.root, self.spec(), dataset_id)["batch-01"]
+        self.assertEqual((entry["images"], entry["negatives"]), (count - 1, 0))
+        self.assertEqual(entry["instances"], {"标志牌(圆牌)": count - 1, "龙门架A": 0, "防撞桶": 0, "防撞墩": 0})
+        self.assertEqual(entry["skipped"], {"waiting for review of 防撞墩": 1})
+        self.assertEqual([(r["class"], r["checked"], r["total"]) for r in entry["reviews"]],
+                         [("防撞墩", count - 1, count)])
+
+
+class RenameRecordTest(TrainingTestCase):
+    def test_renames_are_composed(self):
+        lock.record_rename(self.repo, "m", "A", "B")
+        lock.record_rename(self.repo, "m", "B", "C")
+        self.assertEqual(lock.renamed(self.repo, "m"), {"A": "C"})
+        lock.write(self.repo, "m", {"batch-01": ["x"]})  # 写来源记录时保留改名记录
+        self.assertEqual(lock.renamed(self.repo, "m"), {"A": "C"})
+        lock.record_rename(self.repo, "m", "C", "A")  # 改回原名
+        self.assertEqual(lock.renamed(self.repo, "m"), {})
+        self.assertEqual(lock.read(self.repo, "m"), {"batch-01": ["x"]})
+
+
 class UltralyticsPredictTest(unittest.TestCase):
     """适配器把 agnostic 交给 Ultralytics 的 agnostic_nms（它默认按类别分别做 NMS）。Ultralytics 用替身。"""
 
@@ -1182,6 +1269,9 @@ class PublishTest(RunTestCase):
         self.assertTrue(release["gate"]["accepted_without_comparison"])
         self.assertTrue(release["consistency"]["passed"])
         self.assertEqual(release["consistency"]["class_mismatches"], 0)
+        self.assertNotIn("class_changes", release)  # 首次发布没有可对照的类别
+        self.assertEqual(release["training_data"]["batch-01"]["negatives"], 0)
+        self.assertEqual(release["training_data"]["batch-01"]["skipped"], {})
         self.assertEqual((self.model_dir / "artifacts/labels.txt").read_text(encoding="utf-8"),
                          "".join(f"{c}\n" for c in CLASSES))
         best = self.root / "runs/m" / self.run_id / "train" / ultralytics.BEST
@@ -1199,6 +1289,22 @@ class PublishTest(RunTestCase):
         code, _, err = self.train("publish", "m", self.run_id, "--accept-metrics")
         self.assertIn(f"identical to the published release {release['release']}", err)   # 不为同一模型换 engine 路径
         self.assertEqual(self.snapshot(), before)
+
+    def test_publishing_after_a_rename_records_the_change_and_clears_the_rename(self):
+        self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
+        self.assertEqual(self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")[0], 0)
+        self.assertEqual(self.train("prepare", "m")[0], 0)
+        self.assertEqual(self.train("run", "m")[0], 0)
+        second = max(p.name for p in (self.root / "runs/m").iterdir() if p.name != self.run_id)
+        code, out, err = self.train("publish", "m", second)
+        self.assertEqual(code, 0, err)
+        self.assertIn("compared on the shared classes: 圆牌", out)
+        self.assertIn("sources.lock.json", out)  # 改名记录随发布清空
+        release = json.loads((self.model_dir / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual(release["class_changes"], {"renamed": {"标志牌(圆牌)": "圆牌"}, "removed": [], "added": []})
+        self.assertEqual(release["gate"]["regression"]["classes"], ["圆牌"])
+        self.assertEqual(lock.renamed(self.repo, "m"), {})
+        self.assertEqual(models.check_model(self.model_dir), [])
 
     def test_the_minimum_gate_is_never_overridden(self):
         self.gate("{map50_95: 0.6}")

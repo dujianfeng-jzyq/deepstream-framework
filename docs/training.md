@@ -187,7 +187,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 4. **写入**：发布标识为 `<UTC 时间>-<ONNX 摘要>`。先在暂存目录组装完整的新模型目录：`artifacts/` 只含本次的 `model.onnx` 与 `labels.txt`；`release.json` 记录发布标识、run（数据集、源码版本、后端版本、权重 sha256）、训练所用数据集的按来源统计（见下）、评估所用数据集、总体与每类指标、门槛结果、ONNX 签名、一致性结果与产物 sha256；各 nvinfer 配置的 `model-engine-file` 改为 `/data/engines/<id>/<发布>/<文件>`（还没有发布段时插入一段，已有的替换当前发布那一段，看不出哪一段是发布标识时报错）。组装结果通过打包时的模型校验（§10）后，才把变化的文件逐个原子替换进 `models/<id>/`，`release.json` 最后写入；校验失败时模型目录不变。新旧 engine 路径不同，目标机上新旧 engine 并存，回滚不需要重建。
 5. 提交由人完成：审阅 `release.json` 中的指标与差异后提交。
 
-按来源统计从 run 所用数据集的 manifest 计算，结果确定：每个来源收入的图片数与其中的负样本数、每类实例数、按原因分开的跳过数（未检查、待复核 <类别>，§15.2）与尚未完成的复核名单。它随模型目录发布，两次发布之间的数据变化（例如新增一个来源、某个类别的实例从 0 增加到上千）在审阅 `release.json` 的差异时直接可见。统计不放进 `sources.lock.json`：锁文件只在类别变化时改动，它出现在差异中就意味着下游需要确认（§15.1）。
+按来源统计（`training_data`）：每个来源收入的图片数与其中的负样本数、每类实例数从 run 所用数据集的 manifest 计算，结果确定；按原因分开的跳过数（未标注、未检查、待复核 <类别>，§15.2）与尚未完成的复核名单（类别、时间、已重新勾选数/总数，文件列表在 `source.json`）是发布时来源的状态，说明这次发布时还有哪些素材没有进入。跳过数不进 manifest：否则勾选一张未检查的图片就会得到新的数据集标识，发布前要重新评估。它随模型目录发布，两次发布之间的数据变化（例如新增一个来源、某个类别的实例从 0 增加到上千）在审阅 `release.json` 的差异时直接可见。统计不放进 `sources.lock.json`：锁文件只在类别变化时改动，它出现在差异中就意味着下游需要确认（§15.1）。
 
 nvinfer 配置是人工维护的运行参数，引用 `artifacts/model.onnx` 与 `artifacts/labels.txt`。首次发布前可以先写好（暂存目录中的校验连同新的 `release.json` 一起检查它）；还没有配置时发布照常进行并提示补写。之后发布只改动其中的 engine 路径。engine 路径的预检在评估与导出之前，路径写得无法识别时不会白等。
 
@@ -202,6 +202,7 @@ nvinfer 配置是人工维护的运行参数，引用 `artifacts/model.onnx` 与
 ## 10. 打包与安装
 
 - `scripts/build-release.sh` 在渲染之后、检查镜像之前执行模型校验（也可单独运行 `framework/deploy/dsf-deploy.py check-models`）。已实现的检查：规格完整；规格的类别、输入、输出布局与发布记录一致；产物与 sha256 一致且没有未发布的文件；`labels.txt` 与类别一致；导出签名符合输入尺寸与已知输出布局；nvinfer 配置引用的 ONNX 与标签是已发布产物，`model-engine-file` 在 `/data/engines/<id>/` 下，`num-detected-classes` 等于类别数，固定 batch 导出时 `batch-size` 与之相等。
+- 服务的类别依赖（§15.1）：`services/<服务>/models.lock.json` 记录的各模型类别必须与模型的 `release.json` 相同，不同时打印差异（`dsf-deploy.py lock-models <服务> [<模型>…]` 看过差异后重写）；没有这个文件的服务不检查。发布包不带 `services/`，这项只在开发机打包时检查。
 - 随任务与级联加入的检查（§11、§12）：`network-type` 与任务一致；分类模型的 `labels.txt` 格式；二级模型的 `operate-on-gie-id` 与 `operate-on-class-ids` 与一级模型对得上。
 - 模型随发布包进入安装目录的 `models/`；`model-engine-builder` 在目标 GPU 上构建 engine，Jetson 与服务器各自构建，engine 不进包。
 
@@ -264,9 +265,9 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | 6 | 模型包与停服前构建 engine | 已实现 |
 | 7 | 分类与分割任务、二级模型及其打包校验 | 预留 |
 | 8 | INT8 校准、数据闭环 | 预留 |
-| 9 | 修改已有模型的类别：类别依赖锁文件、`train update`、按类别预标注（§15） | 实现中（§15.7） |
+| 9 | 修改已有模型的类别：类别依赖锁文件、`train update`、按类别预标注（§15） | 已实现（二级模型部分随阶段 7） |
 
-## 15. 修改类别（实现中）
+## 15. 修改类别
 
 模型的类别会变：现场要求新增一种目标，两类分不清要合并，一类要细分，名称要改。目前只能手改 `model.yaml`，有两个问题：
 
@@ -347,8 +348,8 @@ train prepare road-assets && train run road-assets && train publish road-assets 
 
 ### 15.6 评估与发布
 
-- **退化比较在共有类别上做。** 今天类别改变后当前模型无法重新评估，只能 `--accept-metrics`。改为按名称把当前模型的类别对应到新类别，两个模型都只在共有类别上计算总体与每类指标；改名按改名前后对应；`--from A` 的 A 不计入（旧模型会把新类别的目标报成 A，比较对它不公平）。
-- `release.json` 记录相对上一个发布的类别变化（新增、改名、删除），以及按来源的标注统计与未完成的复核（§8），审阅差异时直接可见。
+- **退化比较在共有类别上做。** 按名称把当前发布的类别对应到新类别，改名按 `sources.lock.json` 的 `renamed`（`train update rename` 写入当前发布以来的改名，发布后清空）对应。当前模型在新数据集的测试划分上评估时，对象换成它的类别号、它不认识的类别去掉；比较的是两个模型在共有类别上每类指标的平均（只算测试划分中有实例的类别），结果写入门槛的 `classes`、`excluded` 与 `renamed`；`--from A` 的 A 不计入（旧模型会把新类别的目标报成 A，比较对它不公平）。
+- `release.json` 记录相对上一个发布的类别变化（`class_changes`：改名、删除、新增），以及按来源的标注统计与未完成的复核（`training_data`，§8），审阅差异时直接可见。
 - 打包校验在现有检查（§10）之外增加：服务的 `models.lock.json` 与模型发布的类别一致，不一致时打印差异。
 - 模型包仍然拒绝类别变化（§13），需要完整发布包：服务的依赖确认随完整发布包一起交付。
 
@@ -358,7 +359,7 @@ train prepare road-assets && train run road-assets && train publish road-assets 
 2. `rename`、`retire`（含 `--into`）及其自动修复与冲突检查。**已实现**；规格还不支持 `cascade`，二级模型的 `cascade.classes` 改写与引用检查随二级模型（§12）实现。
 3. `add`：撤销与复核名单、`--from`、`--skip-source`；`prepare` 的复核进度；`accept` 的限制。**已实现**
 4. `prelabel --class` 与放宽的类别检查。**已实现**
-5. `lock-models` 与服务的打包校验；共有类别上的退化比较；`release.json` 中的类别变化。
+5. `lock-models` 与服务的打包校验；共有类别上的退化比较；`release.json` 中的类别变化。**已实现**
 
 除训练与预标注推理外都是纯 Python，可以在 builder 中测试。
 

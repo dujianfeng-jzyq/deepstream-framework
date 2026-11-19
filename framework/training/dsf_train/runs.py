@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -175,6 +176,47 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
     paths.write_json(output / METRICS, document)
     record["evaluations"][dataset_id] = result["metrics"]
     paths.write_json(run_dir / RECORD, record)
+    return document
+
+
+def evaluate_as(root: Path, spec: dict, run: str, dataset_id: str, mapping: dict[str, str],
+                device: str | None = None) -> dict:
+    """在按当前类别准备的数据集上评估类别不同的 run（当前发布，§15.6）。mapping 是 run 的类别名 → 规格的类别名
+    （共有类别）：测试划分的对象换成 run 的类别号，不在 mapping 中的对象去掉，写一份只含测试划分的视图评估。
+    每类指标按规格的类别名给出；结果按数据集与 mapping 缓存在 eval/<数据集>-as-<摘要>/。"""
+    run_dir, record = load(root, spec["id"], run)
+    if record["status"] != "completed":
+        raise TrainError(f"run {run} is {record['status']}; only completed runs can be evaluated")
+    dataset_id, _, manifest = dataset.locate(root, spec, dataset_id)
+    test = [sample for sample in manifest["samples"] if sample["split"] == "test"]
+    if not test:
+        raise TrainError(f"the test split of dataset {dataset_id} is empty; nothing to evaluate on")
+    task = tasks.get(record["task"])
+    backend = backends.get(record["backend"]["name"], task.NAME)
+    key = json.dumps(sorted(mapping.items()), ensure_ascii=False)
+    output = run_dir / EVAL / f"{dataset_id}-as-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}"
+    if (output / METRICS).is_file():
+        return json.loads((output / METRICS).read_text(encoding="utf-8"))
+    to_run = {spec["classes"].index(new): record["classes"].index(old) for old, new in mapping.items()}
+    samples = [{**sample, "objects": [{**item, "class": to_run[item["class"]]} for item in sample["objects"]
+                                      if item["class"] in to_run]} for sample in test]
+    view = output / paths.VIEW / backend.NAME
+    shutil.rmtree(view, ignore_errors=True)
+    backend.write_view(task.NAME, {"classes": record["classes"], "samples": samples}, root, view, view)
+    result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST, view / "data.yaml", "test",
+                              {**record["options"], **({"device": device} if device is not None else {})},
+                              output / backend.NAME, root / paths.PRETRAINED)
+    shutil.rmtree(output / paths.VIEW, ignore_errors=True)
+    instances = task.statistics(test, spec)
+    classes = []
+    for old, new in mapping.items():
+        found = result["classes"].get(record["classes"].index(old)) or {}
+        classes.append({"name": new, "run_name": old, "instances": instances[new],
+                        **{metric: found.get(metric) for metric in task.METRICS}})
+    document = {"schema": SCHEMA, "run": run, "dataset": dataset_id, "split": "test", "images": len(test),
+                "mapping": mapping, "metrics": result["metrics"], "classes": classes,
+                "backend": {"name": backend.NAME, **backend.version()}, "evaluated_at": _now()}
+    paths.write_json(output / METRICS, document)
     return document
 
 

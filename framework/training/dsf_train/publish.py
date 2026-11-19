@@ -1,6 +1,7 @@
 """train publish：门槛 → 导出 → 验证 → 写入模型目录（docs/training.md §8）。顺序不可调换：
 
-1. 门槛：evaluate.gate.min 的下限，以及与 release.json 中当前模型在同一测试划分上的退化比较。
+1. 门槛：evaluate.gate.min 的下限，以及与 release.json 中当前模型在同一测试划分上的退化比较（类别变化后
+   在共有类别上比较，§15.6）。
 2. 导出：后端导出 ONNX 并在输出端追加到 output_layout 的转换；labels.txt 按任务的格式生成。
 3. 验证：ONNX 签名对照输入尺寸与输出布局（与打包时同一套规则）；原生推理与 onnxruntime 在测试样本上
    逐行比较，不一致即失败。
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from dsf_deploy import layout, models, naming
 
-from . import backends, dataset, media, onnxio, paths, runs, tasks
+from . import backends, dataset, lock, media, onnxio, paths, runs, sources, tasks
 from .errors import TrainError
 
 EXPORT = "export"
@@ -70,7 +71,7 @@ def publish(repo: Path, root: Path, spec: dict, run: str, dataset_id: str | None
     # 1. 门槛
     dataset_id, _, _ = dataset.locate(root, spec, dataset_id)
     evaluation = _metrics(root, spec, run, dataset_id, device)
-    gate = check_gate(root, spec, evaluation, current, accept_metrics, device)
+    gate = check_gate(repo, root, spec, evaluation, current, accept_metrics, device)
 
     # 2. 导出
     settings = spec["export"]
@@ -116,6 +117,9 @@ def publish(repo: Path, root: Path, spec: dict, run: str, dataset_id: str | None
         "evaluated_on": dataset_id, "metrics": evaluation["metrics"],
         "class_metrics": [item for item in evaluation["classes"] if item["instances"]],
         "gate": gate, "classes": spec["classes"], "input": spec["input"], "output_layout": output_layout,
+        **({"class_changes": class_changes(repo, spec, current)} if current and current.get("classes") !=
+           spec["classes"] else {}),
+        "training_data": training_data(root, spec, record["dataset"]),
         "onnx": onnx, "consistency": consistency,
         "artifacts": {f"{models.ARTIFACTS}/{ONNX}": onnx_sha256,
                       f"{models.ARTIFACTS}/{LABELS}": paths.sha256(export_dir / LABELS)},
@@ -178,7 +182,7 @@ def candidates(root: Path, spec: dict, dataset_id: str | None = None,
     return lines
 
 
-def check_gate(root: Path, spec: dict, evaluation: dict, current: dict | None, accept_metrics: bool,
+def check_gate(repo: Path, root: Path, spec: dict, evaluation: dict, current: dict | None, accept_metrics: bool,
                device: str | None = None) -> dict:
     """发布门槛。未通过时报错并列出原因；--accept-metrics 只放行“没有可对照的东西”，不放行未达标的指标。"""
     task = tasks.get(spec["task"])
@@ -201,20 +205,37 @@ def check_gate(root: Path, spec: dict, evaluation: dict, current: dict | None, a
         result["regression"] = {"skipped": "there is no published model yet"}
     else:
         unavailable = _comparable(root, spec, current)
+        metric, max_drop = regression["metric"], regression["max_drop"]
+        old_run = current["run"]["id"]
+        shared = {}
+        if not unavailable and current["classes"] == spec["classes"]:
+            old = _metrics(root, spec, old_run, evaluation["dataset"], device)["metrics"][metric]
+            new = metrics[metric]
+        elif not unavailable:
+            # 类别变了：两个模型都只在共有类别上比较，取这些类别的每类指标的平均（§15.6）。
+            mapping, excluded = class_mapping(repo, root, spec, current)
+            previous = runs.evaluate_as(root, spec, old_run, evaluation["dataset"], mapping, device)
+            old_values = {item["name"]: item[metric] for item in previous["classes"]}
+            new_values = {item["name"]: item[metric] for item in evaluation["classes"] if item["instances"]}
+            names = [n for n in spec["classes"] if old_values.get(n) is not None and new_values.get(n) is not None]
+            if names:
+                old = sum(old_values[n] for n in names) / len(names)
+                new = sum(new_values[n] for n in names) / len(names)
+                shared = {"classes": names, "excluded": excluded,
+                          "renamed": {o: n for o, n in mapping.items() if o != n}}
+            else:
+                unavailable = "no class it shares with model.yaml has test instances"
         if unavailable:
             result["regression"] = {"skipped": unavailable}
         else:
-            metric, max_drop = regression["metric"], regression["max_drop"]
-            old_run = current["run"]["id"]
-            old = _metrics(root, spec, old_run, evaluation["dataset"], device)["metrics"][metric]
-            new = metrics[metric]
             drop = old - new if task.METRICS[metric] == "higher" else new - old
             passed = drop <= max_drop
             result["regression"] = {"metric": metric, "max_drop": max_drop, "release": current["release"],
                                     "run": old_run, "published": old, "value": new, "drop": drop,
-                                    "passed": passed}
+                                    "passed": passed, **shared}
             if not passed:
-                failures.append(f"{metric} {new:.4f} is {drop:.4f} below the published release "
+                over = f" (mean over the {len(shared['classes'])} shared classes)" if shared else ""
+                failures.append(f"{metric}{over} {new:.4f} is {drop:.4f} below the published release "
                                 f"{current['release']} ({old:.4f}) on the same test split; "
                                 f"evaluate.gate.regression allows {max_drop}")
     if failures:
@@ -236,20 +257,73 @@ def _better_or_equal(task, name: str, value: float, bound: float) -> bool:
 
 
 def _comparable(root: Path, spec: dict, current: dict) -> str:
-    """当前发布能否在本训练根目录中重新评估；不能时返回原因。"""
+    """当前发布能否在本训练根目录中重新评估；不能时返回原因。类别不同也能比较（在共有类别上）。"""
     run = (current.get("run") or {}).get("id") or ""
-    if current.get("classes") != spec["classes"]:
-        return "it has other classes than model.yaml"
     try:
         run_dir, record = runs.load(root, spec["id"], run)
     except TrainError:
         return f"its run {run!r} is not in this training root"
-    if record["status"] != "completed" or record["classes"] != spec["classes"]:
-        return f"its run {run} is {record['status']} or has other classes"
+    if record["status"] != "completed" or record["classes"] != current.get("classes"):
+        return f"its run {run} is {record['status']} or has other classes than the release"
     best = run_dir / runs.TRAIN / backends.get(record["backend"]["name"], record["task"]).BEST
     if not best.is_file() or paths.sha256(best) != current["run"].get("weights_sha256"):
         return f"the weights of its run {run} differ from the published sha256"
     return ""
+
+
+def class_mapping(repo: Path, root: Path, spec: dict, current: dict) -> tuple[dict[str, str], list[str]]:
+    """当前发布的类别名 → 规格中的类别名（共有类别，按发布以来的改名对应），以及不计入比较的类别：
+    add --from A 新增的类别以前被标成 A，旧模型会把新类别的目标报成 A，比较对它不公平。"""
+    mapping = _survivors(repo, spec, current)
+    added = set(spec["classes"]) - set(mapping.values())
+    excluded = set()
+    for source in spec["data"]["sources"]:
+        record = sources.read_record(paths.source_dir(root, source))
+        excluded |= {r["from"] for r in record.get("reviews") or [] if r.get("from") and r["class"] in added}
+    return {old: new for old, new in mapping.items() if new not in excluded}, sorted(excluded)
+
+
+def class_changes(repo: Path, spec: dict, current: dict) -> dict:
+    """相对当前发布的类别变化：改名（按 train update 的记录）、删除与新增。"""
+    survivors = _survivors(repo, spec, current)
+    return {"renamed": {old: new for old, new in survivors.items() if old != new},
+            "removed": [old for old in current["classes"] if old not in survivors],
+            "added": [name for name in spec["classes"] if name not in survivors.values()]}
+
+
+def _survivors(repo: Path, spec: dict, current: dict) -> dict[str, str]:
+    """当前发布中仍在规格里的类别：旧名 → 现在的名称。改过名的按记录对应；名称被另一个类别改名占用的旧类别
+    不算留下（它已被删除，同名的是另一个类别）。"""
+    names = lock.renamed(repo, spec["id"])
+    result = {}
+    for old in current["classes"]:
+        new = names.get(old, old if old not in names.values() else None)
+        if new in spec["classes"]:
+            result[old] = new
+    return result
+
+
+def training_data(root: Path, spec: dict, dataset_id: str) -> dict:
+    """训练所用数据集的按来源统计（§8）。收入的图片、负样本与每类实例数从 manifest 计算；跳过数与未完成的
+    复核名单是发布时来源的状态：它们说明这次发布时还有哪些素材没有进入。"""
+    task = tasks.get(spec["task"])
+    _, _, manifest = dataset.locate(root, spec, dataset_id)
+    names = list(dict.fromkeys([*spec["data"]["sources"], *(s["source"] for s in manifest["samples"])]))
+    result = {}
+    for source in names:
+        samples = [s for s in manifest["samples"] if s["source"] == source]
+        counts = task.statistics(samples, spec)
+        entry = {"images": len(samples), "negatives": sum(1 for s in samples if not s["objects"]),
+                 "instances": {name: counts[name] for name in spec["classes"]}}
+        directory = paths.source_dir(root, source)
+        if (directory / paths.SOURCE_RECORD).is_file():
+            entry["skipped"] = dict(sorted(dataset.skipped_now(root, source).items()))
+            entry["reviews"] = [{"class": review["class"], "from": review.get("from"), "at": review["at"],
+                                 "checked": checked, "total": total}
+                                for review, checked, total in sources.review_progress(
+                                    directory, sources.read_record(directory)) if checked < total]
+        result[source] = entry
+    return result
 
 
 def _metrics(root: Path, spec: dict, run: str, dataset_id: str, device: str | None) -> dict:
@@ -350,11 +424,13 @@ def _install(directory: Path, spec: dict, release: dict, export_dir: Path, confi
         for name, text in configs.items():
             (staged / name).write_text(text, encoding="utf-8")
         paths.write_json(staged / models.RELEASE, release)
+        renames_cleared = lock.clear_renamed(staged)  # 改名记录只覆盖到这次发布
         problems = models.check_model(staged)
         if problems:
             raise TrainError(f"the new contents of {directory} fail the model check, nothing was changed:\n  " +
                              "\n  ".join(problems))
-        targets = [f"{models.ARTIFACTS}/{ONNX}", f"{models.ARTIFACTS}/{LABELS}", *configs, models.RELEASE]
+        targets = [f"{models.ARTIFACTS}/{ONNX}", f"{models.ARTIFACTS}/{LABELS}", *configs,
+                   *([lock.FILE] if renames_cleared else []), models.RELEASE]
         changed = []
         for relative in targets:
             source, target = staged / relative, directory / relative
@@ -389,6 +465,9 @@ def report(result: Result) -> list[str]:
                      f"allowed {regression['max_drop']})")
     else:
         lines.append(f"  gate regression skipped: {regression['skipped']}")
+    if regression.get("classes"):
+        excluded = f"; not compared: {', '.join(regression['excluded'])}" if regression.get("excluded") else ""
+        lines.append(f"  compared on the shared classes: {', '.join(regression['classes'])}{excluded}")
     if gate["accepted_without_comparison"]:
         lines.append("  metrics accepted without comparison (--accept-metrics)")
     lines.append(f"  export consistency: {_consistency_text(result.consistency)}")

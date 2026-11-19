@@ -1,4 +1,4 @@
-"""命令行入口：render / profile-variables / check-models / pack / pack-models / install / install-models / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
+"""命令行入口：render / profile-variables / check-models / lock-models / pack / pack-models / install / install-models / init / new-app。由 framework/deploy/dsf-deploy.py 调用。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import modelpack, models, pack, project, render
+from . import layout, modelpack, models, pack, project, render
 from .errors import DeployError
 from .install import Options, install
 from .install.models import ModelOptions, install_models
@@ -31,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--profile", required=True)
 
     p = commands.add_parser("check-models", help="check models/ (spec, release record, artifacts, nvinfer configs)")
+    p.add_argument("--root")
+
+    p = commands.add_parser("lock-models", help="record the published classes of the models a service uses "
+                                                "(services/<service>/models.lock.json) after reviewing the differences")
+    p.add_argument("service")
+    p.add_argument("models", nargs="*", metavar="MODEL", help="defaults to the models already recorded")
     p.add_argument("--root")
 
     p = commands.add_parser("pack", help="render and create a release package (the images must be built)")
@@ -77,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "check-models":
             models.check(_root(args.root))
             print("models ok")
+        elif args.command == "lock-models":
+            lines = models.lock_models(_root(args.root), args.service, args.models)
+            print(f"recorded the classes of the models of {args.service} in "
+                  f"{layout.SERVICES}/{args.service}/{models.SERVICE_LOCK}")
+            print("\n".join(lines))
         elif args.command == "pack":
             pack.pack(_root(args.root), args.profile, args.with_base)
         elif args.command == "install":

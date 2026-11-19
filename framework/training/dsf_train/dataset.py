@@ -66,13 +66,9 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
             if not image.is_file():
                 problems.append(f"{where}: the image is missing")
                 continue
-            if not annotation_path.is_file():
-                skipped[(source, "not labeled")] += 1
-                continue
-            annotation = xanylabeling.read(annotation_path)
-            if not annotation.checked:
-                # 新增类别时撤销的图片单独报告：它们以前检查过，只差新类别（§15.2）。
-                reason = f"waiting for review of {', '.join(reviewing[name])}" if name in reviewing else "not checked"
+            annotation = xanylabeling.read(annotation_path) if annotation_path.is_file() else None
+            reason = skip_reason(name, annotation, reviewing)
+            if reason:
                 skipped[(source, reason)] += 1
                 continue
             if paths.sha256(image) != info["sha256"]:
@@ -120,6 +116,29 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
             raise
     (models_root / paths.LATEST).write_text(dataset_id + "\n", encoding="utf-8")
     return Result(dataset_id, directory, reused, manifest, skipped, ignored, notes)
+
+
+def skip_reason(name: str, annotation, reviewing: dict[str, list[str]]) -> str:
+    """图片不进入数据集的原因；收入时为空。新增类别时撤销的图片单独报告：它们以前检查过，只差新类别（§15.2）。"""
+    if annotation is None:
+        return "not labeled"
+    if not annotation.checked:
+        return f"waiting for review of {', '.join(reviewing[name])}" if name in reviewing else "not checked"
+    return ""
+
+
+def skipped_now(root: Path, source: str) -> Counter:
+    """来源中现在不会进入数据集的图片，按原因计数（发布记录用，§8）。"""
+    directory = paths.source_dir(root, source)
+    record = sources.read_record(directory)
+    reviewing = sources.review_classes(record)
+    counts = Counter()
+    for name in record["images"]:
+        path = xanylabeling.annotation_path(directory / name)
+        reason = skip_reason(name, xanylabeling.read(path) if path.is_file() else None, reviewing)
+        if reason:
+            counts[reason] += 1
+    return counts
 
 
 def locate(root: Path, spec: dict, dataset_id: str | None = None) -> tuple[str, Path, dict]:

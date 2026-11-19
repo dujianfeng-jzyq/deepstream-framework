@@ -5,11 +5,11 @@ import json
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from deploy_support import ROOT, FakeDocker, ProjectTestCase, docker_cli_available, write_model
-from dsf_deploy import models, pack
+from dsf_deploy import cli, models, pack
 from dsf_deploy.errors import DeployError
 
 
@@ -135,6 +135,58 @@ class ModelCheckTest(unittest.TestCase):
     def test_repository_models_pass(self):
         # 构建镜像的上下文不含 models/，这里在开发机上覆盖仓库中的真实模型（打包时同样会检查）。
         models.check(ROOT)
+
+
+class ServiceLockTest(unittest.TestCase):
+    """服务 → 模型的类别依赖：services/<服务>/models.lock.json（docs/training.md §15.1）。"""
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="dsf-models-"))
+        write_model(self.tmp / "models/m")
+        (self.tmp / "services/s").mkdir(parents=True)
+        (self.tmp / "services/s/compose.yaml").write_text("services: {}\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def deploy(self, *argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cli.main([*argv, "--root", str(self.tmp)])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_services_confirm_the_published_classes(self):
+        models.check(self.tmp)  # 没有锁记录的服务不检查
+        code, _, err = self.deploy("lock-models", "s")
+        self.assertIn("services/s/models.lock.json does not exist yet: name the models s uses", err)
+        code, out, err = self.deploy("lock-models", "s", "m")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  m: recorded (2 classes)", out)
+        lock = json.loads((self.tmp / "services/s/models.lock.json").read_text())
+        self.assertEqual(lock, {"schema": 1, "models": {"m": ["car", "person"]}})
+        models.check(self.tmp)
+        shutil.rmtree(self.tmp / "models/m")
+        write_model(self.tmp / "models/m", classes=("car", "bus", "person"))  # 重新发布，类别变了
+        with self.assertRaisesRegex(DeployError, "services/s/models.lock.json: the published classes of m changed "
+                                                 "since s confirmed them:\n    added bus \\(class 1\\)\n"
+                                                 "    renumbered person 1->2(.|\n)*lock-models s"):
+            models.check(self.tmp)
+        code, out, err = self.deploy("lock-models", "s")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  m:\n    added bus (class 1)", out)
+        models.check(self.tmp)
+
+    def test_models_must_be_published_and_services_must_exist(self):
+        write_model(self.tmp / "models/n")
+        (self.tmp / "models/n/release.json").unlink()
+        shutil.rmtree(self.tmp / "models/n/artifacts")
+        (self.tmp / "models/n/nvinfer.txt").unlink()
+        code, _, err = self.deploy("lock-models", "s", "n")
+        self.assertIn("model n has not been published", err)
+        code, _, err = self.deploy("lock-models", "nope", "m")
+        self.assertIn("'nope' is not a service", err)
+        (self.tmp / "services/s/models.lock.json").write_text('{"schema": 1, "models": {"n": ["x"]}}')
+        with self.assertRaisesRegex(DeployError, "services/s/models.lock.json: model n has not been published"):
+            models.check(self.tmp)
 
 
 @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")

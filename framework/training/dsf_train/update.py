@@ -155,6 +155,7 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
         result.lines.append(f"  source {source}: {count} annotations rewritten")
     updated, pending = _refresh_locks(repo, root, models, after, lambda _, names: renamed(names))
     for model_id in sorted(scope_models - {spec["id"]}) + [spec["id"]]:
+        lock.record_rename(repo, model_id, old, new)  # 中断后重新执行时再记一次，结果相同
         specs.write_classes(repo, model_id, renamed(models[model_id]["classes"]))
         result.lines.append(f"  model {model_id}: class {models[model_id]['classes'].index(old)} renamed")
     result.lines += _lock_lines(updated, pending)
