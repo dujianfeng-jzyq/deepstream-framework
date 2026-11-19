@@ -15,8 +15,7 @@ Plan BuildGraph(const Config& config, dsf::gst::Graph& graph) {
   const std::string& codec = config.encoder.codec;
   const auto record = [&](const dsf::gst::Endpoint& encoded, int source, const std::string& branch) {
     const std::string name = "rec_" + branch + "_" + std::to_string(source);
-    dsf::record::AddSegmentSink(graph, encoded, codec, config.recording.segment_seconds, name,
-                                config.recording.properties);
+    dsf::record::AddSegmentSink(graph, encoded, codec, name, config.recording.properties);
     plan.recorders.push_back({source, branch, name});
   };
   const auto encode = [&](const dsf::gst::Endpoint& input, const std::string& name) {

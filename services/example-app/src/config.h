@@ -17,7 +17,7 @@ namespace example_app {
 
 struct RecordingConfig {
   std::string root;
-  int segment_seconds = 60;
+  int segment_seconds = 60;  // 分段内画面的时长，不含断流（RecorderOptions::segment_length）
   bool raw = false;  // 每路源在推理前的画面
   bool osd = true;   // 推理、跟踪、画框之后的画面
   int split_on_gap_ms = 2000;  // 输入断流超过该时长后恢复时开始新分段，0 关闭（RecorderOptions::split_on_gap）

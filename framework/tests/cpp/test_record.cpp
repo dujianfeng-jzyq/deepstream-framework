@@ -80,6 +80,13 @@ struct Events {
   }
 };
 
+// 分段时长 1 秒（RecordingGraph 的关键帧间隔为 10 帧，约 1/3 秒），短录像也能切出多个分段。
+record::RecorderOptions ShortSegments(const fs::path& root, const std::string& branch) {
+  record::RecorderOptions options{root.string(), "cam", branch, "rec"};
+  options.segment_length = std::chrono::seconds(1);
+  return options;
+}
+
 gst::Graph RecordingGraph(int buffers, bool live) {
   gst::Graph graph;
   gst::Element source = graph.Add("videotestsrc", "src").Set("is-live", live);
@@ -90,7 +97,7 @@ gst::Graph RecordingGraph(int buffers, bool live) {
                              .Set("speed-preset", "ultrafast");
   graph.Chain({source, graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"),
                graph.Add("videoconvert"), encoder});
-  record::AddSegmentSink(graph, encoder, "h264", 1, "rec");
+  record::AddSegmentSink(graph, encoder, "h264", "rec");
   return graph;
 }
 
@@ -109,7 +116,7 @@ gst::Graph BufferedRecordingGraph() {
                            .Set("min-threshold-buffers", 20u);  // 队列里始终压着 20 帧
   graph.Chain({source, graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"),
                graph.Add("videoconvert"), graph.Add("identity", "counted"), encoder, queue});
-  record::AddSegmentSink(graph, queue, "h264", 60, "rec");
+  record::AddSegmentSink(graph, queue, "h264", "rec");
   return graph;
 }
 
@@ -475,7 +482,7 @@ TEST(recorder_closes_segments_at_eos) {
   RequireRecordingPlugins();
   TempDir dir;
   Events events;
-  SegmentRecorder recorder({dir.path.string(), "cam", "raw", "rec"}, events.Callbacks());
+  SegmentRecorder recorder(ShortSegments(dir.path, "raw"), events.Callbacks());
   gst::Pipeline pipeline("record-eos", RecordingGraph(75, false));
   pipeline.Add(recorder);
   const gst::Result result = pipeline.Run();
@@ -501,7 +508,7 @@ TEST(recorder_reports_segments_it_cannot_finalize) {
   };
   int finished = 0;
   callbacks.finished = [&](const Segment&, std::uint64_t) { ++finished; };
-  SegmentRecorder recorder({dir.path.string(), "cam", "raw", "rec"}, callbacks);
+  SegmentRecorder recorder(ShortSegments(dir.path, "raw"), callbacks);
   gst::Pipeline pipeline("record-rename-fails", RecordingGraph(45, false));
   pipeline.Add(recorder);
   CHECK(pipeline.Run().ok());  // 管线本身正常结束，失败由录像器的健康状态报告
@@ -518,7 +525,7 @@ TEST(recorder_prunes_after_each_segment) {
   RequireRecordingPlugins();
   TempDir dir;
   Events events;
-  record::RecorderOptions options{dir.path.string(), "cam", "raw", "rec"};
+  record::RecorderOptions options = ShortSegments(dir.path, "raw");
   options.retention.max_files = 1;
   options.retention.keep_files = 1;
   SegmentRecorder recorder(options, events.Callbacks());
@@ -542,17 +549,17 @@ TEST(recorder_prunes_after_each_segment) {
 
 namespace {
 
-// 30 帧（1 秒），第 15 帧起时间戳后移 3 秒（断流）。key_interval 决定周期关键帧的间隔。
-gst::Graph GapGraph(int key_interval) {
+// buffers 帧（30 帧/秒），断流由 TimestampGap 注入。key_interval 决定周期关键帧的间隔。
+gst::Graph GapGraph(int key_interval, int buffers = 30) {
   gst::Graph graph;
-  gst::Element source = graph.Add("videotestsrc", "src").Set("num-buffers", 30);
+  gst::Element source = graph.Add("videotestsrc", "src").Set("num-buffers", buffers);
   gst::Element encoder = graph.Add("x264enc", "enc")
                              .Set("key-int-max", key_interval)
                              .Set("tune", "zerolatency")
                              .Set("speed-preset", "ultrafast");
   graph.Chain({source, graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"),
                graph.Add("videoconvert"), graph.Add("identity", "gap"), encoder});
-  record::AddSegmentSink(graph, encoder, "h264", 60, "rec");
+  record::AddSegmentSink(graph, encoder, "h264", "rec");
   return graph;
 }
 
@@ -561,7 +568,10 @@ struct GapRun {
   std::string stats;
 };
 
-GapRun RecordAcrossGap(const fs::path& root, int key_interval, bool request_keyframe) {
+// 默认 30 帧，第 15 帧起时间戳后移 3 秒（断流）。
+GapRun RecordAcrossGap(const fs::path& root, int key_interval, bool request_keyframe, int buffers = 30,
+                       GstClockTime gap_at = GST_SECOND / 2,
+                       std::chrono::milliseconds segment_length = std::chrono::seconds(60)) {
   GapRun run;
   SegmentRecorder::Events callbacks;
   callbacks.finished = [&](const Segment& segment, std::uint64_t end_ms) {
@@ -569,10 +579,11 @@ GapRun RecordAcrossGap(const fs::path& root, int key_interval, bool request_keyf
   };
   record::RecorderOptions options{root.string(), "cam", "osd", "rec"};
   options.split_on_gap = std::chrono::milliseconds(1000);
+  options.segment_length = segment_length;
   SegmentRecorder recorder(options, callbacks);
-  TimestampGap gap(GST_SECOND / 2, 3 * GST_SECOND);
+  TimestampGap gap(gap_at, 3 * GST_SECOND);
   app::KeyframeOnGap keyframes("enc", std::chrono::milliseconds(1000));
-  gst::Pipeline pipeline("record-gap", GapGraph(key_interval));
+  gst::Pipeline pipeline("record-gap", GapGraph(key_interval, buffers));
   pipeline.Add(gap);
   if (request_keyframe) pipeline.Add(keyframes);
   pipeline.Add(recorder);
@@ -612,6 +623,22 @@ TEST(recorder_drops_frames_before_the_first_keyframe_after_a_gap) {
   if (run.finished.size() != 2) return;
   CHECK_EQ(FramesIn(run.finished[0].first.final_path), 15);
   CHECK_EQ(FramesIn(run.finished[1].first.final_path), 10);
+}
+
+TEST(recorder_splits_by_frame_time_and_keeps_the_last_gop_before_a_gap) {
+  RequireRecordingPlugins();
+  TempDir dir;
+  // 90 帧、分段 1 秒、关键帧间隔 10 帧；第 45 帧（1.5 秒）起断流 3 秒。第二个分段从第 30 帧开始，
+  // 已录 0.5 秒加上断流超过了分段时长：按时间戳计时会在断流前最后一个 GOP（第 40～44 帧）之前切分，
+  // 让它单独成为一个分段。按画面时长计时，它留在第二个分段，恢复后的分段重新计时。
+  const GapRun run = RecordAcrossGap(dir.path, 10, true, 90, GST_SECOND * 3 / 2, std::chrono::seconds(1));
+  std::vector<int> frames;
+  for (const auto& [segment, end_ms] : run.finished) frames.push_back(FramesIn(segment.final_path));
+  CHECK(frames == (std::vector<int>{30, 15, 30, 15}));
+  if (run.finished.size() != 4) return;
+  const std::uint64_t second = run.finished[1].second - run.finished[1].first.start_ms;
+  CHECK(second >= 450 && second <= 550);  // 不含断流
+  CHECK(run.stats.find("rec_gap_splits=1") != std::string::npos);
 }
 
 namespace {
@@ -723,7 +750,7 @@ TEST(recorder_stops_cleanly_before_any_input) {
   graph.Chain({graph.Add("videotestsrc", "src").Set("is-live", true),
                graph.Caps("video/x-raw,width=160,height=120,framerate=30/1"), graph.Add("videoconvert"),
                graph.Add("identity", "offline"), encoder});
-  record::AddSegmentSink(graph, encoder, "h264", 1, "rec");
+  record::AddSegmentSink(graph, encoder, "h264", "rec");
   gst::Pipeline pipeline("record-no-input", graph);
   OfflineSource offline;
   pipeline.Add(offline);

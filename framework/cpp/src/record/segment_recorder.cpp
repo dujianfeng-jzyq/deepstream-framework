@@ -212,6 +212,7 @@ SegmentRecorder::SegmentRecorder(RecorderOptions options, Events events)
       events_(std::move(events)),
       name_("recorder:" + options_.element),
       tracker_(options_.root, options_.source_id, options_.branch) {
+  if (options_.segment_length.count() <= 0) throw std::invalid_argument("segment length must be positive");
   if (options_.retention.max_files > 0 && options_.retention.keep_files > options_.retention.max_files) {
     throw std::invalid_argument("retention keep_files must not exceed max_files");
   }
@@ -226,9 +227,7 @@ void SegmentRecorder::MarkDetected() {
 
 void SegmentRecorder::Require(gst::Requirements& requirements) const {
   requirements.Signal("splitmuxsink", "format-location", options_.element);
-  if (options_.split_on_gap.count() > 0) {
-    requirements.Signal("splitmuxsink", "split-at-running-time", options_.element);
-  }
+  requirements.Signal("splitmuxsink", "split-at-running-time", options_.element);
 }
 
 void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
@@ -256,12 +255,26 @@ void SegmentRecorder::OnCreated(gst::Pipeline& pipeline, GstElement* bin) {
   gst_object_unref(internal);
   handler_ = g_signal_connect(sink_, "format-location", G_CALLBACK(&SegmentRecorder::OnFormatLocation),
                               this);
-  if (options_.split_on_gap.count() > 0) {
-    input_.Attach(GST_BIN(bin), options_.element, "video", GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput,
-                  this);
-  }
+  input_.Attach(GST_BIN(bin), options_.element, "video", GST_PAD_PROBE_TYPE_BUFFER, &SegmentRecorder::OnInput,
+                this);
 }
 
+namespace {
+
+GstClockTime RunningTime(GstPad* pad, GstClockTime timestamp) {
+  GstEvent* event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0);
+  if (event == nullptr) return timestamp;
+  const GstSegment* segment = nullptr;
+  gst_event_parse_segment(event, &segment);
+  const GstClockTime running = gst_segment_to_running_time(segment, GST_FORMAT_TIME, timestamp);
+  gst_event_unref(event);
+  return running;
+}
+
+}  // namespace
+
+// 帧进入 splitmuxsink 之前请求切分：split-at-running-time 使 splitmuxsink 在起点不早于该时刻的
+// 第一个 GOP 之前开始新分段，请求的正是这一帧（关键帧）时恰好在它之前切开。
 GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, gpointer self) {
   auto* recorder = static_cast<SegmentRecorder*>(self);
   GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
@@ -274,8 +287,26 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
   const bool keyframe = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
   const auto gap =
       static_cast<GstClockTime>(std::chrono::nanoseconds(recorder->options_.split_on_gap).count());
-  if (!GST_CLOCK_TIME_IS_VALID(last) || pts <= last || pts - last <= gap) {
-    if (!recorder->awaiting_keyframe_) return GST_PAD_PROBE_OK;
+  if (gap > 0 && GST_CLOCK_TIME_IS_VALID(last) && pts > last && pts - last > gap) {
+    const GstClockTime running = RunningTime(pad, pts);
+    const GstClockTime last_end =
+        RunningTime(pad, last + (GST_CLOCK_TIME_IS_VALID(last_duration) ? last_duration : 0));
+    // 断流前的帧（包括正在收集的 GOP）全部留在当前分段；新分段从恢复后的第一个关键帧开始计时。
+    g_signal_emit_by_name(recorder->sink_, "split-at-running-time", static_cast<guint64>(running));
+    recorder->segment_begin_ = GST_CLOCK_TIME_NONE;
+    {
+      std::lock_guard<std::mutex> lock(recorder->mutex_);
+      ++recorder->gap_splits_;
+      if (GST_CLOCK_TIME_IS_VALID(last_end)) recorder->gap_ends_.push_back(last_end);
+    }
+    spdlog::info("{}: input resumed after {:.1f} s; starting a new segment", recorder->options_.element,
+                 static_cast<double>(pts - last) / GST_SECOND);
+    if (!keyframe) {
+      recorder->awaiting_keyframe_ = true;
+      recorder->skipped_ = 1;
+      return GST_PAD_PROBE_DROP;
+    }
+  } else if (recorder->awaiting_keyframe_) {
     // 断流后、第一个关键帧之前的帧：留在旧分段会把断流带进去，新分段又不能从它们开始。
     if (!keyframe) {
       ++recorder->skipped_;
@@ -284,31 +315,19 @@ GstPadProbeReturn SegmentRecorder::OnInput(GstPad* pad, GstPadProbeInfo* info, g
     spdlog::info("{}: dropped {} frame(s) before the first keyframe after the gap",
                  recorder->options_.element, recorder->skipped_);
     recorder->awaiting_keyframe_ = false;
-    return GST_PAD_PROBE_OK;
   }
-  GstClockTime running = pts;
-  GstClockTime last_end = last + (GST_CLOCK_TIME_IS_VALID(last_duration) ? last_duration : 0);
-  if (GstEvent* event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0)) {
-    const GstSegment* segment = nullptr;
-    gst_event_parse_segment(event, &segment);
-    running = gst_segment_to_running_time(segment, GST_FORMAT_TIME, pts);
-    last_end = gst_segment_to_running_time(segment, GST_FORMAT_TIME, last_end);
-    gst_event_unref(event);
+  if (!keyframe) return GST_PAD_PROBE_OK;
+  const GstClockTime running = RunningTime(pad, pts);
+  if (!GST_CLOCK_TIME_IS_VALID(running)) return GST_PAD_PROBE_OK;
+  const auto length =
+      static_cast<GstClockTime>(std::chrono::nanoseconds(recorder->options_.segment_length).count());
+  if (!GST_CLOCK_TIME_IS_VALID(recorder->segment_begin_)) {
+    recorder->segment_begin_ = running;
+  } else if (running >= recorder->segment_begin_ + length) {
+    g_signal_emit_by_name(recorder->sink_, "split-at-running-time", static_cast<guint64>(running));
+    recorder->segment_begin_ = running;
   }
-  // 这一帧还没有进入 splitmuxsink：新分段从 running-time 不早于它的第一个关键帧开始，
-  // 断流前的帧（包括正在收集的 GOP）全部留在当前分段。
-  g_signal_emit_by_name(recorder->sink_, "split-at-running-time", static_cast<guint64>(running));
-  {
-    std::lock_guard<std::mutex> lock(recorder->mutex_);
-    ++recorder->gap_splits_;
-    if (GST_CLOCK_TIME_IS_VALID(last_end)) recorder->gap_ends_.push_back(last_end);
-  }
-  spdlog::info("{}: input resumed after {:.1f} s; starting a new segment", recorder->options_.element,
-               static_cast<double>(pts - last) / GST_SECOND);
-  if (keyframe) return GST_PAD_PROBE_OK;
-  recorder->awaiting_keyframe_ = true;
-  recorder->skipped_ = 1;
-  return GST_PAD_PROBE_DROP;
+  return GST_PAD_PROBE_OK;
 }
 
 GstPadProbeReturn SegmentRecorder::OnSinkData(GstPad* /*pad*/, GstPadProbeInfo* info, gpointer self) {
@@ -490,16 +509,12 @@ ds::RecordingEvent RecordingFinished(const RecorderOptions& options, const Segme
   return event;
 }
 
-gst::Element AddSegmentSink(gst::Graph& graph, const gst::Endpoint& encoded,
-                            const std::string& codec, int segment_seconds, const std::string& name,
-                            const config::Properties& properties) {
-  if (segment_seconds <= 0) throw std::invalid_argument("segment length must be positive");
+gst::Element AddSegmentSink(gst::Graph& graph, const gst::Endpoint& encoded, const std::string& codec,
+                            const std::string& name, const config::Properties& properties) {
   // MP4 封装需要 avc/hvc1 格式的码流，parser 负责从编码器的 byte-stream 转换。
   gst::Element parser = ds::AddParser(graph, encoded, codec, name + "_parse", false);
   gst::Element sink = graph.Add("splitmuxsink", name);
-  sink.Set("muxer-factory", "mp4mux")
-      .Set("max-size-time", static_cast<std::uint64_t>(segment_seconds) * std::uint64_t{1000000000})
-      .Apply(properties);
+  sink.Set("muxer-factory", "mp4mux").Apply(properties);
   graph.Link(parser, sink.Pad("video"));
   return sink;
 }

@@ -117,7 +117,7 @@ sometimes pad（nvurisrcbin、decodebin）在 pad 出现时自动连接。属性
 | `AddTiler` / `AddDemux` | `TilerSpec::Read` | 多路拼接 / 按源拆分（`demux.Pad("src_i")`） |
 | `AddEncoder` / `AddParser` | `EncoderSpec::Read` | 硬件编码；关键帧只能是 IDR：`iframe_interval` 设为 `idrinterval`，普通 I 帧关闭（`iframeinterval` 取 int 最大值；它与 `idrinterval` 相等时 dGPU 编码器在每个 IDR 后紧跟一个普通 I 帧），录像分段与中途加入的观看端都能从关键帧起播；编码器属性在 Jetson 与 dGPU 不同，用 `properties`；`keyframe_on_gap_ms`（默认 1000）供应用登记 `app::KeyframeOnGap` |
 | `AddRtspOut` / `AddFakeSink` | — | rtspclientsink / fakesink |
-| `record::AddSegmentSink` | — | parser + splitmuxsink(mp4mux) |
+| `record::AddSegmentSink` | — | parser + splitmuxsink(mp4mux)；不设分段时长，由 `SegmentRecorder` 请求切分 |
 
 每个块的配置都可以加 `properties:`，设置对应插件的任意属性；不需要时省略即可（缺省等于空）。源配置示例：
 
@@ -231,8 +231,9 @@ jpeg = fields.get(b"image")        # bytes；该帧没有图片时为 None
 ## 8. 分段录像
 
 ```cpp
-auto sink = dsf::record::AddSegmentSink(graph, encoded, "h264", 60, "rec_0");
+auto sink = dsf::record::AddSegmentSink(graph, encoded, "h264", "rec_0");
 dsf::record::RecorderOptions options{root, source_id, "osd", "rec_0"};
+options.segment_length = std::chrono::seconds(60);             // 默认值；分段内画面的时长
 options.retention = {1440, 60, 5ull << 30};  // max_files keep_files min_free_bytes；默认全 0 不清理
 options.split_on_gap = std::chrono::milliseconds(2000);       // 默认值；0 关闭
 dsf::record::SegmentRecorder::Events events;                  // 可选；started 在媒体线程，finished 在控制线程
@@ -248,7 +249,9 @@ recorder.MarkDetected();   // 任意线程：当前分段出现过目标
 
 保留策略 `RecorderOptions::retention` 按录像器（每个源的每个分支）独立计数，在启动时与每个分段收尾后执行，均在控制线程：已收尾分段按修改时间从新到旧，最新 `keep_files` 个始终保留；总数超过 `max_files` 时在其余分段中先删最旧的无目标分段，再删最旧的有目标分段；文件系统剩余空间低于 `min_free_bytes` 时按同样顺序继续删除，并可删入保护区（记 warning）。只处理符合本录像器命名的 `.mp4`，不动 `.tmp` 与其他文件。`max_files` 非 0 时须不小于 `keep_files`，否则构造时抛异常。统计 `<element>_pruned`；删除失败计入 `_failures` 并使 `Healthy()` 为 false。重启后有无目标从文件名还原。
 
-直播源断流恢复后，下一帧的时间戳比上一帧晚整个断流时长（running-time 在断流期间照常前进），splitmuxsink 会把这段时间计入分段时长，文件中留下长时间的静止画面。录像入口相邻两帧相差超过 `RecorderOptions::split_on_gap`（默认 2 秒，0 关闭）时，录像器请求 `split-at-running-time`：断流前的帧留在当前分段，新分段从恢复后第一个关键帧开始，其间的帧不写入录像（留在旧分段会把断流带进去，又不能作为新分段的开头），统计 `<element>_gap_splits`。编码器却会延续断流前的 GOP，所以还要在编码器输入上登记 `app::KeyframeOnGap`（阈值不大于 `split_on_gap`）：它在恢复后的第一帧之前请求关键帧——标准的 GstForceKeyUnit、dGPU 的 nvv4l2h26xenc 只认的 `nv-enc-force-idr` 事件（实测晚一帧生效，录像丢一帧），以及编码器存在时 Jetson 的 nvv4l2h26xenc 只认的 `force-IDR` 动作信号（实测正好在恢复后的第一帧生效）——RTSP 观看端也随之立即恢复画面，统计 `<encoder>_gap_keyframes`。不登记时录像最多丢一个关键帧间隔。断流期间当前分段保持打开，恢复或停止时收尾。
+分段时长由录像器控制：从分段第一个关键帧起，画面时长达到 `RecorderOptions::segment_length` 后，录像器在下一个关键帧处请求 `split-at-running-time`，分段因此比它长不到一个关键帧间隔。不使用 splitmuxsink 的 `max-size-time`：它按"下一个 GOP 的起点减分段起点"判断，断流恢复后断流前最后一个 GOP 的时长包含了整个断流，分段已录时长加断流超过上限时会在这个 GOP 之前提前切分，使断流前的分段变短、这个 GOP 单独成为一个小分段。不要通过 `properties` 再设置 `max-size-time`。
+
+直播源断流恢复后，下一帧的时间戳比上一帧晚整个断流时长（running-time 在断流期间照常前进），留在同一分段中会使文件出现长时间的静止画面，与真实的静止场景无法区分。录像入口相邻两帧相差超过 `RecorderOptions::split_on_gap`（默认 2 秒，0 关闭）时，录像器请求 `split-at-running-time`：断流前的帧留在当前分段，新分段从恢复后第一个关键帧开始，其间的帧不写入录像（留在旧分段会把断流带进去，又不能作为新分段的开头），统计 `<element>_gap_splits`；新分段从恢复后的第一个关键帧重新计时。编码器却会延续断流前的 GOP，所以还要在编码器输入上登记 `app::KeyframeOnGap`（阈值不大于 `split_on_gap`）：它在恢复后的第一帧之前请求关键帧——标准的 GstForceKeyUnit、dGPU 的 nvv4l2h26xenc 只认的 `nv-enc-force-idr` 事件（实测晚一帧生效，录像丢一帧），以及编码器存在时 Jetson 的 nvv4l2h26xenc 只认的 `force-IDR` 动作信号（实测正好在恢复后的第一帧生效）——RTSP 观看端也随之立即恢复画面，统计 `<encoder>_gap_keyframes`。不登记时录像最多丢一个关键帧间隔。断流期间当前分段保持打开，恢复或停止时收尾。
 
 停止时的顺序很重要：`OnStopping` **不**直接向录像入口发送 EOS，而是让管线注入的 EOS 跟在最后一帧后面流经编码器与队列，全部到达后才封装（判据是 `fragment-closed`）。提前在录像入口发 EOS 会让分段立即封装，编码器内部与分支队列中仍在处理的帧随后到达时被丢弃。若 EOS 在 `RecorderOptions::eos_fallback`（默认 3 秒，须小于管线的 `stop_timeout`）内仍未到达录像入口（某个上游元件不传递 EOS），才会直接向录像入口发送 EOS 作为兜底。录像入口一帧都没有收到就停止时（例如直播源离线时重启服务），录像器不把 EOS 交给 splitmuxsink：GStreamer 1.20 的 splitmuxsink 在没有数据时收到 EOS 会断言失败并终止进程，而此时也没有需要封装的分段，排空照常完成。
 

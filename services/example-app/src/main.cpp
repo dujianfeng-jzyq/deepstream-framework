@@ -59,6 +59,7 @@ struct ExampleApp {
     for (const auto& slot : plan.recorders) {
       const std::string& source_id = config.sources[static_cast<std::size_t>(slot.source)].id;
       dsf::record::RecorderOptions options{config.recording.root, source_id, slot.branch, slot.element};
+      options.segment_length = std::chrono::seconds(config.recording.segment_seconds);
       options.retention = config.recording.retention;
       options.split_on_gap = std::chrono::milliseconds(config.recording.split_on_gap_ms);
       dsf::record::SegmentRecorder::Events events;

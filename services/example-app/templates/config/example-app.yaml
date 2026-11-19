@@ -75,6 +75,7 @@ encoder:
 
 recording:
   root: ${CONTAINER_DATA_PATH}/recordings
+  # 分段内画面的时长（秒），在达到它之后的第一个关键帧处切分，断流时长不计入。
   segment_seconds: 60
   # 输入断流超过该时长后恢复时开始新分段：断流前的分段只含断流前的画面，事件中的时长不含断流。
   # 不小于 encoder.keyframe_on_gap_ms，切分才正好落在恢复后的第一帧；0 关闭。

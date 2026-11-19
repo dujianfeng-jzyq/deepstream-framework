@@ -1,4 +1,6 @@
-// 分段录像：splitmuxsink 按时长切分 MP4，框架负责命名、收尾确认与事件通知。
+// 分段录像：录像器按分段内画面的时长请求 splitmuxsink 在关键帧处切分 MP4，并负责命名、收尾确认与事件通知。
+// 分段时长不交给 splitmuxsink 的 max-size-time：它按时间戳计时，直播源断流恢复后会把断流时长算进
+// 断流前最后一个 GOP，提前切分，断流前的分段变短（见 RecorderOptions::segment_length）。
 //
 // 文件布局：<root>/<source_id>/<branch>/<source_id>-<branch>-<起始本地时间>-<序号>[-detected].mp4
 // 起始本地时间形如 20261005T163012.345（本地时间与毫秒，不带时区标记），时区取自 /etc/localtime。
@@ -96,6 +98,9 @@ struct RecorderOptions {
   std::string source_id;
   std::string branch;     // 例如 raw / osd
   std::string element;    // AddSegmentSink 创建的 splitmuxsink 名
+  // 分段内画面的时长达到这个值后，在下一个关键帧处开始新分段；分段因此比它长不到一个关键帧间隔。
+  // 断流切分（split_on_gap）后的分段从恢复后的第一个关键帧重新计时，断流时长不计入。必须为正。
+  std::chrono::milliseconds segment_length{60000};
   // 停止时，管线注入的 EOS 在这段时间内仍未到达录像入口，就直接向录像入口发送 EOS。
   // 必须小于管线的 stop_timeout，否则兜底来不及生效。0 表示不兜底。
   std::chrono::milliseconds eos_fallback{3000};
@@ -116,7 +121,7 @@ class SegmentRecorder : public gst::Component {
     std::function<void(const Segment&, std::uint64_t end_ms)> finished;
   };
 
-  // retention.max_files 非 0 且小于 keep_files 时抛 std::invalid_argument。
+  // segment_length 不为正，或 retention.max_files 非 0 且小于 keep_files 时抛 std::invalid_argument。
   SegmentRecorder(RecorderOptions options, Events events);
   ~SegmentRecorder() override;
 
@@ -156,9 +161,10 @@ class SegmentRecorder : public gst::Component {
   std::vector<GstClockTime> gap_ends_;
   GstElement* sink_ = nullptr;
   gulong handler_ = 0;
-  gst::PadProbe input_;  // split_on_gap 时挂在录像入口上
-  GstClockTime last_input_ = GST_CLOCK_TIME_NONE;  // 以下四项只在流线程访问
+  gst::PadProbe input_;  // 录像入口：按时长与断流请求切分
+  GstClockTime last_input_ = GST_CLOCK_TIME_NONE;  // 以下五项只在流线程访问
   GstClockTime last_duration_ = GST_CLOCK_TIME_NONE;
+  GstClockTime segment_begin_ = GST_CLOCK_TIME_NONE;  // 当前分段第一个关键帧的 running-time
   bool awaiting_keyframe_ = false;  // 断流后丢弃关键帧之前的帧
   std::uint64_t skipped_ = 0;
   // 挂在录像入口（ghost pad）的内部 pad 上：管线在 ghost pad 上记录 EOS 到达，之后才轮到这里，
@@ -174,10 +180,10 @@ ds::RecordingEvent RecordingStarted(const RecorderOptions& options, const Segmen
 ds::RecordingEvent RecordingFinished(const RecorderOptions& options, const Segment& segment, std::uint64_t end_ms);
 
 // encoded（已编码的 H.264/H.265 流）→ parser → splitmuxsink(mp4mux)。
-// 返回 splitmuxsink；properties 透传给 splitmuxsink。
-gst::Element AddSegmentSink(gst::Graph& graph, const gst::Endpoint& encoded,
-                            const std::string& codec, int segment_seconds, const std::string& name,
-                            const config::Properties& properties = {});
+// 返回 splitmuxsink；properties 透传给 splitmuxsink。块本身不设分段时长：切分由登记在它上面的
+// SegmentRecorder 发出（RecorderOptions::segment_length），没有录像器时整段录成一个文件。
+gst::Element AddSegmentSink(gst::Graph& graph, const gst::Endpoint& encoded, const std::string& codec,
+                            const std::string& name, const config::Properties& properties = {});
 
 }  // namespace dsf::record
 
