@@ -85,8 +85,11 @@ def read_service_lock(path: Path) -> dict[str, list[str]]:
 
 def check_service_locks(root: Path) -> list[str]:
     """服务记录的模型类别与模型发布的类别一致。发布包里没有 services/（只带服务的 compose 与模板），这里只在
-    开发机打包时检查。"""
+    开发机打包时检查；没有 models/ 目录（镜像的构建上下文有意排除它）时同样不检查，否则每份锁记录都会报
+    “未发布”。"""
     problems = []
+    if not (root / layout.MODELS).is_dir():
+        return problems
     for path in sorted((root / layout.SERVICES).glob(f"*/{SERVICE_LOCK}")):
         relative = path.relative_to(root)
         service = path.parent.name

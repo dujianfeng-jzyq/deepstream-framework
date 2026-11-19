@@ -187,6 +187,8 @@ class ServiceLockTest(unittest.TestCase):
         (self.tmp / "services/s/models.lock.json").write_text('{"schema": 1, "models": {"n": ["x"]}}')
         with self.assertRaisesRegex(DeployError, "services/s/models.lock.json: model n has not been published"):
             models.check(self.tmp)
+        shutil.rmtree(self.tmp / "models")
+        models.check(self.tmp)  # 构建镜像的上下文不含 models/：不检查
 
 
 @unittest.skipUnless(docker_cli_available(), "docker CLI not installed (needed for compose config)")
