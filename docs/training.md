@@ -146,6 +146,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 - 写入的标注一律 `checked: false`：人在工具中修正（预测正确时直接）勾选后才进入数据集，与人工标注同一条规则（§5.2），不需要另外的确认机制。
 - 写入的文件与所用模型（发布或 run、权重 sha256、阈值）记入 `prelabel.json`，用于追溯；它不影响收录。中断后再次运行只处理剩下没有 JSON 的图片。
 - `train prepare` 对引用的来源报告每批预标注的修正量：已检查的图片中，预测框保留（同类别且 IoU ≥ 0.5，允许微调位置）、删除（或改了类别）与人补充的框各有多少，衡量模型在新数据上的表现。
+- **二级模型**（`cascade`）的标签是父类别框上的属性，图片早已标注并勾选，没有空白标注可写，所以它的预标注不改来源，而是建立复核集 `reviews/<id>-prelabel-<来源>/`（§7）：来源中已勾选图片上没有该属性取值（缺少或为空）的父类别框，不小于 `data.from_parent.min_size` 的，按部署方式裁剪推理，最高类别的概率不低于 `--conf` 时把它填进副本，否则留空。人给过的取值（包括 `data.ignore_classes` 中的“未知”）不动，没勾选的图片不处理。`checklist.txt` 列出每个框的提议与置信度；在 X-AnyLabeling 中逐张核对、修正并保存，然后 `train review apply <名称>`。提议本身就是对来源的修改，所以 apply 写回复核集中的**全部**副本，而不只是改过的：没来得及核对的图片，删掉它在复核集中的 `.json` 就不会写回。写回之前 `train prepare` 提醒有未应用的复核，同名复核集不会被重新预标注替换。`--class` 不适用于二级模型。
 
 ## 6. 准备数据集：`train prepare <id>`
 
@@ -256,7 +257,8 @@ data:
 - **导出**：Ultralytics 的分类头输出 logits（softmax 只在它的 Python 预测器中做），而 nvinfer 内置的分类解析把输出当作概率与 `classifier-threshold` 比较，所以导出时追加 Softmax，输出为 `[batch, 类别数]`。一致性验证在测试划分的裁剪上比较概率。
 - **部署契约**：二级模型的 nvinfer 配置使用 `network-type=1`、`process-mode=2`，`operate-on-gie-id` 等于父模型配置的 `gie-unique-id`，`operate-on-class-ids` 由 `cascade.classes` 按父模型发布的 `classes` 换算出类别号。打包与发布时校验：父模型重新发布并改变了类别号时，二级模型的配置在打包前失败，而不是在现场作用于错误的类别。
 - 应用配置的 `inference` 链按顺序串接一级与二级模型（已支持），二级结果在检测消息对象的 `classes[]` 中。
-- **尚未实现**：二级模型的预标注（`train prelabel` 对它报告不支持）；父类别改名或删除时自动改写 `cascade.classes`——`train update` 列出受影响的二级模型，由人改写，在改写之前二级模型的规格校验失败；整图分类。`train import` 与 `train update add|rename|retire` 对二级模型拒绝：它的样本来自父模型的来源，类别是属性值而不是标签。
+- **预标注**：`train prelabel` 对二级模型建立复核集，由模型填上框上缺少的属性取值，人核对后写回（§5.4）。
+- **尚未实现**：父类别改名或删除时自动改写 `cascade.classes`——`train update` 列出受影响的二级模型，由人改写，在改写之前二级模型的规格校验失败；整图分类。`train import` 与 `train update add|rename|retire` 对二级模型拒绝：它的样本来自父模型的来源，类别是属性值而不是标签。
 
 ## 13. 只更新模型
 
@@ -276,7 +278,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | 4 | `train prelabel` | 已实现 |
 | 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 已实现 |
 | 6 | 模型包与停服前构建 engine | 已实现 |
-| 7 | 二级分类模型及其打包校验（§12） | 已实现（预标注与 `cascade.classes` 的自动改写除外） |
+| 7 | 二级分类模型及其打包校验、预标注（§12） | 已实现（`cascade.classes` 的自动改写除外） |
 | 7b | 整图分类、分割任务 | 预留 |
 | 8 | INT8 校准、数据闭环 | 预留 |
 | 9 | 修改已有模型的类别：类别依赖锁文件、`train update`、按类别预标注（§15） | 已实现（二级模型的 `cascade.classes` 由人改写，§12） |

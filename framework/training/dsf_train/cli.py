@@ -198,6 +198,27 @@ def main(argv: list[str] | None = None) -> int:
             for source in model["data"]["sources"]:
                 for line in prelabel.review(root, model, source):
                     print(line)
+        elif args.command == "prelabel" and spec.load(repo, args.model).get("cascade"):
+            model = spec.load(repo, args.model)
+            if args.class_:
+                raise TrainError("--class prelabels a new class of a detection model; a second-stage model "
+                                 "prelabels the attribute on the parent boxes")
+            result = prelabel.prelabel_attribute(repo, root, model, args.source, args.run, args.conf, args.device)
+            used = result.model
+            name = f"release {used['release']} (run {used['run']})" if "release" in used else f"run {used['run']}"
+            attribute = model["data"]["from_parent"]["attribute"]
+            print(f"prelabeled {attribute} with {name}: {result.boxes} boxes filled, {result.unsure} left empty "
+                  f"(below --conf {args.conf}), on {result.written} images of {args.source}; the source is unchanged")
+            for reason, count in sorted(result.skipped.items()):
+                print(f"  skipped {count} {reason}")
+            if result.proposals:
+                review_name = f"{model['id']}-prelabel-{args.source}"
+                target = review.propose(root, review_name, model["id"], used["run"], attribute, result.proposals)
+                print(f"review {review_name}: {target}\n  open it in X-AnyLabeling and step through with D (the boxes "
+                      f"are in {review.CHECKLIST}); correct and save, then: train review apply {review_name}\n"
+                      "  apply writes back every image of the review: delete the .json of images you did not check")
+            else:
+                print(f"  no checked boxes without {attribute}: nothing to prelabel")
         elif args.command == "prelabel":
             model = spec.load(repo, args.model)
             result = prelabel.prelabel(repo, root, model, args.source, args.run, args.conf, args.device,

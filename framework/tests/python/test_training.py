@@ -1667,8 +1667,8 @@ class SecondStageSpecTest(SecondStageTestCase):
         self.assertIn("occ is a second-stage model: its samples are boxes of m", err)
         code, _, err = self.train("update", "occ", "rename", "否", "无遮挡")
         self.assertIn("values of the box attribute 遮挡, not source labels", err)
-        code, _, err = self.train("prelabel", "occ", "--source", "batch-01")
-        self.assertIn("prelabel is not supported for task classify yet", err)
+        code, _, err = self.train("prelabel", "occ", "--source", "batch-01", "--class", "是")
+        self.assertIn("--class prelabels a new class of a detection model", err)
 
 
 class SecondStagePrepareTest(SecondStageTestCase):
@@ -2010,6 +2010,60 @@ class SecondStagePublishTest(SecondStageTestCase):
         [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
         code, _, err = self.train("eval", "occ", run, "--errors", "--split", "train", "--split", "val")
         self.assertIn(f"review {name} has 1 edited annotations that are not applied yet", err)
+
+    def test_prelabel_fills_the_attribute_in_a_review_and_apply_writes_it_back(self):
+        [group] = groups_in("train", 1)
+        extra = self.tmp / "extra" / "extra"
+        image(extra / "extra.jpg", (1, 2, 3), size=(640, 480))
+        boxes(extra / "extra.json", [
+            (self.PARENT_CLASS, [300, 300, 400, 400], {}),                 # 没有取值：模型提议
+            (self.PARENT_CLASS, [10, 10, 20, 20], {}),                     # 小于 min_size：不提议
+            (self.PARENT_CLASS, [100, 300, 200, 400], {"遮挡": "未知"}),   # 人给的取值（含“未知”）不动
+            (CLASSES[1], [450, 300, 500, 400], {})])                        # 不是父类别
+        self.import_(self.tmp / "extra")
+        unchecked = self.tmp / "unchecked" / "u"
+        image(unchecked / "u.jpg", (4, 5, 6), size=(640, 480))
+        boxes(unchecked / "u.json", [(self.PARENT_CLASS, [300, 300, 400, 400], {})], checked=False)
+        self.import_(self.tmp / "unchecked")
+        source_json = self.source() / "extra.json"
+        before = source_json.read_bytes()
+        self.assertEqual(self.train("prepare", "occ")[0], 0)
+        self.assertEqual(self.train("run", "occ")[0], 0)
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        name, folder = "occ-prelabel-batch-01", self.root / "reviews/occ-prelabel-batch-01"
+
+        code, out, err = self.train("prelabel", "occ", "--source", "batch-01", "--run", run, "--conf", "0.95")
+        self.assertEqual(code, 0, err)
+        self.assertIn("0 boxes filled, 1 left empty (below --conf 0.95), on 1 images", out)
+        self.assertIn("遮挡 left empty (model unsure) (0.90)", (folder / "checklist.txt").read_text(encoding="utf-8"))
+        shutil.rmtree(folder)
+
+        code, out, err = self.train("prelabel", "occ", "--source", "batch-01", "--run", run)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"prelabeled 遮挡 with run {run}: 1 boxes filled, 0 left empty", out)
+        self.assertIn("skipped 1 boxes smaller than 16 px", out)
+        self.assertEqual(source_json.read_bytes(), before)                        # 来源不变
+        self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                         ["attributes.json", "batch-01__extra.jpg", "batch-01__extra.json", "checklist.txt",
+                          "review.json"])
+        copy = json.loads((folder / "batch-01__extra.json").read_text(encoding="utf-8"))
+        self.assertEqual([shape["attributes"].get("遮挡") for shape in copy["shapes"]], ["否", None, "未知", None])
+        self.assertIn("[ ] batch-01__extra.jpg  [300, 300, 400, 400] 标志牌(圆牌)  遮挡=否 proposed (0.90)",
+                      (folder / "checklist.txt").read_text(encoding="utf-8"))
+        # 提议在写回之前都算未应用的修改：prepare 提醒，同名复核集不会被替换。
+        self.assertIn(f"warning: review {name} has 1 edited annotations that are not applied",
+                      self.train("prepare", "occ")[1])
+        self.assertIn("not applied yet", self.train("prelabel", "occ", "--source", "batch-01", "--run", run)[2])
+        code, out, err = self.train("review", "apply", name)
+        self.assertEqual(code, 0, err)
+        self.assertIn("wrote 1 annotations back, 0 unchanged", out)
+        written = json.loads(source_json.read_text(encoding="utf-8"))
+        self.assertEqual((written["imagePath"], written["shapes"][0]["attributes"]["遮挡"]), ("extra.jpg", "否"))
+        self.assertIn("wrote 0 annotations back, 1 unchanged", self.train("review", "apply", name)[1])
+        shutil.rmtree(folder)
+        code, out, _ = self.train("prelabel", "occ", "--source", "batch-01", "--run", run)
+        self.assertIn("no checked boxes without 遮挡: nothing to prelabel", out)
+        self.assertIn("is not a source of occ", self.train("prelabel", "occ", "--source", "nope", "--run", run)[2])
 
     def test_a_config_that_acts_on_other_parent_classes_is_not_published(self):
         (self.model_dir / "nvinfer.txt").write_text(

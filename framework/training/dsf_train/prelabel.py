@@ -7,11 +7,16 @@
   images         图像名 → 所属批次与写入的形状；人确认后与之对比，统计修正量
   class_images   图像名 → 类别 → 所属批次与追加的形状（按类别预标注）
 它不影响收录。
+
+二级模型（cascade）没有可写的空白标注：它的标签是父类别框上的属性，图片早已标注并勾选。所以它的预标注
+（prelabel_attribute）不写来源，而是建立复核集（review.propose）：副本中没有取值的框由模型填上，人在
+复核集中核对后 train review apply 写回。
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,7 +24,8 @@ from pathlib import Path
 
 from dsf_deploy import models
 
-from . import backends, paths, runs, sources, tasks, xanylabeling
+from . import backends, media, paths, runs, sources, tasks, xanylabeling
+from .tasks import detect
 from .errors import TrainError
 
 SCHEMA = 1
@@ -31,6 +37,8 @@ class Result:
     written: int = 0
     boxes: int = 0
     skipped: Counter = field(default_factory=Counter)
+    proposals: list = field(default_factory=list)  # 二级模型：review.propose 的提议
+    unsure: int = 0                               # 二级模型：低于 --conf、留空的框
 
 
 def _usable(classes: list[str], spec: dict, label: str | None) -> str:
@@ -85,7 +93,7 @@ def prelabel(repo: Path, root: Path, spec: dict, source: str, run: str | None, c
         raise TrainError(f"--conf must be between 0 and 1, not {conf}")
     if not hasattr(tasks.get(spec["task"]), "prelabel_shapes"):
         raise TrainError(f"prelabel is not supported for task {spec['task']} yet; label the images in "
-                         "X-AnyLabeling (for a second-stage model: the attribute on the parent boxes)")
+                         "X-AnyLabeling")
     if label is not None:
         return _prelabel_class(repo, root, spec, source, run, conf, device, label)
     task = tasks.get(spec["task"])
@@ -129,6 +137,73 @@ def prelabel(repo: Path, root: Path, spec: dict, source: str, run: str | None, c
         log["batches"][batch]["images"] = result.written
         if result.written:
             paths.write_json(log_path, log)
+    return result
+
+
+def prelabel_attribute(repo: Path, root: Path, spec: dict, source: str, run: str | None, conf: float,
+                       device: str | None = None) -> Result:
+    """二级模型：对来源中已勾选图片上没有 attribute 取值的父类别框（不小于 min_size）裁剪推理，最高类别的
+    概率不低于 conf 时把它作为取值，返回给 review.propose 的提议；来源不变。written 为涉及的图片数，
+    boxes 为填上取值的框数。"""
+    task = tasks.get(spec["task"])
+    if source not in spec["data"]["sources"]:
+        raise TrainError(f"{source} is not a source of {spec['id']} (data.sources)")
+    if not 0.0 <= conf <= 1.0:
+        raise TrainError(f"--conf must be between 0 and 1, not {conf}")
+    directory = paths.source_dir(root, source)
+    images = sources.read_record(directory)["images"]
+    best, model, record = weights(repo, root, spec, run)
+    backend = backends.get(record["backend"]["name"], task.NAME)
+    settings = task.from_parent(spec)
+    attribute, min_size = settings["attribute"], settings.get("min_size", task.DEFAULT_MIN_SIZE)
+    parents = set(task.source_labels(spec))
+    result = Result(model)
+    candidates = []  # (图片, 形状序号, 框, 父类别)
+    for name in sorted(images):
+        path = xanylabeling.annotation_path(directory / name)
+        if not path.is_file() or not (directory / name).is_file():
+            continue
+        annotation = xanylabeling.read(path)
+        if not annotation.checked:  # 没勾选的图片整张待人检查，不进入数据集，也不在这里提议
+            continue
+        for index, shape in enumerate(annotation.shapes):
+            if shape.shape_type != task.SHAPE or shape.label not in parents:
+                continue
+            if shape.attributes.get(attribute) not in (None, ""):
+                continue
+            box, problem = detect.rectangle(shape, annotation)
+            if problem:
+                result.skipped["invalid boxes (train prepare reports them)"] += 1
+            elif min(box[2] - box[0], box[3] - box[1]) < min_size:
+                result.skipped[f"boxes smaller than {min_size} px (data.from_parent.min_size)"] += 1
+            else:
+                candidates.append((name, index, box, shape.label))
+    if not candidates:
+        return result
+    width, height = spec["input"]["width"], spec["input"]["height"]
+    with tempfile.TemporaryDirectory(prefix="prelabel-", dir=root) as temp:
+        crops = []
+        for number, (name, _, box, _) in enumerate(candidates):
+            crops.append(Path(temp) / f"{number:06d}.png")
+            media.crop(directory / name, box, width, height).save(crops[-1])
+        predictions = list(backend.predict(task.NAME, best, crops, runs.inference_options(record["options"], device),
+                                           0.0, root / paths.PRETRAINED, agnostic=False))
+    by_image: dict[str, dict] = {}
+    for (name, index, box, parent), [prediction] in zip(candidates, predictions):
+        if name not in by_image:
+            document = json.loads(xanylabeling.annotation_path(directory / name).read_text(encoding="utf-8"))
+            by_image[name] = {"source": source, "image": name, "document": document, "boxes": []}
+        value = record["classes"][prediction["class"]] if prediction["score"] >= conf else None
+        if value is not None:
+            shape = by_image[name]["document"]["shapes"][index]
+            shape["attributes"] = {**(shape.get("attributes") or {}), attribute: value}
+            result.boxes += 1
+        else:
+            result.unsure += 1
+        by_image[name]["boxes"].append({"box": box, "parent": parent, "proposed": value,
+                                        "confidence": prediction["score"]})
+    result.proposals = list(by_image.values())
+    result.written = len(result.proposals)
     return result
 
 
