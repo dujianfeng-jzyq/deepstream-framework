@@ -1,0 +1,63 @@
+# sign-occlusion：标志牌遮挡。二级分类模型规格，人工维护；训练、发布与打包都从这里读取。
+# 发布事实（产物、来源、指标）由发布工具写进 release.json，不手改。见 docs/training.md §12。
+schema: 1
+id: sign-occlusion
+display_name: 标志牌遮挡
+task: classify
+
+# 顺序即类别号，名称是 data.from_parent.attribute 的取值，同时是二级分类结果的标签（labels.txt）。
+classes:
+  - 否
+  - 是
+
+# 作用于父模型检测到的这些类别的目标（nvinfer process-mode=2）。按名称写，打包时换算成父模型的类别号，
+# 与二级模型 nvinfer 配置的 operate-on-class-ids 对照。
+cascade:
+  parent: road-assets
+  classes:
+    - 标志牌(绿底矩形)
+    - 标志牌(菱形)
+    - 标志牌(蓝底矩形)
+    - 标志牌(圆牌)
+    - 标志牌(白底矩形)
+    - 标志牌(褐底矩形)
+    - 标志牌(黄底矩形)
+
+# 部署契约：网络输入（正方形；目标框拉伸到这个尺寸，不保持宽高比）与输出布局（softmax 概率）。
+input: {width: 128, height: 128}
+output_layout: softmax
+
+# 数据集：样本是来源中父类别框的裁剪，类别 = 框上 attribute 的值。来源通常与父模型相同，划分沿用
+# 图片的采集组，两级模型的测试集来自同一批图片。ignore_classes 列出不收入的属性值（例如“未知”）。
+# 不外扩：二级 nvinfer 裁剪的就是检测框本身，训练样本与现场一致。
+data:
+  sources: [road-assets]
+  ignore_classes: [未知]
+  from_parent:
+    attribute: 遮挡
+    min_size: 16
+  split:
+    val: 0.15
+    test: 0.15
+    seed: 42
+
+train:
+  backend: ultralytics
+  weights: yolo11s-cls.pt
+  options:
+    epochs: 100
+    batch: 64
+    patience: 20
+
+# recall 是各类别召回率的平均：类别不均衡时 accuracy 会被多数类掩盖。
+evaluate:
+  gate:
+    min: {}
+    regression: {metric: recall, max_drop: 0.01}
+
+export:
+  format: onnx
+  opset: 17
+  batch: 1
+  dynamic: false
+  simplify: true

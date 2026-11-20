@@ -47,6 +47,10 @@ inference:
   - name: pgie
     plugin: nvinfer
     config_file: ${CONTAINER_MODELS_PATH}/road-assets/nvinfer.txt
+  # 二级分类：对 pgie 检测到的标志牌判断是否遮挡，结果在检测消息对象的 classes[] 中。
+  - name: sgie
+    plugin: nvinfer
+    config_file: ${CONTAINER_MODELS_PATH}/sign-occlusion/nvinfer.txt
 
 tracker:
   enabled: true

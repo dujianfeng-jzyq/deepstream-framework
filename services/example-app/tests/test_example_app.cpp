@@ -32,6 +32,14 @@ example_app::Config Load(const std::string& text) {
   return config;
 }
 
+// 去掉整个推理链（一级与二级），换成空列表。
+std::string WithoutInference(const std::string& text) {
+  const std::string result =
+      std::regex_replace(text, std::regex(R"(inference:\n((  - |    |  #)[^\n]*\n)+)"), "inference: []\n");
+  if (result == text) throw std::runtime_error("template has no inference list");
+  return result;
+}
+
 std::vector<std::string> WarningsOf(const std::string& text) {
   const Document document = Document::LoadText(text, "example-app.yaml");
   dsf::config::Reader root = document.Root();
@@ -77,7 +85,8 @@ TEST(single_source_shares_one_encoder) {
   const std::string text = Describe(Load(Template()), &plan);
   CHECK(text.find("src0_nvmm -> mux.sink_0") != std::string::npos);
   CHECK(text.find("mux -> pgie") != std::string::npos);
-  CHECK(text.find("pgie -> tracker") != std::string::npos);
+  CHECK(text.find("pgie -> sgie") != std::string::npos);  // 二级分类紧接一级检测，在跟踪之前
+  CHECK(text.find("sgie -> tracker") != std::string::npos);
   CHECK(text.find("tracker -> meta") != std::string::npos);
   CHECK(text.find("enc -> enc_tee") != std::string::npos);
   CHECK(text.find("rtsp_out = rtspclientsink location=***") != std::string::npos);
@@ -176,8 +185,7 @@ TEST(h265_rtsp_output_warns_about_browser_playback) {
 
 TEST(cross_field_rules) {
   const std::string base = Template();
-  CHECK_THROWS(Load(Replace(base, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/nvinfer.txt",
-                            "inference: []")),
+  CHECK_THROWS(Load(WithoutInference(base)),
                "tracker.enabled: requires at least one inference");
   std::string no_output = Replace(base, "  osd: true\n\nrtsp_out:\n  enabled: true",
                                   "  osd: false\n\nrtsp_out:\n  enabled: false");
@@ -188,8 +196,7 @@ TEST(cross_field_rules) {
                                    "  osd: false\n\nrtsp_out:\n  enabled: false");
   redis_only = Replace(redis_only, "tracker:\n  enabled: true", "tracker:\n  enabled: false");
   CHECK(Load(redis_only).redis.enabled);
-  CHECK_THROWS(Load(Replace(redis_only, "inference:\n  - name: pgie\n    plugin: nvinfer\n    config_file: x/road-assets/nvinfer.txt",
-                            "inference: []")),
+  CHECK_THROWS(Load(WithoutInference(redis_only)),
                "or redis with at least one inference entry");
   CHECK_THROWS(Load(Replace(base, "  root: x/recordings", "  root: \"\"")), "recording.root: is required");
   // 只替换保留策略的数值，不依赖模板中的具体值（现场可能为验证而调小）。

@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "model": "sign-occlusion",
+  "release": "20261120-065822-13aecd",
+  "published_at": "2026-11-20T06:58:22+00:00",
+  "published_from": "a51752c40abb-dirty",
+  "run": {
+    "id": "20261120-065404-f4552e",
+    "dataset": "4eedbbecf087caf2",
+    "source_revision": "a51752c40abb-dirty",
+    "backend": {
+      "name": "ultralytics",
+      "ultralytics": "8.3.40",
+      "torch": "2.5.1+cu124"
+    },
+    "weights_sha256": "354624a8d657dcb0c16f4086feb64c225dcacbd97b120d886c5c49ccc4251a56"
+  },
+  "evaluated_on": "4eedbbecf087caf2",
+  "metrics": {
+    "accuracy": 0.9720873786407767,
+    "recall": 0.8309340285649512,
+    "precision": 0.7375218647032502
+  },
+  "class_metrics": [
+    {
+      "name": "否",
+      "instances": 802,
+      "accuracy": null,
+      "recall": 0.9800498753117207,
+      "precision": 0.9911727616645649
+    },
+    {
+      "name": "是",
+      "instances": 22,
+      "accuracy": null,
+      "recall": 0.6818181818181818,
+      "precision": 0.4838709677419355
+    }
+  ],
+  "gate": {
+    "dataset": "4eedbbecf087caf2",
+    "min": {},
+    "regression": {
+      "skipped": "there is no published model yet"
+    },
+    "accepted_without_comparison": true
+  },
+  "classes": [
+    "否",
+    "是"
+  ],
+  "input": {
+    "width": 128,
+    "height": 128
+  },
+  "output_layout": "softmax",
+  "training_data": {
+    "road-assets": {
+      "images": 4388,
+      "negatives": 1038,
+      "instances": {
+        "否": 6865,
+        "是": 336
+      },
+      "skipped": {},
+      "reviews": []
+    }
+  },
+  "onnx": {
+    "opset": 17,
+    "batch": 1,
+    "dynamic": false,
+    "inputs": [
+      {
+        "name": "input",
+        "shape": [
+          1,
+          3,
+          128,
+          128
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "output",
+        "shape": [
+          1,
+          2
+        ]
+      }
+    ]
+  },
+  "consistency": {
+    "passed": true,
+    "crops": 16,
+    "max_prob_diff": 1.1920928955078125e-07,
+    "class_mismatches": 0,
+    "finite": true,
+    "limits": {
+      "max_prob_diff": 0.001
+    },
+    "images": 16
+  },
+  "artifacts": {
+    "artifacts/model.onnx": "13aecdb7fc33afb5e85f2ded4eb48d438ed1cb4bcac3891c78db6d95e7904e81",
+    "artifacts/labels.txt": "69530d726ee2fc4eb89499f8e7548e0aec50607a6ee4d580b9a01351ab619963"
+  }
+}
