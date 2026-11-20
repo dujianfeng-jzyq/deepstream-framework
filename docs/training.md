@@ -2,7 +2,7 @@
 
 本文说明从数据到现场运行的模型生命周期：导入图片或视频 → 标注 → 准备数据集 → 训练与评估 → 导出与发布 → 打包安装 → 在服务器或 Jetson 上运行。
 
-已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6），`train run`、`train eval`（§7），`train prelabel`（§5.4），`train publish`（§8）；均为一级检测。其余命令按 §14 的顺序实现；分类、分割与二级模型按 §11、§12 留出扩展点。
+已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6），`train run`、`train eval`（§7），`train prelabel`（§5.4），`train publish`（§8），一级检测与二级分类（§12）均可。其余按 §14 的顺序实现；整图分类与分割按 §11 留出扩展点。
 
 ## 1. 原则
 
@@ -203,7 +203,7 @@ nvinfer 配置是人工维护的运行参数，引用 `artifacts/model.onnx` 与
 
 - `scripts/build-release.sh` 在渲染之后、检查镜像之前执行模型校验（也可单独运行 `framework/deploy/dsf-deploy.py check-models`）。已实现的检查：规格完整；规格的类别、输入、输出布局与发布记录一致；产物与 sha256 一致且没有未发布的文件；`labels.txt` 与类别一致；导出签名符合输入尺寸与已知输出布局；nvinfer 配置引用的 ONNX 与标签是已发布产物，`model-engine-file` 在 `/data/engines/<id>/` 下，`num-detected-classes` 等于类别数，固定 batch 导出时 `batch-size` 与之相等。
 - 服务的类别依赖（§15.1）：`services/<服务>/models.lock.json` 记录的各模型类别必须与模型的 `release.json` 相同，不同时打印差异（`dsf-deploy.py lock-models <服务> [<模型>…]` 看过差异后重写）；没有这个文件的服务不检查。发布包不带 `services/`，这项只在开发机打包时检查。
-- 随任务与级联加入的检查（§11、§12）：`network-type` 与任务一致；分类模型的 `labels.txt` 格式；二级模型的 `operate-on-gie-id` 与 `operate-on-class-ids` 与一级模型对得上。
+- 二级模型（§12）另外检查：`softmax` 输出为 `[batch, 类别数]`；`labels.txt` 为一行、以 `;` 分隔；nvinfer 配置的 `network-type=1`、`process-mode=2`，`operate-on-gie-id` 与 `operate-on-class-ids` 与一级模型的配置和发布对得上。
 - 模型随发布包进入安装目录的 `models/`；`model-engine-builder` 在目标 GPU 上构建 engine，Jetson 与服务器各自构建，engine 不进包。
 
 ## 11. 任务扩展
@@ -213,7 +213,7 @@ nvinfer 配置是人工维护的运行参数，引用 `artifacts/model.onnx` 与
 | 任务 | 标注 | 后端视图（Ultralytics） | 指标 | nvinfer | 输出与解析 | 状态 |
 |---|---|---|---|---|---|---|
 | detect | 矩形框 | YOLO 检测格式 | mAP | `network-type=0` | `xyxy-confidence-class_id`，`plugins/yolo-parser` | 首先实现 |
-| classify | 整图 flags 或二级属性 | 按类别分目录 | top-1、每类 P/R | `network-type=1` | softmax，nvinfer 内置分类解析；`labels.txt` 为一行、以 `;` 分隔 | 预留 |
+| classify | 父类别框上的属性（二级，§12） | 按类别分目录的裁剪 | accuracy、宏平均与每类 P/R | `network-type=1` | `softmax`（导出时追加），nvinfer 内置分类解析；`labels.txt` 为一行、以 `;` 分隔 | 二级已实现；整图分类预留 |
 | segment | 多边形 | YOLO 分割格式 | 框与掩码 mAP | `network-type=3` | 实例掩码，需要配套解析插件 | 预留 |
 | obb、pose 等 | 旋转框、关键点 | 后端对应格式 | 后端对应指标 | 视解析插件 | 视解析插件 | 不在计划内 |
 
@@ -226,24 +226,31 @@ nvinfer 配置是人工维护的运行参数，引用 `artifacts/model.onnx` 与
 
 ## 12. 一级与二级模型
 
-二级模型作用于一级模型检测到的目标（例如在“摄像头”框内再分类状态），在 `model.yaml` 中声明：
+二级模型作用于一级模型检测到的目标（例如在“标志牌”框内再分类是否遮挡），在 `model.yaml` 中声明（`train init <id> --task classify --class <值>… --parent <父模型> --parent-class <父类别>… --attribute <属性>` 生成骨架）：
 
 ```yaml
 task: classify
+classes: [否, 是]                         # 属性的取值，顺序即类别号
 cascade:
-  parent: road-assets                   # 一级模型的 id
-  classes: [摄像头(柱), 摄像头(球机)]     # 父模型中触发本模型的类别，按名称写
+  parent: road-assets                   # 一级（检测）模型的 id
+  classes: [标志牌(绿底矩形), 标志牌(圆牌)]  # 父模型中触发本模型的类别，按名称写
+input: {width: 128, height: 128}        # 正方形
+output_layout: softmax
 data:
+  sources: [road-assets]                # 通常与父模型相同
+  ignore_classes: [未知]                 # 不收入的属性值
   from_parent:
-    attribute: 状态                      # 训练样本 = 父类别框的裁剪图，类别 = 框上该属性的值
-    padding: 0.1                         # 裁剪时向外扩展的比例
-    min_size: 32                         # 小于它的框不收入（现场同样太小，无法可靠分类）
+    attribute: 遮挡                      # 训练样本 = 父类别框的裁剪，类别 = 框上该属性的值
+    min_size: 16                        # 短边小于它的框不收入（现场同样太小，无法可靠分类）
 ```
 
-- **数据**：二级模型复用父模型的来源。X-AnyLabeling 的形状属性让一次标注同时得到一级框与二级标签；`prepare` 从父类别框裁剪出样本，划分沿用这些框所在图片的采集组，两级模型的测试集来自同一批图片。也可以单独标注裁剪图作为普通分类来源。
-- **评估**：先在真实框的裁剪上评估二级模型本身；端到端评估（一级检测框 → 二级分类）以后按需要增加。
-- **部署契约**：二级模型的 nvinfer 配置使用 `process-mode=2`，`operate-on-gie-id` 等于父模型配置的 `gie-unique-id`，`operate-on-class-ids` 由 `cascade.classes` 按父模型 `classes` 换算出类别号。打包时校验这两者：父模型重新发布并改变了类别号时，二级模型的配置在打包前失败，而不是在现场作用于错误的类别。
-- 应用配置的 `inference` 链按顺序串接一级与二级模型（已支持）。
+- **数据**：二级模型复用父模型的来源。X-AnyLabeling 的形状属性让一次标注同时得到一级框与二级标签；`prepare` 从父类别框裁剪出样本，划分沿用这些框所在图片的采集组，两级模型的测试集来自同一批图片。没有该属性的框、属性值在 `ignore_classes` 中的框、小于 `min_size` 的框不收入，在报告中按原因计数；其他属性值是错误。类别依赖（§15.1）检查的是来源中有 `cascade.classes`。训练划分中没有样本的类别报错：它无法学习。
+- **裁剪与现场一致**：二级 nvinfer（`process-mode=2`）把检测框原样缩放到网络输入，不保持宽高比、不外扩。训练样本按同样的方式生成（拉伸到 `input`，写成 PNG），所以不提供外扩（`padding`）；nvinfer 配置用 `maintain-aspect-ratio=0`，`input-object-min-width/height` 与 `min_size` 一致。后端评估时的“缩放 + 中心裁剪”对正方形样本不起作用。
+- **评估**：在真实框的裁剪上评估二级模型本身。类别常常极不均衡（“遮挡=是”只占百分之几），全猜多数类也有很高的 accuracy，所以指标是 accuracy、各类 recall 的平均（`recall`）与各类 precision 的平均（`precision`），每类给出 recall 与 precision，骨架的退化门槛比较 `recall`。端到端评估（一级检测框 → 二级分类）以后按需要增加。
+- **导出**：Ultralytics 的分类头输出 logits（softmax 只在它的 Python 预测器中做），而 nvinfer 内置的分类解析把输出当作概率与 `classifier-threshold` 比较，所以导出时追加 Softmax，输出为 `[batch, 类别数]`。一致性验证在测试划分的裁剪上比较概率。
+- **部署契约**：二级模型的 nvinfer 配置使用 `network-type=1`、`process-mode=2`，`operate-on-gie-id` 等于父模型配置的 `gie-unique-id`，`operate-on-class-ids` 由 `cascade.classes` 按父模型发布的 `classes` 换算出类别号。打包与发布时校验：父模型重新发布并改变了类别号时，二级模型的配置在打包前失败，而不是在现场作用于错误的类别。
+- 应用配置的 `inference` 链按顺序串接一级与二级模型（已支持），二级结果在检测消息对象的 `classes[]` 中。
+- **尚未实现**：二级模型的预标注（`train prelabel` 对它报告不支持）；父类别改名或删除时自动改写 `cascade.classes`——`train update` 列出受影响的二级模型，由人改写，在改写之前二级模型的规格校验失败；整图分类。`train import` 与 `train update add|rename|retire` 对二级模型拒绝：它的样本来自父模型的来源，类别是属性值而不是标签。
 
 ## 13. 只更新模型
 
@@ -263,9 +270,10 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | 4 | `train prelabel` | 已实现 |
 | 5 | `train publish`（检测：门槛、导出、一致性验证、按发布命名 engine） | 已实现 |
 | 6 | 模型包与停服前构建 engine | 已实现 |
-| 7 | 分类与分割任务、二级模型及其打包校验 | 预留 |
+| 7 | 二级分类模型及其打包校验（§12） | 已实现（预标注与 `cascade.classes` 的自动改写除外） |
+| 7b | 整图分类、分割任务 | 预留 |
 | 8 | INT8 校准、数据闭环 | 预留 |
-| 9 | 修改已有模型的类别：类别依赖锁文件、`train update`、按类别预标注（§15） | 已实现（二级模型部分随阶段 7） |
+| 9 | 修改已有模型的类别：类别依赖锁文件、`train update`、按类别预标注（§15） | 已实现（二级模型的 `cascade.classes` 由人改写，§12） |
 
 ## 15. 修改类别
 
@@ -311,9 +319,9 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 | `add <名称>` | 追加在 `classes` 末尾 | 已有这个类别的来源不变（之前已为它标注过）；其余来源追加类别、刷新 `labels.txt`，撤销已检查的图片并记入名单（§15.2） | 依赖这些来源的其他模型锁文件不一致，不可用，复核后 `--confirm`；本模型的服务需要确认 |
 | `add <名称> --from <类别A>` | 同上 | 同上，但只撤销含 A 框的图片：新类别的目标以前被标成 A（细分 A） | 同上 |
 | `add … --skip-source <来源> --reason <文本>` | — | 该来源追加类别但不撤销，理由记入名单：确定这批素材不含新类别 | — |
-| `rename <旧> <新>` | 原位改名 | 改写标注中的名称（`checked` 不变），来源类别改名 | **自动修复**：依赖这些来源且含旧名称的模型同样改名；不含的模型类别不受影响，自动更新锁文件；以本模型为父的二级模型改写 `cascade.classes`；所有改了名的模型的服务需要确认 |
-| `retire <名称>` | 从 `classes` 删除；后面的类别号前移 | 不变：其他模型可能还在用这个类别，本模型读取时忽略它 | 二级模型引用了它时**拒绝**，提示先调整二级模型；服务需要确认 |
-| `retire <A> --into <B>` | 删除 A（合并进 B） | 改写标注中的 A 为 B（`checked` 不变），来源类别删除 A | 依赖这些来源的其他模型仍把 A 当作独立类别时**拒绝**，提示对那个模型先做同样的合并，或改为只 `retire`；二级模型的 `cascade.classes` 中的 A 改为 B |
+| `rename <旧> <新>` | 原位改名 | 改写标注中的名称（`checked` 不变），来源类别改名 | **自动修复**：依赖这些来源且含旧名称的模型同样改名；不含的模型类别不受影响，自动更新锁文件；以本模型为父的二级模型改写 `cascade.classes`（尚未实现：列出受影响的二级模型，由人改写）；所有改了名的模型的服务需要确认 |
+| `retire <名称>` | 从 `classes` 删除；后面的类别号前移 | 不变：其他模型可能还在用这个类别，本模型读取时忽略它 | 二级模型引用了它时**拒绝**，提示先调整二级模型（尚未实现：现在只列出受影响的二级模型）；服务需要确认 |
+| `retire <A> --into <B>` | 删除 A（合并进 B） | 改写标注中的 A 为 B（`checked` 不变），来源类别删除 A | 依赖这些来源的其他模型仍把 A 当作独立类别时**拒绝**，提示对那个模型先做同样的合并，或改为只 `retire`；二级模型的 `cascade.classes` 中的 A 改为 B（尚未实现：列出，由人改写） |
 | `--confirm` | 按来源当前的类别重写 `sources.lock.json` | — | — |
 | （不带操作） | 列出类别、与各来源锁文件的差异与复核进度 | — | — |
 
@@ -357,7 +365,7 @@ train prepare road-assets && train run road-assets && train publish road-assets 
 ### 15.7 实现顺序
 
 1. `sources.lock.json` 与迁移；`prepare`、`run`、`publish` 的依赖检查、差异报告与 `--confirm`；读取时忽略来源中本模型不用的类别。**已实现**
-2. `rename`、`retire`（含 `--into`）及其自动修复与冲突检查。**已实现**；规格还不支持 `cascade`，二级模型的 `cascade.classes` 改写与引用检查随二级模型（§12）实现。
+2. `rename`、`retire`（含 `--into`）及其自动修复与冲突检查。**已实现**；作用于父类别的二级模型由 `train update` 列出，`cascade.classes` 由人改写（自动改写尚未实现），类别号的变化由打包时的级联校验发现（§12）。
 3. `add`：撤销与复核名单、`--from`、`--skip-source`；`prepare` 的复核进度；`accept` 的限制。**已实现**
 4. `prelabel --class` 与放宽的类别检查。**已实现**
 5. `lock-models` 与服务的打包校验；共有类别上的退化比较；`release.json` 中的类别变化。**已实现**

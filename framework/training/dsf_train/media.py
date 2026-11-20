@@ -81,3 +81,20 @@ def letterbox(path: Path, width: int, height: int):
         canvas = Image.new("RGB", (width, height), LETTERBOX_FILL)
         canvas.paste(image.resize(size, Image.BILINEAR), ((width - size[0]) // 2, (height - size[1]) // 2))
     return numpy.asarray(canvas, dtype=numpy.float32).transpose(2, 0, 1) / 255.0
+
+
+def crop(path: Path, box: list[float], width: int, height: int):
+    """裁出 box（像素坐标 [x1, y1, x2, y2]）并拉伸到网络输入尺寸，返回 RGB 的 Pillow 图像。
+    二级 nvinfer（process-mode=2）把目标框原样缩放到网络输入、不保持宽高比也不外扩，训练样本按同样的方式生成。"""
+    Image = _pillow()
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        left, top = int(box[0]), int(box[1])
+        right, bottom = max(left + 1, round(box[2])), max(top + 1, round(box[3]))
+        return image.crop((left, top, right, bottom)).resize((width, height), Image.BILINEAR)
+
+
+def as_input(image):
+    """Pillow 图像 → float32 [3, 高, 宽]、RGB、取值 0..1 的数组（与 net-scale-factor=1/255 相同）。"""
+    import numpy
+    return numpy.asarray(image.convert("RGB"), dtype=numpy.float32).transpose(2, 0, 1) / 255.0

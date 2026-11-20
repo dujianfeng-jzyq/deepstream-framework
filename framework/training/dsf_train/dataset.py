@@ -32,7 +32,7 @@ class Result:
     reused: bool
     manifest: dict
     skipped: Counter = field(default_factory=Counter)  # (来源, 原因) → 数量
-    ignored_shapes: Counter = field(default_factory=Counter)
+    ignored_shapes: Counter = field(default_factory=Counter)  # 不收入的形状：原因 → 数量
     notes: list[str] = field(default_factory=list)
 
 
@@ -57,7 +57,7 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
         directory = paths.source_dir(root, source)
         record = sources.read_record(directory)
         # 来源中有、模型不用的类别（其他模型的类别，或本模型 retire 的类别）在读取时忽略。
-        ignore = declared_ignore | (set(source_classes[source]) - set(spec["classes"]))
+        ignore = declared_ignore | (set(source_classes[source]) - set(task.source_labels(spec)))
         reviewing = sources.review_classes(record)
         for name, info in sorted(record["images"].items()):
             image = directory / name
@@ -96,6 +96,7 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
 
     # 清单只含决定训练结果的内容（不含时间与路径），同样的输入总得到同样的标识。
     manifest = {"schema": SCHEMA, "model": spec["id"], "task": task.NAME, "classes": spec["classes"],
+                **task.manifest_fields(spec),
                 "split": {"seed": params["seed"], "val": params["val"], "test": params["test"]},
                 "samples": samples}
     text = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=1) + "\n"
@@ -179,8 +180,8 @@ def report(result: Result, spec: dict) -> list[str]:
         lines.append(f"  {pad(name, width)}  " + " ".join(f"{counts[s][name]:6d}" for s in split.SPLITS))
     for (source, reason), count in sorted(result.skipped.items()):
         lines.append(f"  skipped {count} images of {source}: {reason}")
-    for shape, count in sorted(result.ignored_shapes.items()):
-        lines.append(f"  ignored {count} {shape} shapes (not used by task {task.NAME})")
+    for reason, count in sorted(result.ignored_shapes.items()):
+        lines.append(f"  ignored {count} {reason}")
     missing = [name for name in spec["classes"] if counts["test"][name] == 0]
     if missing:
         listed = ", ".join(missing[:5]) + (f" and {len(missing) - 5} more" if len(missing) > 5 else "")

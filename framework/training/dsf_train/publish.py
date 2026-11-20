@@ -24,15 +24,15 @@ from pathlib import Path
 
 from dsf_deploy import layout, models, naming
 
-from . import backends, dataset, lock, media, onnxio, paths, runs, sources, tasks
+from . import backends, dataset, lock, onnxio, paths, runs, sources, tasks
 from .errors import TrainError
 
 EXPORT = "export"
 EXPORT_RECORD = "export.json"
 ONNX = "model.onnx"
 LABELS = "labels.txt"
-# 一致性比较用的测试样本数：按 sha256 排序取前几张，同一数据集每次取同一批。
-CONSISTENCY_IMAGES = 16
+# 一致性比较的输入数（检测是图片，二级分类是裁剪）：测试样本按 sha256 排序取前几个，同一数据集每次取同一批。
+CONSISTENCY_INPUTS = 16
 _ENGINE_KEY = re.compile(r"^(\s*model-engine-file\s*=\s*)([^#\s]+)(.*)$")
 
 
@@ -341,9 +341,7 @@ def _consistency(root: Path, spec: dict, task, backend, best: Path, onnx_path: P
     import numpy
     _, _, manifest = dataset.locate(root, spec, dataset_id)
     samples = sorted((s for s in manifest["samples"] if s["split"] == "test"), key=lambda s: s["sha256"])
-    samples = samples[:CONSISTENCY_IMAGES]
-    width, height = spec["input"]["width"], spec["input"]["height"]
-    images = [media.letterbox(paths.source_dir(root, s["source"]) / s["image"], width, height) for s in samples]
+    images = task.consistency_inputs(root, samples, spec, CONSISTENCY_INPUTS)
     size = len(images) if settings["dynamic"] else settings["batch"]
     native, exported = [], []
     for start in range(0, len(images), size):
@@ -359,6 +357,9 @@ def _consistency(root: Path, spec: dict, task, backend, best: Path, onnx_path: P
 def _consistency_text(summary: dict) -> str:
     if "reason" in summary:
         return summary["reason"]
+    if "crops" in summary:
+        return (f"{summary['crops']} crops compared, max probability difference {summary['max_prob_diff']:.5f}, "
+                f"{summary['class_mismatches']} class mismatches")
     return (f"{summary['candidates']} candidates compared on {summary.get('images', '?')} images, max box "
             f"difference {summary['max_box_diff']:.4f} px, max confidence difference "
             f"{summary['max_conf_diff']:.5f}, {summary['class_mismatches']} class mismatches")
@@ -425,7 +426,7 @@ def _install(directory: Path, spec: dict, release: dict, export_dir: Path, confi
             (staged / name).write_text(text, encoding="utf-8")
         paths.write_json(staged / models.RELEASE, release)
         renames_cleared = lock.clear_renamed(staged)  # 改名记录只覆盖到这次发布
-        problems = models.check_model(staged)
+        problems = models.check_model(staged, directory.parent)
         if problems:
             raise TrainError(f"the new contents of {directory} fail the model check, nothing was changed:\n  " +
                              "\n  ".join(problems))

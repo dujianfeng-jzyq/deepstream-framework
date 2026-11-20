@@ -9,7 +9,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from .. import paths
+from .. import media, paths
+from ..errors import TrainError
 
 # Ultralytics 在导出等操作前检查依赖，缺少时（例如无 GPU 时要 onnxruntime 而镜像中是 onnxruntime-gpu）
 # 自动 pip 安装到用户目录：它会进入训练根目录中的家目录并持续生效，使镜像固定的依赖失去意义。
@@ -17,9 +18,12 @@ from .. import paths
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
 NAME = "ultralytics"
-TASKS = ("detect",)
+TASKS = ("detect", "classify")
 # 导出时能追加转换的输出布局：任务 → 布局。
-LAYOUTS = {"detect": ("xyxy-confidence-class_id",)}
+LAYOUTS = {"detect": ("xyxy-confidence-class_id",), "classify": ("softmax",)}
+# 分类视图中类别目录的名字：Ultralytics（torchvision ImageFolder）按目录名排序决定类别号，补零的序号
+# 排序后就是 classes 的顺序。
+CLASS_DIR_DIGITS = 3
 # 检测头的原始输出 [batch, 4 + 类别数, 候选数]：中心点与宽高（输入像素）后接各类别分数。
 # [cx, cy, w, h] 乘以它得到 [x1, y1, x2, y2]。
 _XYWH_TO_XYXY = [[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [-0.5, 0.0, 0.5, 0.0], [0.0, -0.5, 0.0, 0.5]]
@@ -41,7 +45,46 @@ def sample_name(sample: dict) -> str:
     return f"{sample['source']}__{sample['image']}"
 
 
+def data_path(task: str, view: Path) -> Path:
+    """交给 Ultralytics 的 data：检测是 data.yaml，分类是视图目录本身（train/ val/ test/ 下按类别分目录）。"""
+    return view if task == "classify" else view / "data.yaml"
+
+
 def write_view(task: str, manifest: dict, root: Path, view: Path, location: Path) -> None:
+    if task == "classify":
+        _write_classify_view(manifest, root, view)
+        return
+    _write_detect_view(manifest, root, view, location)
+
+
+def _write_classify_view(manifest: dict, root: Path, view: Path) -> None:
+    """分类格式：<划分>/<类别序号>/<来源>__<图片>__<对象序号>.png，每个对象裁剪并拉伸到网络输入尺寸
+    （manifest 的 input）。每个划分都建全部类别目录（空的也建）：torchvision 按各划分自己的目录编号，
+    缺一个目录会让后面的类别号错位。训练划分中没有样本的类别无法学习，报错。"""
+    width, height = manifest["input"]["width"], manifest["input"]["height"]
+    classes = manifest["classes"]
+    counts = {split: [0] * len(classes) for split in ("train", "val", "test")}
+    for split in counts:
+        for index in range(len(classes)):
+            (view / split / _class_dir(index)).mkdir(parents=True, exist_ok=True)
+    for sample in manifest["samples"]:
+        image = paths.source_dir(root, sample["source"]) / sample["image"]
+        stem = Path(sample_name(sample)).stem
+        for number, item in enumerate(sample["objects"]):
+            target = view / sample["split"] / _class_dir(item["class"]) / f"{stem}__{number}.png"
+            media.crop(image, item["box"], width, height).save(target)  # PNG：裁剪不再经过一次有损压缩
+            counts[sample["split"]][item["class"]] += 1
+    missing = [name for name, count in zip(classes, counts["train"]) if not count]
+    if missing:
+        raise TrainError(f"the train split has no samples of {', '.join(missing)}: label more boxes with these "
+                         "values, or move the value to data.ignore_classes")
+
+
+def _class_dir(index: int) -> str:
+    return f"{index:0{CLASS_DIR_DIGITS}d}"
+
+
+def _write_detect_view(manifest: dict, root: Path, view: Path, location: Path) -> None:
     """YOLO 检测格式：images/<划分>/ 硬链接到来源图像，labels/<划分>/ 每行 `类别 cx cy w h`（归一化）。
     负样本写空的标签文件。视图写在 view，data.yaml 指向它最终所在的 location。
     Ultralytics 会就地重写的图像复制而不链接：否则重写经硬链接改动来源，来源的 sha256 不再与导入记录一致。"""
@@ -125,6 +168,12 @@ def evaluate(task: str, weights: Path, data: Path, split: str, options: dict, di
     with _settings(workdir):
         result = YOLO(str(weights), task=task).val(data=str(data), split=split, project=str(directory.parent),
                                                    name=directory.name, exist_ok=True, plots=True, **arguments)
+    if task == "classify":
+        from ..tasks import classify
+        # Ultralytics 的混淆矩阵是 matrix[预测][真实]，任务按 [真实][预测] 计算指标。
+        matrix = result.confusion_matrix.matrix
+        size = len(matrix)
+        return classify.metrics([[int(matrix[p][t]) for p in range(size)] for t in range(size)])
     box = result.box
     classes = {}
     for row, index in enumerate(box.ap_class_index):
@@ -140,6 +189,8 @@ def predict(task: str, weights: Path, images: list[Path], options: dict, conf: f
     """逐张推理，按 images 的顺序产出 [{"class", "box", "score"}]。stream 模式按批读入图片，
     不把全部结果留在内存中。Ultralytics 默认按类别分别做 NMS，agnostic 对应它的 agnostic_nms。"""
     from ultralytics import YOLO
+    if task != "detect":
+        raise ValueError(f"backend {NAME} predicts boxes for task detect only, not {task}")
     with _settings(workdir):
         model = YOLO(str(weights), task=task)
         for result in model.predict([str(path) for path in images], conf=conf, stream=True, verbose=False,
@@ -166,7 +217,10 @@ def export(task: str, weights: Path, layout: str, size: tuple[int, int], setting
             raw = YOLO(str(copy), task=task).export(
                 format="onnx", imgsz=(size[1], size[0]), opset=settings["opset"], batch=settings["batch"],
                 dynamic=settings["dynamic"], simplify=settings["simplify"], nms=False, device="cpu")
-        _append_layout(Path(raw), target)
+        if task == "classify":
+            _append_softmax(Path(raw), target)
+        else:
+            _append_layout(Path(raw), target)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -180,12 +234,55 @@ def reference(task: str, weights: Path, layout: str, batch):
         raise ValueError(f"backend {NAME} has no {layout} output for task {task}")
     model = YOLO(str(weights), task=task).model.float().eval()
     with torch.no_grad():
+        if task == "classify":
+            # 分类头输出 logits（Ultralytics 在 Python 的预测器中才做 softmax）；与导出时追加的 Softmax 相同。
+            logits = model(torch.from_numpy(batch))
+            logits = logits[0] if isinstance(logits, (list, tuple)) else logits
+            return logits.softmax(dim=1).numpy()
         raw = model(torch.from_numpy(batch))
         raw = raw[0] if isinstance(raw, (list, tuple)) else raw
         rows = raw.transpose(1, 2)
         boxes = rows[..., :4] @ torch.tensor(_XYWH_TO_XYXY, dtype=rows.dtype)
         scores, classes = rows[..., 4:].max(dim=-1, keepdim=True)
         return torch.cat([boxes, scores, classes.to(rows.dtype)], dim=-1).numpy()
+
+
+def _append_softmax(source: Path, target: Path) -> None:
+    """在分类头的 logits [batch, 类别数] 之后追加 Softmax：nvinfer 内置的分类解析把输出当作概率，与
+    classifier-threshold 比较。输入与输出改为固定的名字。"""
+    import onnx
+    from onnx import TensorProto, helper
+    model = onnx.load(str(source))
+    graph = model.graph
+    if len(graph.input) != 1 or len(graph.output) != 1:
+        raise ValueError(f"{source}: expected one input and one output, got {len(graph.input)} and "
+                         f"{len(graph.output)}")
+    raw = graph.output[0]
+    dims = [d.dim_value if d.HasField("dim_value") else d.dim_param for d in raw.type.tensor_type.shape.dim]
+    if len(dims) != 2:
+        raise ValueError(f"{source}: expected a [batch, classes] output, got {dims}")
+    graph.node.append(helper.make_node("Softmax", [raw.name], [OUTPUT_NAME], axis=1))
+    graph.output.remove(raw)
+    graph.output.append(helper.make_tensor_value_info(OUTPUT_NAME, TensorProto.FLOAT, dims))
+    _finish(model, target)
+
+
+def _finish(model, target: Path) -> None:
+    """输入改为固定的名字，去掉不稳定的元数据，检查后保存。"""
+    import onnx
+    graph = model.graph
+    old_input = graph.input[0].name
+    graph.input[0].name = INPUT_NAME
+    for node in graph.node:
+        for index, value in enumerate(node.input):
+            if value == old_input:
+                node.input[index] = INPUT_NAME
+    # 导出时间与含本机路径的描述：去掉后同一份权重总是导出同一个文件（发布标识与 engine 指纹随之不变）。
+    keep = [item for item in model.metadata_props if item.key not in _UNSTABLE_METADATA]
+    del model.metadata_props[:]
+    model.metadata_props.extend(keep)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(target))
 
 
 def _append_layout(source: Path, target: Path) -> None:
@@ -227,18 +324,7 @@ def _append_layout(source: Path, target: Path) -> None:
     ])
     graph.output.remove(raw)
     graph.output.append(helper.make_tensor_value_info(OUTPUT_NAME, TensorProto.FLOAT, [dims[0], dims[2], 6]))
-    old_input = graph.input[0].name
-    graph.input[0].name = INPUT_NAME
-    for node in graph.node:
-        for index, value in enumerate(node.input):
-            if value == old_input:
-                node.input[index] = INPUT_NAME
-    # 导出时间与含本机路径的描述：去掉后同一份权重总是导出同一个文件（发布标识与 engine 指纹随之不变）。
-    keep = [item for item in model.metadata_props if item.key not in _UNSTABLE_METADATA]
-    del model.metadata_props[:]
-    model.metadata_props.extend(keep)
-    onnx.checker.check_model(model)
-    onnx.save(model, str(target))
+    _finish(model, target)
 
 
 def _inference_arguments(options: dict) -> dict:

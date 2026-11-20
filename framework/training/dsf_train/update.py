@@ -35,6 +35,24 @@ def _models(repo: Path) -> dict[str, dict]:
     return found
 
 
+def _labels(spec: dict) -> list[str]:
+    """模型的类别中哪些是来源中的标签：二级模型的类别是框上属性的值，不是标签。"""
+    return [] if spec.get("cascade") else spec["classes"]
+
+
+def _cascade_lines(models: dict[str, dict], parents: set[str], name: str, renamed_to: str | None = None) -> list[str]:
+    """触发类别中有 name 的二级模型：cascade.classes 由人改写（自动改写尚未实现），父模型类别号的变化由打包时
+    的级联校验对照 operate-on-class-ids。"""
+    lines = []
+    for model_id, spec in sorted(models.items()):
+        cascade = spec.get("cascade") or {}
+        if cascade.get("parent") in parents and name in cascade.get("classes", []):
+            change = f"rename it to {renamed_to}" if renamed_to else "remove it"
+            lines.append(f"  second-stage model {model_id} triggers on {name}: {change} in its cascade.classes "
+                         "(not rewritten automatically) and check operate-on-class-ids in its nvinfer config")
+    return lines
+
+
 def _users(models: dict[str, dict], names: set[str]) -> list[str]:
     """依赖这些来源中任何一个的模型。"""
     return [model_id for model_id, spec in models.items() if names & set(spec["data"]["sources"])]
@@ -130,7 +148,7 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
     models = _models(repo)
     scope_models, scope_sources = {spec["id"]}, set(spec["data"]["sources"])
     while True:
-        grow = {model_id for model_id in _users(models, scope_sources) if old in models[model_id]["classes"]}
+        grow = {model_id for model_id in _users(models, scope_sources) if old in _labels(models[model_id])}
         if grow <= scope_models:
             break
         scope_models |= grow
@@ -159,6 +177,7 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
         specs.write_classes(repo, model_id, renamed(models[model_id]["classes"]))
         result.lines.append(f"  model {model_id}: class {models[model_id]['classes'].index(old)} renamed")
     result.lines += _lock_lines(updated, pending)
+    result.lines += _cascade_lines(models, scope_models, old, new)
     result.lines += _republish_lines(repo, sorted(scope_models), sources_changed=True)
     return result
 
@@ -182,14 +201,15 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
     if into is None:
         specs.write_classes(repo, spec["id"], remaining)
         return Result([f"retired {name} from {spec['id']} (the sources keep it; {spec['id']} ignores it)",
-                       *_renumber_lines(classes, name), *_republish_lines(repo, [spec["id"]])])
+                       *_renumber_lines(classes, name), *_cascade_lines(_models(repo), {spec["id"]}, name),
+                       *_republish_lines(repo, [spec["id"]])])
 
     models = _models(repo)
     own = set(spec["data"]["sources"])
     others = [model_id for model_id in _users(models, own) if model_id != spec["id"]]
     conflicts = [f"model {model_id} has {name} as a class of its own: merge it there first "
                  f"(train update {model_id} retire {name} --into …), or only retire {name} here"
-                 for model_id in others if name in models[model_id]["classes"]]
+                 for model_id in others if name in _labels(models[model_id])]
     if conflicts:
         raise TrainError(f"cannot merge {name} into {into} in the sources of {spec['id']}:\n  " +
                          "\n  ".join(conflicts))
@@ -209,6 +229,7 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
     specs.write_classes(repo, spec["id"], remaining)
     result.lines += _renumber_lines(classes, name)
     result.lines += _lock_lines(updated, pending)
+    result.lines += _cascade_lines(models, {spec["id"]}, name)
     result.lines += _republish_lines(repo, [spec["id"]], sources_changed=True)
     return result
 

@@ -93,7 +93,7 @@ def _train(root: Path, run_dir: Path, record: dict, backend, directory: Path, we
     """运行后端，并把结果如实记入 run.json：中断与失败也留下记录，之后可以续训。"""
     record.update(status="running", error="")
     paths.write_json(run_dir / RECORD, record)
-    data = directory / paths.VIEW / backend.NAME / "data.yaml"
+    data = backend.data_path(record["task"], directory / paths.VIEW / backend.NAME)
     try:
         best = backend.train(record["task"], data, weights, record["options"], run_dir / TRAIN, resume,
                              root / paths.PRETRAINED)
@@ -160,7 +160,7 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
     backend = backends.get(record["backend"]["name"], task.NAME)
     output = run_dir / EVAL / dataset_id
     result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST,
-                              directory / paths.VIEW / backend.NAME / "data.yaml", "test",
+                              backend.data_path(task.NAME, directory / paths.VIEW / backend.NAME), "test",
                               {**record["options"], **({"device": device} if device is not None else {})},
                               output / backend.NAME, root / paths.PRETRAINED)
     instances = task.statistics(test, spec)
@@ -202,8 +202,9 @@ def evaluate_as(root: Path, spec: dict, run: str, dataset_id: str, mapping: dict
                                       if item["class"] in to_run]} for sample in test]
     view = output / paths.VIEW / backend.NAME
     shutil.rmtree(view, ignore_errors=True)
-    backend.write_view(task.NAME, {"classes": record["classes"], "samples": samples}, root, view, view)
-    result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST, view / "data.yaml", "test",
+    backend.write_view(task.NAME, {**task.manifest_fields(spec), "classes": record["classes"], "samples": samples},
+                       root, view, view)
+    result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST, backend.data_path(task.NAME, view), "test",
                               {**record["options"], **({"device": device} if device is not None else {})},
                               output / backend.NAME, root / paths.PRETRAINED)
     shutil.rmtree(output / paths.VIEW, ignore_errors=True)

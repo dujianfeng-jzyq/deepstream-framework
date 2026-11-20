@@ -102,6 +102,34 @@ def write_model(directory: Path, classes=("car", "person")) -> dict:
     return release
 
 
+def write_classifier(directory: Path, parent: str = "m", parent_classes=("person",),
+                     classes=("clear", "occluded")) -> dict:
+    """写一个通过契约校验的已发布二级分类模型，作用于 write_model 写出的父模型（gie-unique-id 默认为空，
+    测试按需在父模型的 nvinfer.txt 中设置）。返回它的 release.json 内容。"""
+    from dsf_deploy import models
+    (directory / "artifacts").mkdir(parents=True)
+    (directory / "artifacts/model.onnx").write_bytes(b"onnx")
+    (directory / "artifacts/labels.txt").write_text(";".join(classes) + "\n")
+    (directory / "model.yaml").write_text(
+        f"schema: 1\nid: {directory.name}\ntask: classify\nclasses: [{', '.join(classes)}]\n"
+        f"cascade: {{parent: {parent}, classes: [{', '.join(parent_classes)}]}}\n"
+        "input: {width: 32, height: 32}\noutput_layout: softmax\n")
+    release = {
+        "schema": 1, "model": directory.name, "release": "r1", "classes": list(classes),
+        "input": {"width": 32, "height": 32}, "output_layout": "softmax",
+        "onnx": {"batch": 1, "dynamic": False, "inputs": [{"name": "input", "shape": [1, 3, 32, 32]}],
+                 "outputs": [{"name": "output", "shape": [1, len(classes)]}]},
+        "artifacts": {name: models.sha256(directory / name)
+                      for name in ("artifacts/model.onnx", "artifacts/labels.txt")},
+    }
+    (directory / "release.json").write_text(json.dumps(release))
+    (directory / "nvinfer.txt").write_text(
+        f"[property]\nonnx-file=artifacts/model.onnx\nlabelfile-path=artifacts/labels.txt\n"
+        f"model-engine-file=/data/engines/{directory.name}/model_b1_gpu0_fp16.engine\nbatch-size=1\n"
+        "network-type=1\nprocess-mode=2\ngie-unique-id=2\noperate-on-gie-id=1\noperate-on-class-ids=1\n")
+    return release
+
+
 def docker_cli_available() -> bool:
     return shutil.which("docker") is not None
 

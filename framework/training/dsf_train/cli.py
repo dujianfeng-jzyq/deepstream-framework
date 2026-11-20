@@ -53,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--class", dest="class_", action="append", help="a class name (repeat in class-number order)")
     p.add_argument("--classes-file", help="a text file with one class name per line")
     p.add_argument("--display-name", default="")
+    p.add_argument("--parent", default="", help="classify: the first-stage model whose boxes are classified")
+    p.add_argument("--parent-class", dest="parent_classes", action="append",
+                   help="classify: a parent class whose boxes are classified (repeat)")
+    p.add_argument("--attribute", default="", help="classify: the box attribute whose values are the classes")
 
     p = commands.add_parser("import", help="import images and videos into a source for labeling")
     p.add_argument("model", help="the model whose classes a new source gets (an existing source must have them)")
@@ -134,13 +138,24 @@ def main(argv: list[str] | None = None) -> int:
             target = spec.path(repo, args.model)
             if target.exists():
                 raise TrainError(f"{target} already exists")
-            text = spec.skeleton(args.model, args.task, _classes(args), args.display_name)
+            text = spec.skeleton(args.model, args.task, _classes(args), args.display_name, args.parent,
+                                 args.parent_classes, args.attribute)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
-            spec.load(repo, args.model)
-            print(f"created {target}; import material with: train import {args.model} <paths> --source <name>")
+            try:
+                spec.load(repo, args.model)
+            except TrainError:
+                target.unlink()  # 不留下无法使用的规格：改正参数后重新 init
+                raise
+            if args.task == "classify":
+                print(f"created {target}; add the parent's sources to data.sources, then: train prepare {args.model}")
+            else:
+                print(f"created {target}; import material with: train import {args.model} <paths> --source <name>")
         elif args.command == "import":
             model = spec.load(repo, args.model)
+            if model.get("cascade"):
+                raise TrainError(f"{args.model} is a second-stage model: its samples are boxes of "
+                                 f"{model['cascade']['parent']}; import into a source of that model")
             importer = sources.Importer(root, args.source, model["classes"], args.group_by,
                                         args.every, args.dedupe, args.max_frames)
             importer.run([path.expanduser().resolve() for path in args.paths])
@@ -208,6 +223,10 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(publish.report(result)))
         elif args.command == "update":
             model = spec.load(repo, args.model)
+            if args.operation and model.get("cascade"):
+                raise TrainError(f"the classes of {args.model} are values of the box attribute "
+                                 f"{model['data']['from_parent']['attribute']}, not source labels: "
+                                 "edit classes in model.yaml and relabel the attribute in X-AnyLabeling")
             arity = {"add": 1, "rename": 2, "retire": 1, None: 0}[args.operation]
             adding = args.from_class or args.skip_source or args.reason
             if len(args.names) != arity or (args.into and args.operation != "retire") or \

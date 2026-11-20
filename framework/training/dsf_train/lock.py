@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dsf_deploy import classes as class_diff
 
-from . import paths, sources
+from . import paths, sources, tasks
 from .errors import TrainError
 
 SCHEMA = 1
@@ -99,13 +99,20 @@ def current(root: Path, spec: dict) -> dict[str, list[str]]:
 
 
 def missing_classes(spec: dict, source_classes: dict[str, list[str]]) -> list[str]:
-    """模型的类别必须都在每个来源中，否则这个来源的图片无法为它作证（缺的类别在图上是背景）。"""
+    """模型用到的标签必须都在每个来源中，否则这个来源的图片无法为它作证（缺的类别在图上是背景）。
+    检测模型用到的是它的类别；二级模型用到的是触发它的父类别（cascade.classes），它的类别是属性值。"""
+    task = tasks.get(spec["task"])
     problems = []
     for source, names in source_classes.items():
-        missing = [name for name in spec["classes"] if name not in names]
-        if missing:
+        missing = [name for name in task.source_labels(spec) if name not in names]
+        if not missing:
+            continue
+        if task.source_labels(spec) is spec["classes"]:
             problems.append(f"source {source} has no class {', '.join(missing)}: its images cannot show them. "
                             f"Add classes with train update {spec['id']} add <class>, not by editing model.yaml")
+        else:
+            problems.append(f"source {source} has no class {', '.join(missing)} (cascade.classes of {spec['id']}): "
+                            "list only parent classes that the source labels")
     return problems
 
 

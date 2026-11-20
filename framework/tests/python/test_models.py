@@ -8,9 +8,79 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from deploy_support import ROOT, FakeDocker, ProjectTestCase, docker_cli_available, write_model
+from deploy_support import (ROOT, FakeDocker, ProjectTestCase, docker_cli_available, write_classifier,
+                            write_model)
 from dsf_deploy import cli, models, pack
 from dsf_deploy.errors import DeployError
+
+
+class CascadeCheckTest(unittest.TestCase):
+    """二级分类模型：softmax 布局的签名与标签，以及 nvinfer 配置对照父模型的级联校验。"""
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="dsf-models-"))
+        write_model(self.tmp / "models/m")
+        with (self.tmp / "models/m/nvinfer.txt").open("a") as stream:
+            stream.write("gie-unique-id=1\n")
+        self.child = self.tmp / "models/c"
+        self.release = write_classifier(self.child)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def problems(self):
+        return models.check_model(self.child)
+
+    def edit(self, name, old, new, model=None):
+        path = (model or self.child) / name
+        text = path.read_text()
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new))
+
+    def test_a_published_second_stage_model_passes(self):
+        self.assertEqual(self.problems(), [])
+        models.check(self.tmp)
+
+    def test_softmax_labels_are_one_line_and_the_output_has_one_column_per_class(self):
+        (self.child / "artifacts/labels.txt").write_text("clear\noccluded\n")
+        onnx = dict(self.release["onnx"], outputs=[{"name": "output", "shape": [1, 3]}])
+        artifacts = dict(self.release["artifacts"], **{"artifacts/labels.txt": models.sha256(
+            self.child / "artifacts/labels.txt")})
+        (self.child / "release.json").write_text(json.dumps({**self.release, "onnx": onnx, "artifacts": artifacts}))
+        self.assertEqual(self.problems(), [
+            "artifacts/labels.txt must be one line with the classes of model.yaml separated by ;",
+            "softmax needs one [batch, 2] output (one probability per class)"])
+
+    def test_the_config_must_act_on_the_parent_classes(self):
+        self.edit("nvinfer.txt", "process-mode=2", "process-mode=1")
+        self.edit("nvinfer.txt", "network-type=1", "network-type=0")
+        self.edit("nvinfer.txt", "operate-on-gie-id=1", "operate-on-gie-id=3")
+        self.edit("nvinfer.txt", "gie-unique-id=2", "gie-unique-id=1")
+        self.edit("nvinfer.txt", "operate-on-class-ids=1", "operate-on-class-ids=0")
+        self.assertEqual(self.problems(), [
+            "nvinfer.txt: process-mode must be 2 (operate on the objects of m)",
+            "nvinfer.txt: network-type must be 1 (classifier) for output_layout softmax",
+            "nvinfer.txt: operate-on-gie-id=3 must be the gie-unique-id of m (nvinfer.txt: 1)",
+            "nvinfer.txt: gie-unique-id must differ from the gie-unique-id of m",
+            "nvinfer.txt: operate-on-class-ids=0 but cascade.classes are classes 1 of the published m"])
+
+    def test_a_parent_republished_with_other_class_numbers_fails_the_child(self):
+        # 父模型调换了类别号：二级模型仍作用于 1 号类别，打包前失败，而不是在现场分类错误的目标。
+        self.edit("release.json", '"classes": ["car", "person"]', '"classes": ["person", "car"]', self.tmp / "models/m")
+        self.assertEqual(self.problems(), [
+            "nvinfer.txt: operate-on-class-ids=1 but cascade.classes are classes 0 of the published m"])
+        self.edit("nvinfer.txt", "operate-on-class-ids=1", "operate-on-class-ids=0")
+        self.assertEqual(self.problems(), [])
+
+    def test_the_parent_must_be_published_and_configured(self):
+        self.edit("model.yaml", "classes: [person]", "classes: [bicycle]")
+        self.assertEqual(self.problems(), ["cascade.classes: the published release of m has no class bicycle"])
+        self.edit("model.yaml", "classes: [bicycle]", "classes: [person]")
+        (self.tmp / "models/m/nvinfer.txt").unlink()
+        self.assertEqual(self.problems(), ["cascade.parent m has no nvinfer config to act on"])
+        (self.tmp / "models/m/release.json").unlink()
+        self.assertEqual(self.problems(), [
+            f"cascade.parent m has not been published ({self.tmp / 'models/m/release.json'} is missing)"])
+        self.assertEqual(models.check_model(self.child, self.tmp / "elsewhere")[0][:28], "cascade.parent m has not bee")
 
 
 class ModelCheckTest(unittest.TestCase):

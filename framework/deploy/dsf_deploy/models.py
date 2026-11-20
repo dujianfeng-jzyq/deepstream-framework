@@ -11,6 +11,10 @@ engine 是目标机生成的派生物，必须写到 /data/engines/<id>/ 下：�
 
 还没有发布的模型（只有 model.yaml）可以存在，但不能有引用它的 nvinfer 配置。
 
+二级模型（model.yaml 的 cascade，docs/training.md §12）的 nvinfer 配置对照父模型检查：process-mode=2、
+operate-on-gie-id 等于父模型配置的 gie-unique-id、operate-on-class-ids 等于 cascade.classes 按父模型发布的
+类别换算出的类别号。父模型重新发布并改变了类别号时，二级模型在打包前失败，而不是在现场作用于错误的类别。
+
 服务 → 模型的类别依赖（docs/training.md §15.1）：services/<服务>/models.lock.json 记录服务确认时各模型发布的
 类别列表，由 lock-models 写入。与模型的 release.json 不同时校验失败并打印差异；没有这个文件的服务不检查。
 """
@@ -32,6 +36,9 @@ SCHEMA = 1
 # 已知输出布局的最后一维（每个候选的字段数）。未列出的布局不做形状检查：
 # 新的解析插件可以引入新布局而不修改框架，代价是导出形状只由插件自己的测试保证。
 OUTPUT_FIELDS = {"xyxy-confidence-class_id": 6}
+# 分类布局：唯一输出 [batch, 类别数] 的 softmax 概率，由 nvinfer 内置的分类解析读取（network-type=1）；
+# labels.txt 是一行、以 ; 分隔的类别名。
+SOFTMAX = "softmax"
 SERVICE_LOCK = "models.lock.json"
 
 
@@ -138,7 +145,9 @@ def lock_models(root: Path, service: str, models: list[str]) -> list[str]:
     return lines
 
 
-def check_model(directory: Path) -> list[str]:
+def check_model(directory: Path, models_root: Path | None = None) -> list[str]:
+    """models_root 是父模型所在的目录（二级模型的级联校验），默认与 directory 同级；发布时在暂存目录中
+    校验，由发布工具给出仓库的模型目录。"""
     spec_path = directory / SPEC
     if not spec_path.is_file():
         return [f"missing {SPEC}"]
@@ -161,8 +170,13 @@ def check_model(directory: Path) -> list[str]:
         problems += _check_release(directory, spec, release)
     elif (directory / ARTIFACTS).exists():
         problems.append(f"{ARTIFACTS}/ exists but there is no {RELEASE}")
+    parent = _parent(models_root or directory.parent, spec) if spec.get("cascade") is not None else None
+    if isinstance(parent, str):
+        return problems + [parent]
     for config in sorted(directory.glob("*.txt")):
         problems += _check_nvinfer(directory, config, spec, release)
+        if parent is not None and release is not None and _properties(config) is not None:
+            problems += _check_cascade(config, spec, parent)
     return problems
 
 
@@ -186,6 +200,10 @@ def check_spec(name: str, spec: dict) -> list[str]:
         problems.append(f"{SPEC}: input must give positive integer width and height")
     if not isinstance(spec.get("output_layout"), str) or not spec["output_layout"]:
         problems.append(f"{SPEC}: output_layout is required")
+    cascade = spec.get("cascade")
+    if cascade is not None and (not isinstance(cascade, dict) or not isinstance(cascade.get("parent"), str) or
+                                not isinstance(cascade.get("classes"), list) or not cascade["classes"]):
+        problems.append(f"{SPEC}: cascade must give the parent model and the parent classes it acts on")
     return problems
 
 
@@ -221,8 +239,12 @@ def _check_release(directory: Path, spec: dict, release: dict) -> list[str]:
             problems.append(f"{path.relative_to(directory)} is not a published artifact")
 
     labels = directory / ARTIFACTS / "labels.txt"
-    if labels.is_file() and labels.read_text(encoding="utf-8").splitlines() != spec["classes"]:
-        problems.append(f"{ARTIFACTS}/labels.txt must list the classes of {SPEC}, one per line, in order")
+    if labels.is_file():
+        lines = labels.read_text(encoding="utf-8").splitlines()
+        if spec["output_layout"] == SOFTMAX and lines != [";".join(spec["classes"])]:
+            problems.append(f"{ARTIFACTS}/labels.txt must be one line with the classes of {SPEC} separated by ;")
+        elif spec["output_layout"] != SOFTMAX and lines != spec["classes"]:
+            problems.append(f"{ARTIFACTS}/labels.txt must list the classes of {SPEC}, one per line, in order")
     problems += check_signature(spec, release.get("onnx"))
     return problems
 
@@ -239,8 +261,12 @@ def check_signature(spec: dict, onnx: object) -> list[str]:
         problems.append(f"exported input shape {shape} does not match input {spec['input']} (NCHW, 3 channels)")
     elif not dynamic and shape[0] != onnx.get("batch"):
         problems.append(f"exported input batch {shape[0]} differs from the recorded batch {onnx.get('batch')}")
-    fields = OUTPUT_FIELDS.get(spec["output_layout"])
-    if fields is not None:
+    fields = len(spec["classes"]) if spec["output_layout"] == SOFTMAX else OUTPUT_FIELDS.get(spec["output_layout"])
+    if spec["output_layout"] == SOFTMAX:
+        outputs = onnx["outputs"]
+        if len(outputs) != 1 or len(outputs[0].get("shape") or []) != 2 or outputs[0]["shape"][-1] != fields:
+            problems.append(f"{SOFTMAX} needs one [batch, {fields}] output (one probability per class)")
+    elif fields is not None:
         outputs = onnx["outputs"]
         last = (outputs[0].get("shape") or [None])[-1] if len(outputs) == 1 else None
         if last != fields:
@@ -290,4 +316,57 @@ def _check_nvinfer(directory: Path, config: Path, spec: dict, release: dict | No
     if not onnx.get("dynamic") and batch != str(onnx.get("batch")):
         problems.append(f"{name}: batch-size={batch} but the ONNX was exported with a fixed batch of "
                         f"{onnx.get('batch')}")
+    return problems
+
+
+def _parent(models_root: Path, spec: dict) -> dict | str:
+    """二级模型的父模型：{"classes": 发布的类别, "gie_ids": 各 nvinfer 配置的 gie-unique-id}；不成立时返回问题。"""
+    parent = spec["cascade"]["parent"]
+    directory = models_root / parent
+    release_path = directory / RELEASE
+    if not release_path.is_file():
+        return f"cascade.parent {parent} has not been published ({directory / RELEASE} is missing)"
+    try:
+        release = json.loads(release_path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        return f"cascade.parent {parent}: {RELEASE}: {error}"
+    classes = release.get("classes") or []
+    missing = [name for name in spec["cascade"]["classes"] if name not in classes]
+    if missing:
+        return f"cascade.classes: the published release of {parent} has no class {', '.join(missing)}"
+    gie_ids = {}
+    for config in sorted(directory.glob("*.txt")):
+        properties = _properties(config)
+        if properties is not None:
+            gie_ids[config.name] = properties.get("gie-unique-id", "")
+    if not gie_ids:
+        return f"cascade.parent {parent} has no nvinfer config to act on"
+    return {"name": parent, "classes": classes, "gie_ids": gie_ids}
+
+
+def _check_cascade(config: Path, spec: dict, parent: dict) -> list[str]:
+    """二级模型的 nvinfer 配置作用于父模型的输出：只处理父模型检测到的 cascade.classes 中的目标。"""
+    properties = _properties(config) or {}
+    name = config.name
+    problems = []
+    if properties.get("process-mode") != "2":
+        problems.append(f"{name}: process-mode must be 2 (operate on the objects of {parent['name']})")
+    if spec["output_layout"] == SOFTMAX and properties.get("network-type") != "1":
+        problems.append(f"{name}: network-type must be 1 (classifier) for output_layout {SOFTMAX}")
+    target = properties.get("operate-on-gie-id", "")
+    if target not in parent["gie_ids"].values():
+        found = ", ".join(f"{config_name}: {gie or 'none'}" for config_name, gie in parent["gie_ids"].items())
+        problems.append(f"{name}: operate-on-gie-id={target or 'nothing'} must be the gie-unique-id of "
+                        f"{parent['name']} ({found})")
+    if properties.get("gie-unique-id", "") in parent["gie_ids"].values():
+        problems.append(f"{name}: gie-unique-id must differ from the gie-unique-id of {parent['name']}")
+    expected = sorted(parent["classes"].index(c) for c in spec["cascade"]["classes"])
+    value = properties.get("operate-on-class-ids", "")
+    try:
+        actual = sorted(int(v) for v in value.replace(",", ";").split(";") if v.strip())
+    except ValueError:
+        actual = None
+    if actual != expected:
+        problems.append(f"{name}: operate-on-class-ids={value or 'nothing'} but cascade.classes are classes "
+                        f"{';'.join(map(str, expected))} of the published {parent['name']}")
     return problems

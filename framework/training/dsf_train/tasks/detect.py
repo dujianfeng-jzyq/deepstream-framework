@@ -24,37 +24,59 @@ KEPT_IOU = 0.5
 
 
 def samples(annotation: Annotation, spec: dict, ignore: set[str]) -> tuple[list[dict], list[str], Counter]:
-    """返回 (对象, 问题, 被忽略的其他形状类型计数)。对象的 box 是像素坐标 [x1, y1, x2, y2]。
+    """返回 (对象, 问题, 不收入的形状按原因计数)。对象的 box 是像素坐标 [x1, y1, x2, y2]。
     ignore 中的标签丢弃（来源中本模型不用的类别与 data.ignore_classes），其余不在 classes 中的标签是错误。"""
     classes = {name: index for index, name in enumerate(spec["classes"])}
     objects, problems, ignored = [], [], Counter()
     for shape in annotation.shapes:
         if shape.shape_type != SHAPE:
-            ignored[shape.shape_type or "(none)"] += 1  # 同一来源可能还服务于分割等任务
+            ignored[f"{shape.shape_type or '(none)'} shapes (not used by task {NAME})"] += 1  # 同一来源可能还服务于分割等任务
             continue
         if shape.label in ignore:
             continue
         if shape.label not in classes:
             problems.append(f"unknown class {shape.label!r}")
             continue
-        if len(shape.points) < 2:
-            problems.append(f"{shape.label}: a rectangle needs at least two points")
+        box, problem = rectangle(shape, annotation)
+        if problem:
+            problems.append(problem)
             continue
-        xs, ys = [p[0] for p in shape.points], [p[1] for p in shape.points]
-        box = [min(xs), min(ys), max(xs), max(ys)]
-        limits = (annotation.width, annotation.height)
-        if min(box) < -EDGE_TOLERANCE or box[2] > limits[0] + EDGE_TOLERANCE or box[3] > limits[1] + EDGE_TOLERANCE:
-            problems.append(f"{shape.label}: box {[round(v, 1) for v in box]} is outside the "
-                            f"{limits[0]}x{limits[1]} image")
-            continue
-        box = [min(max(box[0], 0.0), limits[0]), min(max(box[1], 0.0), limits[1]),
-               min(max(box[2], 0.0), limits[0]), min(max(box[3], 0.0), limits[1])]
-        if box[2] - box[0] < 1 or box[3] - box[1] < 1:
-            problems.append(f"{shape.label}: box {[round(v, 1) for v in box]} is smaller than one pixel")
-            continue
-        objects.append({"class": classes[shape.label], "box": [round(v, 2) for v in box],
+        objects.append({"class": classes[shape.label], "box": box,
                         "difficult": shape.difficult, "attributes": dict(sorted(shape.attributes.items()))})
     return objects, problems, ignored
+
+
+def rectangle(shape, annotation: Annotation) -> tuple[list[float], str]:
+    """矩形形状 → (像素坐标 [x1, y1, x2, y2]，问题)。容差内的越界裁剪到图像内；有问题时框为空。"""
+    if len(shape.points) < 2:
+        return [], f"{shape.label}: a rectangle needs at least two points"
+    xs, ys = [p[0] for p in shape.points], [p[1] for p in shape.points]
+    box = [min(xs), min(ys), max(xs), max(ys)]
+    limits = (annotation.width, annotation.height)
+    if min(box) < -EDGE_TOLERANCE or box[2] > limits[0] + EDGE_TOLERANCE or box[3] > limits[1] + EDGE_TOLERANCE:
+        return [], f"{shape.label}: box {[round(v, 1) for v in box]} is outside the {limits[0]}x{limits[1]} image"
+    box = [min(max(box[0], 0.0), limits[0]), min(max(box[1], 0.0), limits[1]),
+           min(max(box[2], 0.0), limits[0]), min(max(box[3], 0.0), limits[1])]
+    if box[2] - box[0] < 1 or box[3] - box[1] < 1:
+        return [], f"{shape.label}: box {[round(v, 1) for v in box]} is smaller than one pixel"
+    return [round(v, 2) for v in box], ""
+
+
+def manifest_fields(spec: dict) -> dict:
+    """数据集清单中除样本外决定训练结果的规格字段：检测的样本是整图，没有额外字段。"""
+    return {}
+
+
+def source_labels(spec: dict) -> list[str]:
+    """来源中必须存在的标签（类别依赖，§15.1）：检测模型的类别就是标注中的类别名。"""
+    return spec["classes"]
+
+
+def consistency_inputs(root, samples: list[dict], spec: dict, limit: int) -> list:
+    """导出一致性比较的输入：前 limit 张图片按网络输入尺寸 letterbox。"""
+    from .. import media, paths
+    width, height = spec["input"]["width"], spec["input"]["height"]
+    return [media.letterbox(paths.source_dir(root, s["source"]) / s["image"], width, height) for s in samples[:limit]]
 
 
 def statistics(samples_: list[dict], spec: dict) -> Counter:

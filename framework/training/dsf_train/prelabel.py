@@ -83,6 +83,9 @@ def prelabel(repo: Path, root: Path, spec: dict, source: str, run: str | None, c
     文件与它们的记录都保留，再次运行只处理剩下的。"""
     if not 0 < conf < 1:
         raise TrainError(f"--conf must be between 0 and 1, not {conf}")
+    if not hasattr(tasks.get(spec["task"]), "prelabel_shapes"):
+        raise TrainError(f"prelabel is not supported for task {spec['task']} yet; label the images in "
+                         "X-AnyLabeling (for a second-stage model: the attribute on the parent boxes)")
     if label is not None:
         return _prelabel_class(repo, root, spec, source, run, conf, device, label)
     task = tasks.get(spec["task"])
@@ -210,9 +213,10 @@ def review(root: Path, spec: dict, source: str) -> list[str]:
     """预标注之后人改了多少：每个批次中已检查图片的预测框保留、删除与补充的数量。没有预标注时为空。"""
     directory = paths.source_dir(root, source)
     log_path = directory / paths.PRELABEL_RECORD
-    if not log_path.is_file():
-        return []
     task = tasks.get(spec["task"])
+    # 共用来源中的预标注记录属于预标注它的模型（检测）；不支持预标注的任务没有可比较的修正量。
+    if not log_path.is_file() or not hasattr(task, "corrections"):
+        return []
     log = json.loads(log_path.read_text(encoding="utf-8"))
     totals = [Counter() for _ in log["batches"]]
     written = [(name, None, item) for name, item in log["images"].items()]

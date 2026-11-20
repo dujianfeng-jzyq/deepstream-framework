@@ -5,6 +5,7 @@
   TASKS                                    支持的任务
   write_view(task, manifest, root, view, location)
                                            把数据集写成该后端需要的目录格式；location 是视图的最终位置
+  data_path(task, view)                    训练与评估时交给后端的 data（视图中的文件或目录）
   check_options(options)                   train.options 的问题（框架决定的参数不能出现）
   version()                                后端及其依赖的版本，记入 run.json
   train(task, data, weights, options, directory, resume, workdir)

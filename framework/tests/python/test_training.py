@@ -22,7 +22,7 @@ from dsf_deploy import classes as class_diff, models
 from dsf_train import (backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, update,
                        xanylabeling)
 from dsf_train.backends import ultralytics
-from dsf_train.tasks import detect
+from dsf_train.tasks import classify, detect
 from dsf_train.errors import TrainError
 
 SAMPLES = Path(__file__).resolve().parent / "data/x-anylabeling-4.0.6"
@@ -116,9 +116,8 @@ class SpecTest(TrainingTestCase):
         with self.assertRaisesRegex(TrainError, "unknown task 'track'"):
             spec.skeleton("n", "track", ["a"])
         path = spec.path(self.repo, "m")
-        path.write_text(path.read_text().replace("task: detect", "task: classify") +
-                        "cascade: {parent: x, classes: [a]}\n")
-        with self.assertRaisesRegex(TrainError, "task classify is not supported yet(.|\n)*cascade"):
+        path.write_text(path.read_text() + "cascade: {parent: x, classes: [a]}\n")
+        with self.assertRaisesRegex(TrainError, "cascade is only for second-stage classify models"):
             self.spec()
 
     def test_init_creates_the_spec_once(self):
@@ -354,7 +353,7 @@ class PrepareTest(TrainingTestCase):
                    shapes=[{"label": "待定", "points": [[1, 1], [9, 9]], "shape_type": "rectangle"},
                            {"label": "防撞桶", "points": [[1, 1], [9, 1], [9, 9]], "shape_type": "polygon"}])
         result = self.prepare()
-        self.assertEqual(result.ignored_shapes, {"polygon": 1})  # 忽略的类别与其他任务的形状不是错误
+        self.assertEqual(result.ignored_shapes, {"polygon shapes (not used by task detect)": 1})  # 忽略的类别与其他任务的形状不是错误
         self.assertEqual(next(s for s in result.manifest["samples"] if s["image"] == "f_0.jpg")["objects"], [])
 
     def test_images_changed_after_import_are_rejected(self):
@@ -697,7 +696,7 @@ class UpdateTest(TrainingTestCase):
 class FakeBackend(types.ModuleType):
     """记录调用的假后端；fail 设为异常时训练在写出 last 之后抛出它。"""
     NAME = "fake"
-    TASKS = ("detect",)
+    TASKS = ("detect", "classify")
     BEST = ultralytics.BEST
     LAST = ultralytics.LAST
     RESERVED = ultralytics.RESERVED
@@ -711,6 +710,7 @@ class FakeBackend(types.ModuleType):
     LAYOUTS = ultralytics.LAYOUTS
 
     write_view = staticmethod(ultralytics.write_view)
+    data_path = staticmethod(ultralytics.data_path)
     check_options = staticmethod(ultralytics.check_options)
 
     def version(self):
@@ -733,6 +733,8 @@ class FakeBackend(types.ModuleType):
         self.calls.append(("evaluate", weights, data, split_name, options.get("device")))
         directory.mkdir(parents=True, exist_ok=True)
         value = self.map50_95.get(weights.parents[2].name, 0.5)  # runs/m/<run>/train/weights/best.pt
+        if task == "classify":
+            return classify.metrics([[8, 2], [1, 3]])
         return {"metrics": {"map50_95": value, "map50": 0.7, "precision": 0.8, "recall": 0.6},
                 "classes": {0: {"map50_95": value, "map50": 0.7, "precision": 0.8, "recall": 0.6}}}
 
@@ -741,7 +743,10 @@ class FakeBackend(types.ModuleType):
         target.write_bytes(b"onnx of " + weights.read_bytes())
 
     def reference(self, task, weights, layout, batch):
-        """每张图 4 个候选：坐标来自图像均值，两个高分、两个低分。"""
+        """检测：每张图 4 个候选，坐标来自图像均值，两个高分、两个低分。分类：概率来自图像均值。"""
+        if task == "classify":
+            means = numpy.array([float(item.mean()) for item in batch])
+            return numpy.stack([0.25 + 0.5 * means, 0.75 - 0.5 * means], axis=1).astype(numpy.float32)
         rows = []
         for item in batch:
             mean = float(item.mean()) * 100
@@ -1470,6 +1475,302 @@ class ExportSpecTest(TrainingTestCase):
         with self.assertRaisesRegex(TrainError, "export.batch must be an integer >= 1(.|\n)*export.dynamic must be "
                                                 "true or false(.|\n)*unknown keys half"):
             self.spec()
+
+
+def boxes(path: Path, items, checked=True, size=(640, 480)) -> Path:
+    """写一份标注：items 是 (类别, [x1, y1, x2, y2], 属性) 的列表，形状格式取自真实样例；size 是图像的宽高。"""
+    document = json.loads(LABELED.read_text(encoding="utf-8"))
+    [template] = document["shapes"]
+    shapes = []
+    for label, (x1, y1, x2, y2), attributes in items:
+        shapes.append({**template, "label": label, "attributes": attributes,
+                       "points": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]})
+    document.update({"imagePath": path.with_suffix(".jpg").name, "checked": checked, "shapes": shapes,
+                     "imageWidth": size[0], "imageHeight": size[1]})
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def groups_in(split_name: str, count: int, source="batch-01") -> list[str]:
+    """count 个按目录分组时落在 split_name 划分的采集组名（与 split.assign 的规则相同）。"""
+    found, index = [], 0
+    while len(found) < count:
+        if split.assign(f"dir:{source}/g{index}", 42, 0.15, 0.15) == split_name:
+            found.append(f"g{index}")
+        index += 1
+    return found
+
+
+class SecondStageTestCase(TrainingTestCase):
+    """父模型 m（检测，CLASSES）与二级模型 occ：作用于“标志牌(圆牌)”，类别是属性“遮挡”的值。"""
+    PARENT_CLASS = CLASSES[0]
+
+    def setUp(self):
+        super().setUp()
+        code, out, err = self.train("init", "occ", "--task", "classify", "--class", "否", "--class", "是",
+                                    "--parent", "m", "--parent-class", self.PARENT_CLASS, "--attribute", "遮挡")
+        self.assertEqual(code, 0, err)
+        self.set_child(sources=["batch-01"], ignore_classes=["未知"])
+
+    def set_child(self, **data):
+        path = spec.path(self.repo, "occ")
+        text = path.read_text(encoding="utf-8")
+        for key, value in data.items():
+            old = next(line for line in text.splitlines() if line.startswith(f"  {key}:"))
+            text = text.replace(old, f"  {key}: {json.dumps(value, ensure_ascii=False)}")
+        path.write_text(text, encoding="utf-8")
+
+    def child(self):
+        return spec.load(self.repo, "occ")
+
+    def edit_child(self, old, new):
+        path = spec.path(self.repo, "occ")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def labeled_groups(self, per_split=(("train", 2), ("val", 1), ("test", 1))):
+        """每个划分若干采集组，每组一张图：一个“遮挡=是”的大框与一个“遮挡=否”的框，导入来源。"""
+        for split_name, count in per_split:
+            for group in groups_in(split_name, count):
+                shade = int(group[1:]) * 3 % 256    # 每张图不同：导入按内容去重
+                image(self.raw / group / f"{group}.jpg", (shade, 80, 120), size=(640, 480))
+                boxes(self.raw / group / f"{group}.json", [
+                    (self.PARENT_CLASS, [10, 10, 110, 90], {"遮挡": "是"}),
+                    (self.PARENT_CLASS, [200, 50, 260, 130], {"遮挡": "否"})])
+        self.import_(self.raw)
+
+
+class SecondStageSpecTest(SecondStageTestCase):
+    def test_init_writes_a_valid_second_stage_spec(self):
+        child = self.child()
+        self.assertEqual((child["task"], child["classes"], child["cascade"], child["data"]["from_parent"]),
+                         ("classify", ["否", "是"], {"parent": "m", "classes": [self.PARENT_CLASS]},
+                          {"attribute": "遮挡", "min_size": 16}))
+        self.assertEqual((child["output_layout"], child["input"]), ("softmax", {"width": 128, "height": 128}))
+        self.assertEqual(models.check_spec("occ", child), [])
+
+    def test_init_needs_the_parent_and_leaves_nothing_behind_on_errors(self):
+        code, _, err = self.train("init", "x", "--task", "classify", "--class", "a")
+        self.assertIn("give --parent <model>", err)
+        code, _, err = self.train("init", "x", "--task", "classify", "--class", "a", "--parent", "m",
+                                  "--parent-class", "没有", "--attribute", "遮挡")
+        self.assertEqual(code, 1)
+        self.assertIn("cascade.classes: m has no class 没有", err)
+        self.assertFalse(spec.path(self.repo, "x").exists())
+        code, _, err = self.train("init", "x", "--task", "detect", "--class", "a", "--parent", "m")
+        self.assertIn("only for --task classify", err)
+
+    def test_second_stage_fields_are_checked(self):
+        cases = [("parent: m", "parent: nope", "cascade.parent: model nope does not exist"),
+                 ("parent: m", "parent: occ", "cascade.parent must name another model"),
+                 ("min_size: 16", "min_size: 16\n    padding: 0.1", "padding is not supported: the second-stage "
+                                                                     "nvinfer crops the detected box itself"),
+                 ("min_size: 16", "min_size: 0", "min_size must be an integer >= 1"),
+                 ("attribute: 遮挡", "attribute: ''", "data.from_parent.attribute must name"),
+                 ("width: 128", "width: 160", "input of a classify model must be square")]
+        for old, new, message in cases:
+            with self.subTest(new=new):
+                self.edit_child(old, new)
+                with self.assertRaisesRegex(TrainError, message):
+                    self.child()
+                self.edit_child(new, old)
+        self.edit_child("cascade:\n", "cascade_off:\n")
+        with self.assertRaisesRegex(TrainError, "cascade is required(.|\n)*whole-image classification is not "
+                                                "supported yet"):
+            self.child()
+
+    def test_the_parent_must_detect(self):
+        (self.repo / "models/occ2").mkdir()
+        spec.path(self.repo, "occ2").write_text(spec.path(self.repo, "occ").read_text().replace(
+            "id: occ", "id: occ2").replace("parent: m", "parent: occ"))
+        with self.assertRaisesRegex(TrainError, "occ is a classify model; the parent must detect objects"):
+            spec.load(self.repo, "occ2")
+
+    def test_commands_that_treat_classes_as_labels_are_refused(self):
+        code, _, err = self.train("import", "occ", str(self.raw), "--source", "batch-01")
+        self.assertIn("occ is a second-stage model: its samples are boxes of m", err)
+        code, _, err = self.train("update", "occ", "rename", "否", "无遮挡")
+        self.assertIn("values of the box attribute 遮挡, not source labels", err)
+        code, _, err = self.train("prelabel", "occ", "--source", "batch-01")
+        self.assertIn("prelabel is not supported for task classify yet", err)
+
+
+class SecondStagePrepareTest(SecondStageTestCase):
+    def test_samples_are_parent_boxes_classified_by_the_attribute(self):
+        [group] = groups_in("train", 1)
+        image(self.raw / group / "a.jpg", "red", size=(640, 480))
+        boxes(self.raw / group / "a.json", [
+            (self.PARENT_CLASS, [10, 10, 110, 90], {"遮挡": "是"}),
+            (self.PARENT_CLASS, [200, 50, 260, 130], {"遮挡": "否", "破损": "是"}),
+            (self.PARENT_CLASS, [300, 50, 360, 130], {"遮挡": "未知"}),          # data.ignore_classes
+            (self.PARENT_CLASS, [400, 50, 460, 130], {}),                         # 没有这个属性
+            (self.PARENT_CLASS, [500, 50, 510, 60], {"遮挡": "是"}),             # 小于 min_size
+            ("龙门架A", [0, 200, 300, 300], {"遮挡": "是"}),                      # 不是触发的父类别
+        ])
+        self.import_(self.raw)
+        result = dataset.prepare(self.repo, self.root, self.child())
+        [sample] = result.manifest["samples"]
+        self.assertEqual([(o["class"], o["box"], o["parent"]) for o in sample["objects"]],
+                         [(1, [10, 10, 110, 90], self.PARENT_CLASS), (0, [200, 50, 260, 130], self.PARENT_CLASS)])
+        self.assertEqual(result.ignored_shapes, {"boxes with 遮挡=未知 (data.ignore_classes)": 1,
+                                                 "boxes without attribute 遮挡": 1,
+                                                 "boxes smaller than 16 px (data.from_parent.min_size)": 1})
+        self.assertEqual((result.manifest["input"], result.manifest["from_parent"]),
+                         ({"width": 128, "height": 128}, {"attribute": "遮挡", "min_size": 16}))
+        lines = dataset.report(result, self.child())
+        self.assertIn("  ignored 1 boxes without attribute 遮挡", lines)
+        # 父模型的数据集清单没有额外字段：已有检测数据集的标识不变。
+        self.assertNotIn("input", dataset.prepare(self.repo, self.root, self.spec()).manifest)
+
+    def test_values_that_are_neither_classes_nor_ignored_are_errors(self):
+        [group] = groups_in("train", 1)
+        image(self.raw / group / "a.jpg", "red", size=(640, 480))
+        boxes(self.raw / group / "a.json", [(self.PARENT_CLASS, [10, 10, 110, 90], {"遮挡": "也许"})])
+        self.import_(self.raw)
+        with self.assertRaisesRegex(TrainError, "遮挡='也许' is neither a class nor in data.ignore_classes"):
+            dataset.prepare(self.repo, self.root, self.child())
+
+    def test_the_view_holds_stretched_crops_in_class_number_folders(self):
+        from PIL import Image
+        self.labeled_groups()
+        result = dataset.prepare(self.repo, self.root, self.child())
+        view = result.directory / paths.VIEW / "ultralytics"
+        self.assertEqual(ultralytics.data_path("classify", view), view)
+        for split_name in split.SPLITS:  # 每个划分都有全部类别目录，类别号不会错位
+            self.assertEqual(sorted(p.name for p in (view / split_name).iterdir()), ["000", "001"])
+        crops = sorted((view / "train/001").iterdir())
+        self.assertEqual(len(crops), 2)
+        with Image.open(crops[0]) as crop:
+            self.assertEqual(crop.size, (128, 128))   # 100x80 的框拉伸到网络输入，不保持宽高比
+        self.assertEqual(len(list((view / "test/000").iterdir())), 1)
+
+    def test_every_class_needs_training_samples(self):
+        self.labeled_groups(per_split=(("val", 1),))
+        with self.assertRaisesRegex(TrainError, "the train split has no samples of 否, 是"):
+            dataset.prepare(self.repo, self.root, self.child())
+
+    def test_the_sources_must_label_the_parent_classes(self):
+        self.labeled_groups()
+        self.edit_child(f"    - {self.PARENT_CLASS}\n", "    - 龙门架A\n")
+        source_labels = lock.current(self.root, self.child())
+        self.assertEqual(lock.missing_classes(self.child(), source_labels), [])
+        record = sources.read_record(self.source())
+        record["classes"] = ["防撞桶"]
+        paths.write_json(self.source() / paths.SOURCE_RECORD, record)
+        [problem] = lock.missing_classes(self.child(), lock.current(self.root, self.child()))
+        self.assertIn("has no class 龙门架A (cascade.classes of occ)", problem)
+
+    def test_renaming_a_parent_class_points_at_the_second_stage_model(self):
+        self.labeled_groups()
+        dataset.prepare(self.repo, self.root, self.spec())
+        dataset.prepare(self.repo, self.root, self.child())
+        result = update.rename(self.repo, self.root, self.spec(), self.PARENT_CLASS, "圆牌")
+        self.assertTrue(any("second-stage model occ triggers on 标志牌(圆牌): rename it to 圆牌 in its "
+                            "cascade.classes" in line for line in result.lines), result.lines)
+        with self.assertRaisesRegex(TrainError, "cascade.classes: m has no class 标志牌\\(圆牌\\)"):
+            self.child()
+
+
+class ClassifyTaskTest(unittest.TestCase):
+    def test_metrics_from_the_confusion_matrix(self):
+        result = classify.metrics([[90, 5], [3, 2]])
+        self.assertAlmostEqual(result["metrics"]["accuracy"], 0.92)
+        self.assertAlmostEqual(result["metrics"]["recall"], (90 / 95 + 2 / 5) / 2)
+        self.assertAlmostEqual(result["metrics"]["precision"], (90 / 93 + 2 / 7) / 2)
+        self.assertEqual(result["classes"][1], {"accuracy": None, "recall": 2 / 5, "precision": 2 / 7})
+        # 测试划分中没有样本的类别不列出，也不进入宏平均。
+        self.assertEqual(sorted(classify.metrics([[4, 0], [0, 0]])["classes"]), [0])
+        self.assertEqual(classify.metrics([[4, 0], [0, 0]])["metrics"]["recall"], 1.0)
+
+    def test_labels_are_one_semicolon_separated_line(self):
+        self.assertEqual(classify.labels_text(["否", "是"]), "否;是\n")
+
+    @needs_numpy
+    def test_softmax_outputs_are_compared(self):
+        native = numpy.array([[0.9, 0.1], [0.5002, 0.4998], [0.2, 0.8]], dtype=numpy.float32)
+        self.assertTrue(classify.compare("softmax", native, native.copy())["passed"])
+        near_tie = native.copy()
+        near_tie[1] = [0.4999, 0.5001]  # 几乎相等的两类可以在导出后交换名次
+        result = classify.compare("softmax", native, near_tie)
+        self.assertEqual((result["passed"], result["class_mismatches"]), (True, 0))
+        flipped = native.copy()
+        flipped[0] = [0.1, 0.9]
+        result = classify.compare("softmax", native, flipped)
+        self.assertEqual((result["passed"], result["class_mismatches"]), (False, 1))
+        self.assertIn("output shapes differ", classify.compare("softmax", native, native[:, :1])["reason"])
+
+
+CLASSIFIER_NVINFER = """[property]
+onnx-file=artifacts/model.onnx
+labelfile-path=artifacts/labels.txt
+model-engine-file=/data/engines/occ/model_b1_gpu0_fp16.engine
+batch-size=1
+network-type=1
+process-mode=2
+gie-unique-id=2
+operate-on-gie-id=1
+operate-on-class-ids=0
+"""
+
+
+@needs_numpy
+class SecondStagePublishTest(SecondStageTestCase):
+    """假后端训练并发布二级模型；父模型 m 以最小的已发布目录代替（只供级联校验读取类别与 gie-unique-id）。"""
+    def setUp(self):
+        super().setUp()
+        self.backend = FakeBackend()
+        backends.BACKENDS["fake"] = self.backend
+        self.addCleanup(backends.BACKENDS.pop, "fake")
+        self.edit_child("backend: ultralytics", "backend: fake")
+        self.labeled_groups()
+        parent = self.repo / "models/m"
+        (parent / "release.json").write_text(json.dumps({"classes": CLASSES}))
+        (parent / "nvinfer.txt").write_text("[property]\ngie-unique-id=1\n")
+        self.model_dir = self.repo / "models/occ"
+        (self.model_dir / "nvinfer.txt").write_text(CLASSIFIER_NVINFER, encoding="utf-8")
+        self.onnx = FakeOnnx(self.backend)
+        self.onnx.signature = lambda path: {"inputs": [{"name": "input", "shape": [1, 3, 128, 128]}],
+                                            "outputs": [{"name": "output", "shape": [1, 2]}]}
+        self.onnx.run = lambda path, batch: self.backend.reference("classify", None, "softmax", batch)
+        patcher = mock.patch.object(publish, "onnxio", self.onnx)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_second_stage_model_is_trained_evaluated_and_published(self):
+        code, out, err = self.train("prepare", "occ")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.train("run", "occ")
+        self.assertEqual(code, 0, err)
+        self.assertIn("accuracy 0.7857  recall 0.7750  precision 0.7444", out)
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        [train_call] = [c for c in self.backend.calls if c[0] == "train"]
+        self.assertEqual(train_call[2]["imgsz"], 128)
+        [evaluate_call] = [c for c in self.backend.calls if c[0] == "evaluate"]
+        self.assertTrue(evaluate_call[2].is_dir())      # 分类的 data 是视图目录
+        code, out, err = self.train("publish", "occ", run, "--accept-metrics")
+        self.assertEqual(code, 0, err)
+        release = json.loads((self.model_dir / "release.json").read_text(encoding="utf-8"))
+        self.assertEqual((release["output_layout"], release["metrics"]["recall"]), ("softmax", 0.775))
+        self.assertTrue(release["consistency"]["passed"])
+        self.assertEqual(release["consistency"]["crops"], 2)   # 测试划分中一张图的两个裁剪
+        self.assertEqual(release["training_data"]["batch-01"]["instances"], {"否": 4, "是": 4})
+        self.assertEqual((self.model_dir / "artifacts/labels.txt").read_text(encoding="utf-8"), "否;是\n")
+        self.assertIn("2 crops compared", out)
+        [export] = [c for c in self.backend.calls if c[0] == "export"]
+        self.assertEqual((export[2], export[3]), ("softmax", (128, 128)))
+        self.assertEqual(models.check_model(self.model_dir), [])
+
+    def test_a_config_that_acts_on_other_parent_classes_is_not_published(self):
+        (self.model_dir / "nvinfer.txt").write_text(
+            CLASSIFIER_NVINFER.replace("operate-on-class-ids=0", "operate-on-class-ids=2"), encoding="utf-8")
+        self.assertEqual(self.train("prepare", "occ")[0], 0)
+        self.assertEqual(self.train("run", "occ")[0], 0)
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        code, _, err = self.train("publish", "occ", run, "--accept-metrics")
+        self.assertEqual(code, 1)
+        self.assertIn("operate-on-class-ids=2 but cascade.classes are classes 0 of the published m", err)
+        self.assertFalse((self.model_dir / "release.json").exists())
 
 
 class RepositoryModelTest(unittest.TestCase):
