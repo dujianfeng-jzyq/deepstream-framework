@@ -43,11 +43,11 @@ data:
 
 train:
   backend: ultralytics
-  weights: yolo11s-cls.pt
+  weights: yolo11m-cls.pt
   options:
     epochs: 100
     batch: 64
-    patience: 20
+    patience: 50
 
 # recall 是各类别召回率的平均：类别不均衡时 accuracy 会被多数类掩盖。
 evaluate:
