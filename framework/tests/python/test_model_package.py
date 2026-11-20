@@ -9,9 +9,12 @@ import tarfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from deploy_support import ROOT, docker_cli_available
+from unittest import mock
+
+from deploy_support import ROOT, docker_cli_available, write_classifier
 from dsf_deploy import inventory, layout, models, modelpack
 from dsf_deploy.errors import DeployError
+from dsf_deploy.install import preflight
 from dsf_deploy.install.models import ModelOptions, install_models
 from test_pack_install import InstallTestCase
 
@@ -188,6 +191,47 @@ class ModelPackageTest(InstallTestCase):
         # 切换已完成：再次运行会跳过，所以提示直接给出重启命令。
         self.assertEqual(self.release(self.model), "r2")
         self.assertIn(f"cd {self.install_dir} && docker compose restart app", errors.getvalue())
+
+    def test_a_second_stage_model_is_checked_against_the_installed_parent(self):
+        # 已安装的项目带二级模型 c（作用于 m 的 person）；之后只装 c 的新发布。
+        parent = self.root / "models/m/nvinfer.txt"
+        parent.write_text(parent.read_text() + "gie-unique-id=1\n")
+        write_classifier(self.root / "models/c")
+        self.target, _ = self.install(self.pack(with_base=True))
+        child = self.root / "models/c"
+        (child / "artifacts/model.onnx").write_bytes(b"onnx c2")
+        record = json.loads((child / "release.json").read_text())
+        record["release"] = "r2"
+        record["artifacts"] = {name: models.sha256(child / name) for name in record["artifacts"]}
+        (child / "release.json").write_text(json.dumps(record))
+        config = (child / "nvinfer.txt").read_text()
+        (child / "nvinfer.txt").write_text(config.replace("/data/engines/c/", "/data/engines/c/r2/"))
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            archive = modelpack.pack_models(self.root, ["c"])
+        with tarfile.open(archive) as tar:
+            tar.extractall(self.tmp / "models-c")
+        package = self.tmp / "models-c" / archive.name[: -len(".tar.gz")]
+        checked = []
+
+        def check_locally(root, args, *_, **__):  # 在本进程中执行 base 中的同一个校验
+            self.assertEqual(args, ["check-models"])
+            checked.append(sorted(p.name for p in (root / layout.MODELS).iterdir()))
+            models.check(root)
+            return ""
+
+        with mock.patch.object(preflight, "_run_deploy_tool", check_locally):
+            output, _ = self.install_models(package, dry_run=True)
+        self.assertEqual(checked, [["c", "m"]])                              # 父模型来自已安装的项目
+        self.assertIn("更新模型：c r1 -> r2", output)
+
+        # 现场的父模型与仓库中的不同（gie-unique-id 改过）：对照已安装的父模型发现，什么也不改。
+        installed_parent = self.install_dir / "models/m/nvinfer.txt"
+        installed_parent.write_text(installed_parent.read_text().replace("gie-unique-id=1", "gie-unique-id=5"))
+        before = self.snapshot()
+        with mock.patch.object(preflight, "_run_deploy_tool", check_locally):
+            with self.assertRaisesRegex(DeployError, "operate-on-gie-id"):
+                self.install_models(package)
+        self.assertEqual(self.snapshot(), before)
 
     def test_the_package_must_match_an_installed_project_and_model(self):
         self.republish("r2")

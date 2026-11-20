@@ -78,7 +78,7 @@ def install_models(options: ModelOptions, docker: Docker | None = None) -> None:
     base_image = envfile.read_compose(install_dir / layout.ENV).get("BASE_IMAGE", "")
     if not base_image or not docker.image_exists(base_image):
         raise DeployError(f"缺少已安装项目的 base 镜像 {base_image or '（.env 中没有 BASE_IMAGE）'}")
-    _check_models(package, changes, base_image, docker)
+    _check_models(package, install_dir, changes, base_image, docker)
     config = docker.compose_config(install_dir)
     services = config["services"]
     builder = services.get(layout.ENGINE_BUILDER)
@@ -179,12 +179,19 @@ def _changes(package: Path, install_dir: Path, ids: list[str], rollback: bool) -
     return changes
 
 
-def _check_models(package: Path, changes: list[Change], base_image: str, docker: Docker) -> None:
-    """在 base 中执行打包时的模型校验（需要 PyYAML）：只挂载一个含部署工具与候选模型的临时目录。"""
+def _check_models(package: Path, install_dir: Path, changes: list[Change], base_image: str,
+                  docker: Docker) -> None:
+    """在 base 中执行打包时的模型校验（需要 PyYAML），对象是装入之后的整个模型目录：已安装的模型，其中要
+    更新的换成候选。模型之间有依赖（二级模型对照父模型的发布与配置），只装二级模型时父模型来自已安装的，
+    更新父模型时已安装的二级模型同样要对照它。只挂载一个含部署工具与这些模型的临时目录。"""
     with tempfile.TemporaryDirectory(prefix="dsf-models-") as temporary:
         stage = Path(temporary).resolve()
         for tree in layout.MODEL_PACKAGE_TREES:
             pack._copy_tree(package / tree, stage / tree)
+        changed = {change.model for change in changes}
+        for directory in models.model_dirs(install_dir):
+            if directory.name not in changed:
+                shutil.copytree(directory, stage / layout.MODELS / directory.name)
         for change in changes:
             shutil.copytree(change.candidate, stage / layout.MODELS / change.model)
         print("检查模型")

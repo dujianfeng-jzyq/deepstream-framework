@@ -174,7 +174,7 @@ scripts/build-model-package.sh <模型> [<模型>…]   # 开发机：dist/<项�
 安装顺序不可调换：
 
 1. 核对包完整性与安装目录；比较新旧模型的发布标识，已是同一发布的模型跳过。
-2. 在 base 中执行模型校验；`custom-lib-path` 引用的解析插件必须在已安装的载荷中（模型包不换程序）。
+2. 在 base 中执行模型校验，对象是装入之后的整个模型目录（已安装的模型，其中要更新的换成包中的）：只装二级模型时对照已安装的父模型，更新父模型时已安装的二级模型同样要对照它；`custom-lib-path` 引用的解析插件必须在已安装的载荷中（模型包不换程序）。
 3. **旧服务继续运行时构建 engine**：按已安装的 `model-engine-builder` 定义（镜像、用户、运行时、设备、挂载）运行一次构建工具，只把 `/models` 换成组装在 `.models-staging/` 中的新模型目录。engine 路径带发布标识（`/data/engines/<id>/<发布>/…`），与正在使用的 engine 不冲突。
 4. 切换：`models/<id>` 改名为 `.models-previous/<id>`（替换更早的一份），新目录改名为 `models/<id>`；受管理清单随之更新，之后的完整安装把它们当作发布文件。只重启挂载了 `models/` 的常驻服务（`docker compose restart`），停机时间是重启的数秒，而不是 TensorRT 构建的数分钟；然后等待就绪。
 5. 清理 `/data/engines/<id>/` 中既不被当前、也不被上一份模型引用的条目（构建工具的 `--prune-engines`，`--keep-models-path` 指向 `.models-previous/`）。
