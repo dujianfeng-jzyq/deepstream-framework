@@ -887,6 +887,35 @@ class RunTest(RunTestCase):
         path.write_text(path.read_text().replace(f"run:{first}", "sub/dir.pt"))
         self.assertIn("must be a pretrained file name", self.train("run", "m")[2])
 
+    def test_slices_by_source_evaluate_each_source_of_the_test_split(self):
+        for group in groups_in("test", 2, source="batch-02"):
+            image(self.tmp / "b2" / group / f"{group}.jpg", (int(group[1:]) % 256, 9, 9))
+            annotation(self.tmp / "b2" / group / f"{group}.json", LABELED, checked=True)
+        self.import_(self.tmp / "b2", source="batch-02")
+        self.set_data(sources=["batch-01", "batch-02"])
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("evaluate:\n", "evaluate:\n  slices: [source]\n"))
+        lock.check(self.repo, self.root, self.spec(), record_new=True)
+        self.assertEqual(self.train("prepare", "m")[0], 0)
+        code, out, err = self.train("run", "m")
+        self.assertEqual(code, 0, err)
+        evaluations = [call for call in self.backend.calls if call[0] == "evaluate"]
+        self.assertEqual(len(evaluations), 3)                       # 总体与两个来源
+        self.assertTrue(all("slices/source-" in str(call[2]) for call in evaluations[1:]))
+        run = self.only_run()
+        [dataset_id] = [p.name for p in (self.root / "runs/m" / run / "eval").iterdir()]
+        metrics = json.loads((self.root / "runs/m" / run / "eval" / dataset_id / "metrics.json").read_text())
+        by_source = metrics["slices"]["source"]
+        self.assertEqual(sorted(by_source), ["batch-01", "batch-02"])
+        self.assertEqual(by_source["batch-02"]["images"], 2)
+        self.assertEqual(by_source["batch-02"]["metrics"]["map50"], 0.7)
+        self.assertIn("by source (evaluate.slices):", out)
+        self.assertRegex(out, r"batch-02 +2 +0\.5000")
+        self.assertFalse(list((self.root / "runs/m" / run / "eval").rglob("view")))   # 视图评估后删除
+        path.write_text(path.read_text().replace("slices: [source]", "slices: [遮挡]"))
+        with self.assertRaisesRegex(TrainError, "evaluate.slices must list slice kinds out of: source"):
+            self.spec()
+
     def test_an_old_run_is_evaluated_on_a_newer_dataset(self):
         self.assertEqual(self.train("run", "m")[0], 0)
         run = self.only_run()

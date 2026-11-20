@@ -122,6 +122,8 @@ export:
   simplify: true
 """
 FROM_PARENT_KEYS = ("attribute", "min_size")
+# evaluate.slices 支持的分片：source 按来源（图片级的子集）。按形状属性的分片是目标级的子集，尚未实现。
+SLICES = ("source",)
 # train.class_weights 取它时按训练划分的样本数取反比（总数 / (类别数 × 该类样本数)）。
 BALANCED = "balanced"
 
@@ -310,6 +312,10 @@ def _check_evaluate(evaluate: object, task) -> list[str]:
         if not isinstance(regression, dict) or regression.get("metric") not in task.METRICS or \
                 not _number(regression.get("max_drop")) or regression["max_drop"] < 0:
             problems.append(f"evaluate.gate.regression must be {{metric: <{known}>, max_drop: <number >= 0>}}")
+    slices = evaluate.get("slices", [])
+    if not isinstance(slices, list) or any(item not in SLICES for item in slices):
+        problems.append(f"evaluate.slices must list slice kinds out of: {', '.join(SLICES)} "
+                        "(slices by shape attribute or difficult are not supported yet)")
     return problems
 
 

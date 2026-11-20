@@ -200,6 +200,7 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
                               inference_options(record["options"], device),
                               output / backend.NAME, root / paths.PRETRAINED)
     sweep = _thresholds(root, spec, task, backend, run_dir, directory, record, device)
+    slices = _slices(root, spec, task, backend, run_dir, manifest, test, record, device, output)
     instances = task.statistics(test, spec)
     classes = []
     for index, name in enumerate(spec["classes"]):
@@ -209,11 +210,41 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
     document = {"schema": SCHEMA, "run": run, "dataset": dataset_id, "split": "test", "images": len(test),
                 "groups": len({sample["group"] for sample in test}), "metrics": result["metrics"],
                 "classes": classes, **({"task": task.NAME, "thresholds": sweep} if sweep is not None else {}),
+                **({"slices": slices} if slices else {}),
                 "backend": {"name": backend.NAME, **backend.version()}, "evaluated_at": _now()}
     paths.write_json(output / METRICS, document)
     record["evaluations"][dataset_id] = result["metrics"]
     paths.write_json(run_dir / RECORD, record)
     return document
+
+
+def _slices(root: Path, spec: dict, task, backend, run_dir: Path, manifest: dict, test: list[dict],
+            record: dict, device: str | None, output: Path) -> dict:
+    """evaluate.slices 中的分片：按来源时，测试划分有两个以上来源才逐个来源评估（只有一个来源时就是总体）。
+    每个来源写一份只含它的测试图片的视图，评估后删除。返回 {"source": {来源: {"images", "metrics", "classes"}}}。"""
+    wanted = (spec.get("evaluate") or {}).get("slices") or []
+    by_source: dict[str, list[dict]] = {}
+    for sample in test:
+        by_source.setdefault(sample["source"], []).append(sample)
+    if "source" not in wanted or len(by_source) < 2:
+        return {}
+    result = {}
+    for source, samples in sorted(by_source.items()):
+        base = output / "slices" / f"source-{source}"
+        view = base / paths.VIEW / backend.NAME
+        shutil.rmtree(view, ignore_errors=True)
+        backend.write_view(task.NAME, {**task.manifest_fields(spec), "classes": record["classes"],
+                                       "samples": samples}, root, view, view)
+        evaluated = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST, backend.data_path(task.NAME, view),
+                                     "test", inference_options(record["options"], device), base / backend.NAME,
+                                     root / paths.PRETRAINED)
+        shutil.rmtree(base / paths.VIEW, ignore_errors=True)
+        instances = task.statistics(samples, spec)
+        result[source] = {"images": len(samples), "metrics": evaluated["metrics"],
+                          "classes": [{"name": name, "instances": instances[name],
+                                       **{m: (evaluated["classes"].get(index) or {}).get(m) for m in task.METRICS}}
+                                      for index, name in enumerate(spec["classes"]) if instances[name]]}
+    return {"source": result}
 
 
 def _thresholds(root: Path, spec: dict, task, backend, run_dir: Path, directory: Path, record: dict,
@@ -350,6 +381,14 @@ def report(document: dict) -> list[str]:
         lines.append(f"  not evaluated (no test instances): {', '.join(missing)}")
     if document.get("thresholds"):
         lines += tasks.get(document["task"]).threshold_lines(document["thresholds"])
+    by_source = (document.get("slices") or {}).get("source") or {}
+    if by_source:
+        width = max(dataset.display_width(name) for name in [*by_source, "source"])
+        lines.append("  by source (evaluate.slices):")
+        lines.append(f"    {dataset.pad('source', width)}  {'images':>6} " + " ".join(f"{n:>9}" for n in names))
+        for source, item in by_source.items():
+            values = " ".join(f"{item['metrics'][n]:9.4f}" for n in names)
+            lines.append(f"    {dataset.pad(source, width)}  {item['images']:6d} {values}")
     return lines
 
 
