@@ -41,8 +41,8 @@ def _print(lines: list[str]) -> None:
         print("\n".join(lines))
 
 
-def _evaluate(root: Path, model: dict, run: str, dataset_id: str | None = None) -> None:
-    print("\n".join(runs.report(runs.evaluate(root, model, run, dataset_id))))
+def _evaluate(root: Path, model: dict, run: str, dataset_id: str | None = None, device: str | None = None) -> None:
+    print("\n".join(runs.report(runs.evaluate(root, model, run, dataset_id, device))))
     print(f"  details: {paths.run_dir(root, model['id'], run) / runs.EVAL}")
 
 
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", required=True)
     p.add_argument("--run", help="prelabel with this completed run (defaults to the published model)")
     p.add_argument("--conf", type=float, default=0.25, help="confidence threshold (default 0.25)")
-    p.add_argument("--device", help="inference device, e.g. 0 or cpu (defaults to the run's device)")
+    p.add_argument("--device", help="inference device, e.g. 0 or cpu (defaults to TRAIN_DEVICE, then the run's device)")
     p.add_argument("--class", dest="class_", metavar="CLASS",
                    help="add CLASS candidates to the images that wait for review of CLASS (existing shapes stay)")
 
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="classify: list the misclassified crops instead (most confident first)")
     p.add_argument("--split", choices=("test", "val", "train"), action="append",
                    help="split for --errors (repeat for several; default test)")
-    p.add_argument("--device", help="device for --errors (defaults to the run's)")
+    p.add_argument("--device", help="inference device, e.g. 1 or cpu (defaults to TRAIN_DEVICE, then the run's device)")
 
     p = commands.add_parser("review", help="list reviews, or apply the labels fixed in one back to its sources")
     p.add_argument("action", nargs="?", choices=("apply",))
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--accept-metrics", action="store_true",
                    help="publish although there is nothing to compare the metrics with (no evaluate.gate.min "
                         "and no comparable published model); failed gates are never accepted")
-    p.add_argument("--device", help="device for the gate's evaluations (defaults to the run's device)")
+    p.add_argument("--device", help="device for the gate's evaluations (defaults to TRAIN_DEVICE, then the run's device)")
 
     p = commands.add_parser("update", help="change the classes of a model, or show and confirm its class dependencies",
                             description="Without an operation, show the classes and the state of every source.")
@@ -245,9 +245,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"review {name}: {target}\n  open it in X-AnyLabeling and step through with D (the boxes to "
                           f"check are in {review.CHECKLIST}); fix and save, then: train review apply {name}")
             else:
-                if args.split or args.device:
-                    raise TrainError("--split and --device go with --errors")
-                _evaluate(root, model, args.run, args.dataset)
+                if args.split:
+                    raise TrainError("--split goes with --errors")
+                _evaluate(root, model, args.run, args.dataset, args.device)
         elif args.command == "review":
             if args.action is None:
                 if args.name:

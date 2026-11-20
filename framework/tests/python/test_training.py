@@ -60,6 +60,11 @@ def new_file_mode() -> int:
 
 class TrainingTestCase(unittest.TestCase):
     def setUp(self):
+        # 训练机上设置的 TRAIN_DEVICE 不影响用例；需要它的用例自己设置。
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(runs.DEVICE_ENV, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="dsf-train-")).resolve()
         self.repo = self.tmp / "repo"
         self.root = self.tmp / "training"
@@ -892,6 +897,26 @@ class RunTest(RunTestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(sorted(self.record(run)["evaluations"]), sorted([self.dataset_id, newer]))
         self.assertIn(f"on the test split of dataset {newer}", out)
+
+    def test_the_device_belongs_to_the_machine_not_to_the_run(self):
+        os.environ[runs.DEVICE_ENV] = "1"
+        self.assertEqual(self.train("run", "m")[0], 0)
+        run = self.only_run()
+        self.assertEqual(self.record(run)["options"]["device"], "1")             # model.yaml 没有 device
+        self.assertEqual(self.backend.calls[-1][-1], "1")
+        os.environ[runs.DEVICE_ENV] = "0,1"
+        self.assertEqual(self.train("run", "m", "--option", "device=0")[0], 0)   # --option 优先
+        second = next(p.name for p in (self.root / "runs/m").iterdir() if p.name != run)
+        self.assertEqual(self.record(second)["options"]["device"], 0)
+        # 评估不沿用训练时的设备：--device，其次 TRAIN_DEVICE，都没有时才用 run 的设备。
+        self.assertEqual(self.train("eval", "m", run)[0], 0)
+        self.assertEqual(self.backend.calls[-1][-1], "0,1")
+        self.assertEqual(self.train("eval", "m", run, "--device", "cpu")[0], 0)
+        self.assertEqual(self.backend.calls[-1][-1], "cpu")
+        del os.environ[runs.DEVICE_ENV]
+        self.assertEqual(self.train("eval", "m", run)[0], 0)
+        self.assertEqual(self.backend.calls[-1][-1], "1")
+        self.assertIn("--split goes with --errors", self.train("eval", "m", run, "--split", "val")[2])
 
     def test_the_dataset_must_match_the_classes(self):
         path = spec.path(self.repo, "m")
@@ -1864,7 +1889,7 @@ class SecondStagePublishTest(SecondStageTestCase):
         document = json.loads((self.root / "runs/occ" / run / "eval" / dataset_id / "errors-train.json").read_text())
         self.assertEqual({(e["label"], e["predicted"], e["source"]) for e in document["errors"]},
                          {("是", "否", "batch-01")})
-        self.assertIn("--split and --device go with --errors", self.train("eval", "occ", run, "--split", "val")[2])
+        self.assertIn("--split goes with --errors", self.train("eval", "occ", run, "--split", "val")[2])
         self.assertIn("lists misclassified crops of classify models", self.train("eval", "m", run, "--errors")[2])
 
     def review_of_train_errors(self):

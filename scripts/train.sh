@@ -2,6 +2,7 @@
 # 在训练镜像中运行训练工具（命令见 docs/training.md）：
 #   scripts/train.sh <命令> [参数…]        例如 scripts/train.sh import road-assets ~/raw --source batch-01
 #   TRAIN_ROOT=<目录>                      训练根目录，默认 ~/<项目名>/training
+#   TRAIN_DEVICE=<设备>                    这台机器默认使用的设备，例如 1 或 0,1（docs/training.md §7）
 # 镜像 tag 随 Dockerfile 与依赖文件的摘要变化，缺少时自动构建。容器以当前用户运行，挂载仓库（可写：init 与
 # publish 写 models/）、训练根目录（可写）与当前目录（只读）；参数中含 / 的已有路径按真实路径只读挂载。
 set -Eeuo pipefail
@@ -53,5 +54,5 @@ tty=()
 # 家目录与 Ultralytics 的设置放在训练根目录：容器用户没有可写的家目录，下载的预训练权重也随之保留。
 exec docker run --rm ${tty[@]+"${tty[@]}"} ${gpu[@]+"${gpu[@]}"} --shm-size 8g \
   --user "$(id -u):$(id -g)" -e HOME="${train_root}/.home" -e YOLO_CONFIG_DIR="${train_root}/.home/ultralytics" \
-  -e TRAIN_ROOT="${train_root}" "${mounts[@]}" -w "${workdir}" \
+  -e TRAIN_ROOT="${train_root}" -e TRAIN_DEVICE="${TRAIN_DEVICE:-}" "${mounts[@]}" -w "${workdir}" \
   "${image}" python3 "${ROOT}/framework/training/dsf-train.py" ${args[@]+"${args[@]}"}

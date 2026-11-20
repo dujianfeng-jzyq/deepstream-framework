@@ -141,7 +141,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ### 5.4 预标注：`train prelabel <id> --source <来源> [--run <run>]`
 
-- 默认用 `release.json` 中的当前模型：按记录的 run 在训练根目录中找到权重，并核对 sha256（权重不在这台训练机上时报错，改用 `--run`）。`--run` 改用某次完成的训练（包括未发布的）。所用模型的类别都要在当前规格中（按名称），写出它认识的类别：新增类别之后，当前发布的模型仍可预标注旧类别。在训练镜像中用后端原生推理，置信度阈值 `--conf`（默认 0.25），输入尺寸与设备沿用该 run 的参数，`--device` 另选设备（例如另一张卡正在训练时）。NMS 不区分类别：一个目标只写一个框，相邻候选判成不同类别时只保留得分最高的那个。
+- 默认用 `release.json` 中的当前模型：按记录的 run 在训练根目录中找到权重，并核对 sha256（权重不在这台训练机上时报错，改用 `--run`）。`--run` 改用某次完成的训练（包括未发布的）。所用模型的类别都要在当前规格中（按名称），写出它认识的类别：新增类别之后，当前发布的模型仍可预标注旧类别。在训练镜像中用后端原生推理，置信度阈值 `--conf`（默认 0.25），输入尺寸沿用该 run 的参数，设备按 `--device`、`TRAIN_DEVICE`、run 的设备依次取第一个（§7）。NMS 不区分类别：一个目标只写一个框，相邻候选判成不同类别时只保留得分最高的那个。
 - 只给**还没有 JSON** 的图片写标注，永不覆盖已有标注：推理期间人在工具中保存了某张图时，跳过这张。写入的 JSON 与 X-AnyLabeling 4.0.6 保存的字段与键顺序相同，打开即可修正；预测为空的图片也写出空标注，表示模型认为画面中没有目标。
 - 写入的标注一律 `checked: false`：人在工具中修正（预测正确时直接）勾选后才进入数据集，与人工标注同一条规则（§5.2），不需要另外的确认机制。
 - 写入的文件与所用模型（发布或 run、权重 sha256、阈值）记入 `prelabel.json`，用于追溯；它不影响收录。中断后再次运行只处理剩下没有 JSON 的图片。
@@ -162,12 +162,13 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 - 在训练镜像中调用 `train.backend` 指定的后端，`train.options` 原样透传；没有给出 `imgsz` 时按 `input` 的尺寸训练。数据集、输出位置与续训由工具决定，写在 `options` 中（`data`、`project`、`name`、`resume` 等）是规格错误。
 - `train.weights` 是起点：预训练权重的文件名（在 `pretrained/` 中查找，没有时由后端下载），`run:<run>`（某次完成的 run 的最佳权重，在已有模型上用新数据继续训练），或绝对路径。起点的 sha256 记入 `run.json`。
 - `--option` 只覆盖这一次 run 的参数，例如试跑 `--option epochs=3`、选卡 `--option device=1`（多卡 `device=0,1`）；覆盖值单独记入 `run.json`，长期有效的参数写进 `model.yaml`。
+- 设备属于训练机而不是模型或 run：`model.yaml` 不写 `device`，在训练机上设置环境变量 `TRAIN_DEVICE`（例如 `export TRAIN_DEVICE=1`，多卡 `0,1`，由 `scripts/train.sh` 传入容器）。训练时 `--option device=…`、`model.yaml`、`TRAIN_DEVICE` 依次取第一个，生效的值记入 `run.json`；`--resume` 沿用 run 原来的设备。评估、`--errors`、预标注与发布门槛的评估按 `--device`、`TRAIN_DEVICE`、run 训练时的设备依次取第一个（多卡取第一张）：训练时用的卡之后可能被别的任务占用，不必每条命令都写 `--device`。
 - run 标识为 `<UTC 时间>-<短摘要>`（摘要来自规格、数据集与覆盖参数）；`run.json` 记录 `model.yaml` 的摘要与副本、数据集标识、类别、源码版本（与打包相同的 `-dirty` 规则）、后端与依赖版本、生效参数、命令与状态（`running`、`completed`、`failed`、`interrupted`）。
 - 数据集必须按当前规格的类别准备：类别改动后先重新 `prepare`。验证划分为空时拒绝训练。
 - 中断（Ctrl-C）或失败的 run 保留记录与最近检查点，`train run <id> --resume <run>` 沿用原来的数据集与参数继续。
 - 训练结束后在测试划分上评估（测试划分为空时只给出警告），写入 `eval/<数据集标识>/metrics.json`：指标由任务决定（检测：`map50_95`、`map50`、`precision`、`recall` 及每类的同名指标与测试实例数；分类：top-1、每类精确率与召回率；分割：框与掩码的 mAP）。测试划分中没有实例的类别不给指标，单独列出。`evaluate.gate` 只能引用任务定义的指标名，写错时在训练前报告。
 
-`train eval <id> <run> [--dataset <标识>]` 单独重新评估，例如数据集更新后在新的测试划分上比较新旧 run；每个数据集的结果分别保存，摘要记入 `run.json` 的 `evaluations`。
+`train eval <id> <run> [--dataset <标识>] [--device <设备>]` 单独重新评估，例如数据集更新后在新的测试划分上比较新旧 run；每个数据集的结果分别保存，摘要记入 `run.json` 的 `evaluations`。
 
 `train eval <id> <run> --errors [--split test|val|train …] [--device <设备>]`（二级分类；`--split` 可重复）列出这些划分中分错的裁剪：标注的值、预测的值与置信度、来源图片与框，置信度高的错误排在前面——它们最可能是标错了。完整列表写入 `eval/<数据集标识>/errors-<划分>.json`，同时建立复核集 `reviews/<id>-<run>-<划分…>/`：只含这些图片（硬链接）与它们标注的副本，、列出要核对的框的 `checklist.txt`，以及来源的 `attributes.json`（图片都来自一个来源时）。在 X-AnyLabeling 中打开这个目录、按 D 逐张核对并保存，然后 `train review apply <名称>` 把改过的副本写回来源（`imagePath` 恢复为来源中的文件名）。标注只能复制、不能链接：X-AnyLabeling 4.0.6 保存时写临时文件再替换，链接会被换成复核目录中的新文件。来源标注自复制以来变了的不写回、报告冲突；有未应用修改的复核集不会被同名的新复核集替换；`train prepare` 提醒涉及它的来源中有未应用的复核；`train review` 列出全部复核集。改正时按图片判断，不要因为模型不同意就改测试划分的标注，否则测试指标虚高；训练划分上的结果偏乐观（模型见过这些样本），仍能找出与模型强烈不一致的标注。
 

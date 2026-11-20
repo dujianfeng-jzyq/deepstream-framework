@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,11 @@ SPEC_COPY = "model.yaml"
 TRAIN = "train"
 EVAL = "eval"
 METRICS = "metrics.json"
+# 这台训练机默认使用的设备（例如 1，或 0,1），由 scripts/train.sh 传入容器。设备属于机器而不是 run：
+# 评估与推理按 --device、TRAIN_DEVICE、run 训练时的设备依次取第一个，训练时 model.yaml 与 --option 没有
+# 给出 device 才用它（记入 run.json 的 options）。
+DEVICE_ENV = "TRAIN_DEVICE"
+
 # train.weights 以它开头时指另一次完成的 run 的最佳权重：在已有模型上用新数据继续训练。
 RUN_WEIGHTS = "run:"
 
@@ -45,6 +51,8 @@ def start(repo: Path, root: Path, spec: dict, dataset_id: str | None, overrides:
     options = {**(spec["train"].get("options") or {}), **overrides}
     # 没有给出训练尺寸时按部署契约的输入尺寸训练。
     options.setdefault("imgsz", max(spec["input"]["width"], spec["input"]["height"]))
+    if machine_device():
+        options.setdefault("device", machine_device())
     weights, weights_sha256 = _start_weights(root, spec)
 
     spec_text = (paths.model_dir(repo, spec["id"]) / models.SPEC).read_text(encoding="utf-8")
@@ -143,6 +151,17 @@ def load(root: Path, model_id: str, run: str) -> tuple[Path, dict]:
     return run_dir, json.loads((run_dir / RECORD).read_text(encoding="utf-8"))
 
 
+def machine_device() -> str | None:
+    return os.environ.get(DEVICE_ENV, "").strip() or None
+
+
+def inference_options(options: dict, device: str | None = None) -> dict:
+    """评估与推理用的参数：run 的参数，设备换成 device 或这台机器的默认设备（都没有时沿用训练时的设备，
+    训练时的 GPU 可能已被别的任务占用）。"""
+    device = device or machine_device()
+    return {**options, **({"device": device} if device else {})}
+
+
 def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, device: str | None = None) -> dict:
     """在数据集（默认最近一次 prepare）的测试划分上评估一次完成的 run，写入 eval/<数据集>/metrics.json。
     换用新数据集评估旧 run，是比较新旧模型的方式：测试集只增不换（§6）。device 只改变这次评估用的设备。"""
@@ -161,7 +180,7 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
     output = run_dir / EVAL / dataset_id
     result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST,
                               backend.data_path(task.NAME, directory / paths.VIEW / backend.NAME), "test",
-                              {**record["options"], **({"device": device} if device is not None else {})},
+                              inference_options(record["options"], device),
                               output / backend.NAME, root / paths.PRETRAINED)
     instances = task.statistics(test, spec)
     classes = []
@@ -205,7 +224,7 @@ def evaluate_as(root: Path, spec: dict, run: str, dataset_id: str, mapping: dict
     backend.write_view(task.NAME, {**task.manifest_fields(spec), "classes": record["classes"], "samples": samples},
                        root, view, view)
     result = backend.evaluate(task.NAME, run_dir / TRAIN / backend.BEST, backend.data_path(task.NAME, view), "test",
-                              {**record["options"], **({"device": device} if device is not None else {})},
+                              inference_options(record["options"], device),
                               output / backend.NAME, root / paths.PRETRAINED)
     shutil.rmtree(output / paths.VIEW, ignore_errors=True)
     instances = task.statistics(test, spec)
@@ -240,7 +259,7 @@ def errors(root: Path, spec: dict, run: str, dataset_id: str | None = None, spli
     if not found:
         raise TrainError(f"the {split_name} split of dataset {dataset_id} has no crops")
     samples = {Path(sample["source"] + "__" + sample["image"]).stem: sample for sample in manifest["samples"]}
-    options = {**record["options"], **({"device": device} if device is not None else {})}
+    options = inference_options(record["options"], device)
     wrong = []
     predictions = backend.predict(task.NAME, run_dir / TRAIN / backend.BEST, [path for path, _ in found], options,
                                   0.0, root / paths.PRETRAINED, agnostic=False)

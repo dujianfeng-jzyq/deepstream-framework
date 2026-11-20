@@ -93,9 +93,7 @@ def prelabel(repo: Path, root: Path, spec: dict, source: str, run: str | None, c
     images = sources.read_record(directory)["images"]
     best, model, record = weights(repo, root, spec, run)
     backend = backends.get(record["backend"]["name"], task.NAME)
-    options = dict(record["options"])
-    if device is not None:
-        options["device"] = device
+    options = runs.inference_options(record["options"], device)
     result = Result(model)
     pending = []
     for name in sorted(images):
@@ -161,9 +159,7 @@ def _prelabel_class(repo: Path, root: Path, spec: dict, source: str, run: str | 
                          f"that train update {spec['id']} add unchecked")
     best, model, record = weights(repo, root, spec, run, label)
     backend = backends.get(record["backend"]["name"], task.NAME)
-    options = dict(record["options"])
-    if device is not None:
-        options["device"] = device
+    options = runs.inference_options(record["options"], device)
     result = Result(model)
     pending = []
     for name in listed:
