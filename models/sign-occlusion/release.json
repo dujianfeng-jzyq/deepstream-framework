@@ -1,53 +1,221 @@
 {
   "schema": 1,
   "model": "sign-occlusion",
-  "release": "20261120-101026-f9fc50",
-  "published_at": "2026-11-20T10:10:26+00:00",
-  "published_from": "0152356e0c74-dirty",
+  "release": "20261120-154937-866458",
+  "published_at": "2026-11-20T15:49:37+00:00",
+  "published_from": "ff118bb6c6ae",
   "run": {
-    "id": "20261120-100237-7b9003",
-    "dataset": "52cd199f356dbd5e",
-    "source_revision": "0152356e0c74-dirty",
+    "id": "20261120-153935-71e001",
+    "dataset": "a31f1d81c459e197",
+    "source_revision": "ff118bb6c6ae",
     "backend": {
       "name": "ultralytics",
       "ultralytics": "8.3.40",
       "torch": "2.5.1+cu124"
     },
-    "weights_sha256": "474c717de83e482ebc9c60c8b603b7a25de637d5a00310a140d9907684c89f28"
+    "weights_sha256": "e6c660f3fc0e1e083c7a0b20d5a3a975f93dc21486de0c37b2098d5ea49c14c6"
   },
-  "evaluated_on": "52cd199f356dbd5e",
+  "evaluated_on": "a31f1d81c459e197",
   "metrics": {
-    "accuracy": 0.970873786407767,
-    "recall": 0.8745182498299705,
-    "precision": 0.7329385222786238
+    "accuracy": 0.9660023446658851,
+    "recall": 0.8273188405797102,
+    "precision": 0.718776235066193
   },
   "class_metrics": [
     {
       "name": "否",
-      "instances": 802,
+      "instances": 828,
       "accuracy": null,
-      "recall": 0.9763092269326683,
-      "precision": 0.9936548223350253
+      "recall": 0.9746376811594203,
+      "precision": 0.9901840490797545
     },
     {
       "name": "是",
-      "instances": 22,
+      "instances": 25,
       "accuracy": null,
-      "recall": 0.7727272727272727,
-      "precision": 0.4722222222222222
+      "recall": 0.68,
+      "precision": 0.4473684210526316
+    }
+  ],
+  "thresholds": [
+    {
+      "threshold": 0.5,
+      "labeled": 1.0,
+      "recall": 0.8273188405797102,
+      "precision": 0.718776235066193,
+      "classes": {
+        "否": {
+          "recall": 0.9746376811594203,
+          "precision": 0.9901840490797545
+        },
+        "是": {
+          "recall": 0.68,
+          "precision": 0.4473684210526316
+        }
+      }
+    },
+    {
+      "threshold": 0.55,
+      "labeled": 0.9917936694021102,
+      "recall": 0.8055072463768116,
+      "precision": 0.7303680092726745,
+      "classes": {
+        "否": {
+          "recall": 0.9710144927536232,
+          "precision": 0.9901477832512315
+        },
+        "是": {
+          "recall": 0.64,
+          "precision": 0.47058823529411764
+        }
+      }
+    },
+    {
+      "threshold": 0.6,
+      "labeled": 0.9882766705744431,
+      "recall": 0.8042995169082126,
+      "precision": 0.7374859708193042,
+      "classes": {
+        "否": {
+          "recall": 0.9685990338164251,
+          "precision": 0.9901234567901235
+        },
+        "是": {
+          "recall": 0.64,
+          "precision": 0.48484848484848486
+        }
+      }
+    },
+    {
+      "threshold": 0.65,
+      "labeled": 0.9788980070339977,
+      "recall": 0.8006763285024154,
+      "precision": 0.7530893917509228,
+      "classes": {
+        "否": {
+          "recall": 0.961352657004831,
+          "precision": 0.9900497512437811
+        },
+        "是": {
+          "recall": 0.64,
+          "precision": 0.5161290322580645
+        }
+      }
+    },
+    {
+      "threshold": 0.7,
+      "labeled": 0.9695193434935522,
+      "recall": 0.797657004830918,
+      "precision": 0.7714761040532365,
+      "classes": {
+        "否": {
+          "recall": 0.9553140096618358,
+          "precision": 0.9912280701754386
+        },
+        "是": {
+          "recall": 0.64,
+          "precision": 0.5517241379310345
+        }
+      }
+    },
+    {
+      "threshold": 0.75,
+      "labeled": 0.9601406799531067,
+      "recall": 0.7934299516908212,
+      "precision": 0.7812895069532237,
+      "classes": {
+        "否": {
+          "recall": 0.9468599033816425,
+          "precision": 0.9911504424778761
+        },
+        "是": {
+          "recall": 0.64,
+          "precision": 0.5714285714285714
+        }
+      }
+    },
+    {
+      "threshold": 0.8,
+      "labeled": 0.9460726846424384,
+      "recall": 0.7879951690821256,
+      "precision": 0.8155242966751919,
+      "classes": {
+        "否": {
+          "recall": 0.9359903381642513,
+          "precision": 0.9910485933503836
+        },
+        "是": {
+          "recall": 0.64,
+          "precision": 0.64
+        }
+      }
+    },
+    {
+      "threshold": 0.85,
+      "labeled": 0.9331770222743259,
+      "recall": 0.7625603864734299,
+      "precision": 0.8215591428089319,
+      "classes": {
+        "否": {
+          "recall": 0.9251207729468599,
+          "precision": 0.9909443725743855
+        },
+        "是": {
+          "recall": 0.6,
+          "precision": 0.6521739130434783
+        }
+      }
+    },
+    {
+      "threshold": 0.9,
+      "labeled": 0.9167643610785463,
+      "recall": 0.7359178743961353,
+      "precision": 0.8454068241469817,
+      "classes": {
+        "否": {
+          "recall": 0.9118357487922706,
+          "precision": 0.9908136482939632
+        },
+        "是": {
+          "recall": 0.56,
+          "precision": 0.7
+        }
+      }
+    },
+    {
+      "threshold": 0.95,
+      "labeled": 0.8898007033997656,
+      "recall": 0.7232367149758454,
+      "precision": 0.884165542060279,
+      "classes": {
+        "否": {
+          "recall": 0.8864734299516909,
+          "precision": 0.99055330634278
+        },
+        "是": {
+          "recall": 0.56,
+          "precision": 0.7777777777777778
+        }
+      }
     }
   ],
   "gate": {
-    "dataset": "52cd199f356dbd5e",
+    "dataset": "a31f1d81c459e197",
     "min": {},
     "regression": {
       "metric": "recall",
       "max_drop": 0.01,
-      "release": "20261120-075249-fea844",
-      "run": "20261120-074004-e8dd98",
-      "published": 0.8542847426887328,
-      "value": 0.8745182498299705,
-      "drop": -0.020233507141237728,
+      "release": "20261120-101026-f9fc50",
+      "run": "20261120-100237-7b9003",
+      "published": 0.8285265700483092,
+      "value": 0.8273188405797102,
+      "drop": 0.0012077294685990392,
+      "resolution": {
+        "one_instance": 0.02,
+        "class": "是",
+        "instances": 25
+      },
+      "allowed": 0.02,
       "passed": true
     },
     "accepted_without_comparison": false
@@ -64,10 +232,10 @@
   "training_data": {
     "road-assets": {
       "images": 4388,
-      "negatives": 1039,
+      "negatives": 994,
       "instances": {
-        "否": 6846,
-        "是": 356
+        "否": 7057,
+        "是": 372
       },
       "skipped": {},
       "reviews": []
@@ -101,7 +269,7 @@
   "consistency": {
     "passed": true,
     "crops": 16,
-    "max_prob_diff": 3.203749656677246e-07,
+    "max_prob_diff": 1.1920928955078125e-07,
     "class_mismatches": 0,
     "finite": true,
     "limits": {
@@ -110,7 +278,7 @@
     "images": 16
   },
   "artifacts": {
-    "artifacts/model.onnx": "f9fc508210a87a1bace90f8c6b8d6162a51aca4fcb1581a451bb09b51113a9a6",
+    "artifacts/model.onnx": "866458e6e18b36b47d3aa1df78ad0b50914168e9b6a64737895bf7895513cc2f",
     "artifacts/labels.txt": "69530d726ee2fc4eb89499f8e7548e0aec50607a6ee4d580b9a01351ab619963"
   }
 }
