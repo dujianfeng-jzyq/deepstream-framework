@@ -295,4 +295,6 @@ sys.exit(Service("my-service", "说明").run(load, main))
 | 镜像 | builder 中的 CTest（以上各层全部执行，`DSF_FORBID_SKIPS=1` 使 SKIP 计为失败），每个 profile 的渲染与 Compose 解析，原始 base 中的非 root 无网络自检 | 有 Docker 的开发机或编译服务器 |
 | 目标机 | 真实视频、推理与跟踪、Redis 消息、MP4 收尾、RTSP 输出、engine 复用、Linux 权限 | 目标设备 |
 
+目标机上的断流录像用 `tools/record_gap_check.py` 重复验证（需要 ffmpeg/ffprobe）：`run <视频> <录像目录>` 推流并按计划制造卡顿（暂停推流进程，连接保持）与掉线（断开重连），停止推流后检查每个分段——第一帧是 IDR、整段可解码、分段内没有达到 `split_on_gap` 的时间戳间隔、时长不超过 `segment_seconds` 加一个关键帧间隔、没有可见的占位文件；给出 `--redis` 与 `--stream` 时核对 `recording_started/finished` 与文件一致；有时间线时检查每次长断流期间分段已收尾、恢复后开始新分段。推流与检查可以分开运行（`push --timeline` 与 `check --timeline`），两台机器须已对时。分段时长与 `split_on_gap` 不是默认值时用 `--segment-seconds`、`--split-on-gap-ms` 传入。
+
 宿主缺少 redis-server、软件编码插件或 docker CLI 时相关用例显示 SKIP 并成功退出，查看详细输出确认实际覆盖范围；镜像构建是必须通过的完整验证。C++ 的 `dsf_test.h` 与 Python 的 `run_unittest.py`（`dsf_add_python_test` 的入口）都读取 `DSF_FORBID_SKIPS`。
