@@ -19,7 +19,7 @@ from pathlib import Path
 
 from dsf_deploy import models, naming
 
-from . import backends, dataset, paths, tasks
+from . import backends, dataset, paths, spec as specs, tasks
 from .errors import TrainError
 
 SCHEMA = 1
@@ -54,6 +54,7 @@ def start(repo: Path, root: Path, spec: dict, dataset_id: str | None, overrides:
     if machine_device():
         options.setdefault("device", machine_device())
     weights, weights_sha256 = _start_weights(root, spec)
+    class_weights = _class_weights(spec, task, manifest)
 
     spec_text = (paths.model_dir(repo, spec["id"]) / models.SPEC).read_text(encoding="utf-8")
     now = datetime.now(timezone.utc)
@@ -72,13 +73,16 @@ def start(repo: Path, root: Path, spec: dict, dataset_id: str | None, overrides:
         "dataset": dataset_id, "source_revision": naming.source_revision(repo),
         "backend": {"name": backend.NAME, **backend.version()},
         "weights": {"start": spec["train"]["weights"], "start_sha256": weights_sha256, "best_sha256": ""},
-        "options": options, "overrides": overrides, "command": command,
+        "options": options, "overrides": overrides, "command": command, "class_weights": class_weights,
         "status": "running", "error": "", "created_at": _now(), "resumed_at": [], "finished_at": "",
         "evaluations": {},
     }
     # 训练可能持续数小时：先告诉人 run 在哪里、中断后怎样继续。
     print(f"run {run}: {run_dir}\n  if it stops early, continue with: train run {spec['id']} --resume {run}",
           flush=True)
+    if class_weights:
+        print("  class weights: " + ", ".join(f"{name} {weight:.3g}" for name, weight in
+                                              zip(spec["classes"], class_weights)), flush=True)
     _train(root, run_dir, record, backend, directory, weights, resume=False)
     return run
 
@@ -104,7 +108,7 @@ def _train(root: Path, run_dir: Path, record: dict, backend, directory: Path, we
     data = backend.data_path(record["task"], directory / paths.VIEW / backend.NAME)
     try:
         best = backend.train(record["task"], data, weights, record["options"], run_dir / TRAIN, resume,
-                             root / paths.PRETRAINED)
+                             root / paths.PRETRAINED, class_weights=record.get("class_weights"))
         if not best.is_file():
             raise TrainError(f"the backend finished without writing {best}")
     except KeyboardInterrupt:
@@ -120,6 +124,19 @@ def _train(root: Path, run_dir: Path, record: dict, backend, directory: Path, we
     record["weights"]["best_sha256"] = paths.sha256(best)
     record.update(status="completed", finished_at=_now())
     paths.write_json(run_dir / RECORD, record)
+
+
+def _class_weights(spec: dict, task, manifest: dict) -> list[float] | None:
+    """train.class_weights → 按类别号排列的损失权重；没有设置时 None（不加权）。mapping 中没有的类别权重为 1。"""
+    value = spec["train"].get("class_weights")
+    if value is None:
+        return None
+    if value != specs.BALANCED:
+        return [float(value.get(name, 1.0)) for name in spec["classes"]]
+    counts = task.statistics([s for s in manifest["samples"] if s["split"] == "train"], spec)
+    present = [name for name in spec["classes"] if counts[name]]
+    total = sum(counts[name] for name in present)
+    return [total / (len(present) * counts[name]) if counts[name] else 1.0 for name in spec["classes"]]
 
 
 def _start_weights(root: Path, spec: dict) -> tuple[Path, str]:

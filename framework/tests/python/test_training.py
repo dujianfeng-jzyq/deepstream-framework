@@ -722,8 +722,9 @@ class FakeBackend(types.ModuleType):
     def version(self):
         return {"fake": "1.0"}
 
-    def train(self, task, data, weights, options, directory, resume, workdir):
+    def train(self, task, data, weights, options, directory, resume, workdir, class_weights=None):
         self.calls.append(("train", weights, dict(options), resume))
+        self.class_weights = class_weights
         if not weights.exists() and weights.parent == workdir:  # 模拟下载预训练权重
             workdir.mkdir(parents=True, exist_ok=True)
             weights.write_bytes(b"pretrained")
@@ -1631,13 +1632,24 @@ class SecondStageSpecTest(SecondStageTestCase):
                                                                      "nvinfer crops the detected box itself"),
                  ("min_size: 16", "min_size: 0", "min_size must be an integer >= 1"),
                  ("attribute: 遮挡", "attribute: ''", "data.from_parent.attribute must name"),
-                 ("width: 128", "width: 160", "input of a classify model must be square")]
+                 ("width: 128", "width: 160", "input of a classify model must be square"),
+                 ("  options:\n    epochs", "  class_weights: {是: 0}\n  options:\n    epochs",
+                  "the weight of 是 must be a positive number"),
+                 ("  options:\n    epochs", "  class_weights: {有: 2}\n  options:\n    epochs", "no class '有'"),
+                 ("  options:\n    epochs", "  class_weights: even\n  options:\n    epochs",
+                  "must be balanced or a mapping")]
         for old, new, message in cases:
             with self.subTest(new=new):
                 self.edit_child(old, new)
                 with self.assertRaisesRegex(TrainError, message):
                     self.child()
                 self.edit_child(new, old)
+        self.edit_child("  options:\n    epochs", "  class_weights: balanced\n  options:\n    epochs")
+        self.assertEqual(self.child()["train"]["class_weights"], "balanced")
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("  options:\n", "  class_weights: balanced\n  options:\n", 1))
+        with self.assertRaisesRegex(TrainError, "only classify models take class weights"):
+            self.spec()
         self.edit_child("cascade:\n", "cascade_off:\n")
         with self.assertRaisesRegex(TrainError, "cascade is required(.|\n)*whole-image classification is not "
                                                 "supported yet"):
@@ -1883,6 +1895,21 @@ class SecondStagePublishTest(SecondStageTestCase):
         [export] = [c for c in self.backend.calls if c[0] == "export"]
         self.assertEqual((export[2], export[3]), ("softmax", (128, 128)))
         self.assertEqual(models.check_model(self.model_dir), [])
+
+    def test_class_weights_reach_the_loss_and_are_recorded(self):
+        self.edit_child("  options:\n    epochs", "  class_weights: {是: 3}\n  options:\n    epochs")
+        self.assertEqual(self.train("prepare", "occ")[0], 0)
+        code, out, err = self.train("run", "occ")
+        self.assertEqual(code, 0, err)
+        self.assertIn("class weights: 否 1, 是 3", out)
+        self.assertEqual(self.backend.class_weights, [1.0, 3.0])
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        self.assertEqual(runs.load(self.root, "occ", run)[1]["class_weights"], [1.0, 3.0])
+        # balanced：总数 / (类别数 × 该类在训练划分的样本数)。
+        manifest = {"samples": [{"split": "train", "objects": [{"class": 0}] * 6 + [{"class": 1}] * 2},
+                                {"split": "val", "objects": [{"class": 1}] * 10}]}
+        child = {**self.child(), "train": {**self.child()["train"], "class_weights": "balanced"}}
+        self.assertEqual(runs._class_weights(child, classify, manifest), [8 / 12, 8 / 4])
 
     def test_misclassified_crops_are_listed_with_their_source_box(self):
         self.assertEqual(self.train("prepare", "occ")[0], 0)

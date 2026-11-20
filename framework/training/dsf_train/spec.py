@@ -122,6 +122,8 @@ export:
   simplify: true
 """
 FROM_PARENT_KEYS = ("attribute", "min_size")
+# train.class_weights 取它时按训练划分的样本数取反比（总数 / (类别数 × 该类样本数)）。
+BALANCED = "balanced"
 
 
 def load_all(repo: Path) -> dict[str, dict]:
@@ -166,7 +168,8 @@ def _check_training(spec: dict) -> list[str]:
         problems.append(str(error))
         task = None
     if task is not None:
-        problems += _check_train(spec.get("train"), task.NAME) + _check_evaluate(spec.get("evaluate"), task)
+        problems += _check_train(spec.get("train"), task.NAME, spec.get("classes")) \
+            + _check_evaluate(spec.get("evaluate"), task)
     problems += _check_export(spec.get("export"))
     data = spec.get("data")
     if not isinstance(data, dict):
@@ -247,7 +250,7 @@ def _check_parent(repo: Path, spec: dict) -> list[str]:
     return []
 
 
-def _check_train(train: object, task: str) -> list[str]:
+def _check_train(train: object, task: str, classes: object = None) -> list[str]:
     if not isinstance(train, dict):
         return ["train must be a mapping"]
     try:
@@ -264,6 +267,23 @@ def _check_train(train: object, task: str) -> list[str]:
         problems.append("train.options must be a mapping")
     else:
         problems += [f"train.options: {problem}" for problem in backend.check_options(options)]
+    if train.get("class_weights") is not None:
+        problems += _check_class_weights(train["class_weights"], task, classes)
+    return problems
+
+
+def _check_class_weights(value: object, task: str, classes: object) -> list[str]:
+    if task != "classify":
+        return [f"train.class_weights: only classify models take class weights ({task} does not)"]
+    if value == BALANCED:
+        return []
+    if not isinstance(value, dict) or not value:
+        return [f"train.class_weights must be {BALANCED} or a mapping of class name to weight"]
+    names = classes if isinstance(classes, list) else []
+    problems = [f"train.class_weights: no class {name!r} in classes" for name in value if name not in names]
+    problems += [f"train.class_weights: the weight of {name} must be a positive number"
+                 for name, weight in value.items()
+                 if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight <= 0]
     return problems
 
 

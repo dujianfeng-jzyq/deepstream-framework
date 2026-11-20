@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -143,9 +144,10 @@ def version() -> dict:
 
 
 def train(task: str, data: Path, weights: Path, options: dict, directory: Path, resume: bool,
-          workdir: Path) -> Path:
+          workdir: Path, class_weights: list[float] | None = None) -> Path:
     """训练到 directory（Ultralytics 的 save_dir），返回最佳权重。resume 时 weights 是中断时的 last.pt，
-    Ultralytics 从其中恢复全部参数与进度。"""
+    Ultralytics 从其中恢复全部参数与进度。class_weights 是分类损失按类别号的权重（None 不加权）：
+    Ultralytics 的参数中没有它（未知参数报错），经环境变量交给训练器，多卡的子进程同样继承。"""
     from ultralytics import YOLO
 
     from .ultralytics_trainer import TRAINERS
@@ -153,6 +155,9 @@ def train(task: str, data: Path, weights: Path, options: dict, directory: Path, 
     # 导入训练器模块时设置中文字体（子进程不经过这里的 _settings）。
     environment = os.environ.get("PYTHONPATH")
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    from .ultralytics_trainer import CLASS_WEIGHTS_ENV
+    if class_weights:
+        os.environ[CLASS_WEIGHTS_ENV] = json.dumps(class_weights)
     try:
         with _settings(workdir):
             model = YOLO(str(weights), task=task)
@@ -162,6 +167,7 @@ def train(task: str, data: Path, weights: Path, options: dict, directory: Path, 
                 model.train(data=str(data), project=str(directory.parent), name=directory.name, exist_ok=True,
                             trainer=TRAINERS[task], **options)
     finally:
+        os.environ.pop(CLASS_WEIGHTS_ENV, None)
         if environment is None:
             os.environ.pop("PYTHONPATH", None)
         else:

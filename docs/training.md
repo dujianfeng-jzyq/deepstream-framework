@@ -162,6 +162,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 - 在训练镜像中调用 `train.backend` 指定的后端，`train.options` 原样透传；没有给出 `imgsz` 时按 `input` 的尺寸训练。数据集、输出位置与续训由工具决定，写在 `options` 中（`data`、`project`、`name`、`resume` 等）是规格错误。
 - `train.weights` 是起点：预训练权重的文件名（在 `pretrained/` 中查找，没有时由后端下载），`run:<run>`（某次完成的 run 的最佳权重，在已有模型上用新数据继续训练），或绝对路径。起点的 sha256 记入 `run.json`。
 - `--option` 只覆盖这一次 run 的参数，例如试跑 `--option epochs=3`、选卡 `--option device=1`（多卡 `device=0,1`）；覆盖值单独记入 `run.json`，长期有效的参数写进 `model.yaml`。
+- 类别不均衡（分类）：`train.class_weights` 给交叉熵损失按类别加权，少数类的错分代价更高。取 `balanced` 时按训练划分的样本数取反比（总数 / (类别数 × 该类样本数)），或写成 `{类别: 权重}`（没写的类别为 1）。生效的权重按类别号记入 `run.json` 的 `class_weights`，训练开始时打印。加权提高少数类的 recall、通常降低它的 precision；最佳检查点按宏平均 recall 选择。检测模型不接受这一项。不做过采样：训练时的随机增强下，加权与重复样本的效果相当，而加权不改变数据集与视图。
 - 设备属于训练机而不是模型或 run：`model.yaml` 不写 `device`，在训练机上设置环境变量 `TRAIN_DEVICE`（例如 `export TRAIN_DEVICE=1`，多卡 `0,1`，由 `scripts/train.sh` 传入容器）。训练时 `--option device=…`、`model.yaml`、`TRAIN_DEVICE` 依次取第一个，生效的值记入 `run.json`；`--resume` 沿用 run 原来的设备。评估、`--errors`、预标注与发布门槛的评估按 `--device`、`TRAIN_DEVICE`、run 训练时的设备依次取第一个（多卡取第一张）：训练时用的卡之后可能被别的任务占用，不必每条命令都写 `--device`。
 - run 标识为 `<UTC 时间>-<短摘要>`（摘要来自规格、数据集与覆盖参数）；`run.json` 记录 `model.yaml` 的摘要与副本、数据集标识、类别、源码版本（与打包相同的 `-dirty` 规则）、后端与依赖版本、生效参数、命令与状态（`running`、`completed`、`failed`、`interrupted`）。
 - 数据集必须按当前规格的类别准备：类别改动后先重新 `prepare`。验证划分为空时拒绝训练。
