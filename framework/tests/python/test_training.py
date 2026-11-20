@@ -1472,7 +1472,7 @@ class PublishListTest(RunTestCase):
                       lines[0])
         [trial_line] = [line for line in lines if trial in line]
         [full_line] = [line for line in lines if full in line]
-        self.assertRegex(trial_line, r"^   +\S+ +0\.5000 +0\.7000 .* epochs=3$")
+        self.assertRegex(trial_line, r"^   +\S+ +0\.5000 +0\.7000 .* --option epochs=3$")
         self.assertRegex(full_line, r"^  \* \S+ +0\.6100 .* -$")              # 当前发布的 run 带标记
         self.assertLess(lines.index(trial_line), lines.index(full_line))       # 最近完成的在前
         self.assertIn("* the run of the published release r1", out)
@@ -1490,6 +1490,14 @@ class PublishListTest(RunTestCase):
         out = self.train("publish", "m")[1]
         self.assertIn(f"dataset {newer}", out)
         self.assertIn("not evaluated on this dataset yet: train eval m <run>", out)
+
+        # 改过 model.yaml 之后，旧 run 列出当时与现在不同的训练条件（run 当时的取值）与训练用的数据集。
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace("    patience: 50", "    patience: 80\n    lr0: 0.002")
+                        .replace("min: {}", "min: {map50: 0.1}"))              # evaluate 段不影响训练，不列出
+        [trial_line] = [line for line in self.train("publish", "m")[1].splitlines() if trial in line]
+        self.assertTrue(trial_line.endswith(f"--option epochs=3; model.yaml: train.options.lr0=(unset) "
+                                            f"train.options.patience=50; dataset {self.dataset_id}"), trial_line)
 
 
 @needs_numpy

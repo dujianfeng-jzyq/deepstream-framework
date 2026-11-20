@@ -176,7 +176,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ## 8. 导出与发布：`train publish <id> <run> [--dataset <标识>] [--accept-metrics] [--device <设备>]`
 
-不给 `<run>` 时只列出可以发布的 run，不发布任何东西：完成的 run 按完成时间从新到旧，带各自在数据集（默认最近一次 prepare）测试划分上的指标、`--option` 覆盖参数，并标出当前发布所用的 run；还没有在该数据集上评估的 run 指标为 `-`（`train eval` 补上），中断或失败的 run 单独列出。不默认发布最近的 run：最近的往往是 `--option epochs=3` 之类的试跑，而首次发布时门槛可能只有 `--accept-metrics`，选哪个 run 是人的判断。
+不给 `<run>` 时只列出可以发布的 run，不发布任何东西：完成的 run 按完成时间从新到旧，带各自在数据集（默认最近一次 prepare）测试划分上的指标与训练条件中和现在不同的部分（`--option` 覆盖参数；run 保存的 `model.yaml` 副本中 `input`、`train` 段与现在不同的键，给出 run 当时的取值；训练用的数据集不是所列数据集时给出它的标识），并标出当前发布所用的 run；还没有在该数据集上评估的 run 指标为 `-`（`train eval` 补上），中断或失败的 run 单独列出。不默认发布最近的 run：最近的往往是 `--option epochs=3` 之类的试跑，而首次发布时门槛可能只有 `--accept-metrics`，选哪个 run 是人的判断。
 
 顺序不可调换：
 

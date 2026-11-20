@@ -142,6 +142,8 @@ def candidates(root: Path, spec: dict, dataset_id: str | None = None,
             raise
         dataset_id = None
     current = _current_release(paths.model_dir(repo, spec["id"])) if repo is not None else None
+    now = _training_sections((paths.model_dir(repo, spec["id"]) / models.SPEC).read_text(encoding="utf-8")) \
+        if repo is not None else None
     published = ((current or {}).get("run") or {}).get("id")
     directory = root / paths.RUNS / spec["id"]
     records = []
@@ -159,7 +161,8 @@ def candidates(root: Path, spec: dict, dataset_id: str | None = None,
         names = list(task.METRICS)
         width = max(len(r["run"]) for r in completed) + 2
         lines = [f"completed runs of {spec['id']} ({where}); nothing was published:",
-                 f"    {'run':<{width}}" + "".join(f"{n:>10}" for n in names) + "  finished          overrides"]
+                 f"    {'run':<{width}}" + "".join(f"{n:>10}" for n in names)
+                 + "  finished          trained with (what differs from model.yaml now)"]
         unevaluated = False
         for record in sorted(completed, key=lambda r: r.get("finished_at", ""), reverse=True):
             metrics = (record.get("evaluations") or {}).get(dataset_id) if dataset_id else None
@@ -167,11 +170,11 @@ def candidates(root: Path, spec: dict, dataset_id: str | None = None,
             values = "".join(f"{metrics[n]:>10.4f}" if metrics and metrics.get(n) is not None else f"{'-':>10}"
                              for n in names)
             mark = "* " if record["run"] == published else "  "
-            overrides = " ".join(f"{k}={v}" for k, v in (record.get("overrides") or {}).items()) or "-"
+            differences = _differences(root, spec, record, now, dataset_id)
             if record.get("classes") != spec["classes"]:
-                overrides += "  (other classes than model.yaml: cannot be published)"
+                differences += "  (other classes than model.yaml: cannot be published)"
             finished = (record.get("finished_at") or "")[:16].replace("T", " ")
-            lines.append(f"  {mark}{record['run']:<{width}}{values}  {finished:<16}  {overrides}")
+            lines.append(f"  {mark}{record['run']:<{width}}{values}  {finished:<16}  {differences}")
         if published and any(record["run"] == published for record in completed):
             lines.append(f"  * the run of the published release {current['release']}")
         if unevaluated:
@@ -181,6 +184,56 @@ def candidates(root: Path, spec: dict, dataset_id: str | None = None,
         states = ", ".join(f"{r.get('run')} ({r.get('status')})" for r in others)
         lines.append(f"  not publishable: {states}")
     return lines
+
+
+# 决定一次训练的规格段。data 段决定数据集，由数据集标识体现；classes 单独比较；evaluate 不影响训练。
+TRAINING_SECTIONS = ("input", "train")
+
+
+def _training_sections(text: str) -> dict:
+    from dsf import yamlio
+    document = yamlio.load(text) or {}
+    flat: dict[str, object] = {}
+    for section in TRAINING_SECTIONS:
+        _flatten(document.get(section), section, flat)
+    return flat
+
+
+def _flatten(value, prefix: str, flat: dict) -> None:
+    if isinstance(value, dict) and value:
+        for key, item in value.items():
+            _flatten(item, f"{prefix}.{key}", flat)
+    else:
+        flat[prefix] = value
+
+
+def _differences(root: Path, spec: dict, record: dict, now: dict | None, dataset_id: str | None) -> str:
+    """一次 run 与现在相比训练条件的不同：--option 覆盖、run 的 model.yaml 副本中 input 与 train 段与现在
+    不同的键（给出 run 的取值），以及与所列数据集不同的训练数据集。人改 model.yaml 再训练时，各 run 的
+    指标差异由此可以对上原因。"""
+    parts = []
+    overrides = " ".join(f"{k}={_text(v)}" for k, v in (record.get("overrides") or {}).items())
+    if overrides:
+        parts.append(f"--option {overrides}")
+    copy = paths.run_dir(root, spec["id"], record["run"]) / runs.SPEC_COPY
+    if now is not None and copy.is_file():
+        then = _training_sections(copy.read_text(encoding="utf-8"))
+        changed = [f"{key}={_text(then.get(key, UNSET))}" for key in sorted({*then, *now})
+                   if then.get(key, UNSET) != now.get(key, UNSET)]
+        if changed:
+            parts.append("model.yaml: " + " ".join(changed))
+    if dataset_id and record.get("dataset") and record["dataset"] != dataset_id:
+        parts.append(f"dataset {record['dataset']}")
+    return "; ".join(parts) or "-"
+
+
+UNSET = "(unset)"
+
+
+def _text(value) -> str:
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
 
 
 def check_gate(repo: Path, root: Path, spec: dict, evaluation: dict, current: dict | None, accept_metrics: bool,
