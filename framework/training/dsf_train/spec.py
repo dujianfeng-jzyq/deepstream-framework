@@ -393,6 +393,56 @@ def write_classes(repo: Path, model_id: str, classes: list[str]) -> None:
     os.replace(name, spec_path)
 
 
+def write_cascade_classes(repo: Path, model_id: str, mapping: dict[str, str]) -> list[str]:
+    """按 mapping（旧父类别名 → 新名）改写 model.yaml 的 cascade.classes，返回改写后的列表；重复的名称只留
+    第一个（合并时 A 改为已有的 B）。只改 cascade 段中的列表项（块列表逐行，流式列表整体），其余文本不变；
+    改写后重新读取，除 cascade.classes 外与原来完全相同才写入，否则请人手改。"""
+    from dsf import yamlio
+    spec_path = path(repo, model_id)
+    text = spec_path.read_text(encoding="utf-8")
+    document = yamlio.load(text)
+    old = list(document["cascade"]["classes"])
+    expected = list(dict.fromkeys(mapping.get(name, name) for name in old))
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if re.match(r"cascade\s*:", line)), None)
+    if start is None:
+        raise TrainError(f"{spec_path}: no top-level cascade: to rewrite; edit cascade.classes by hand")
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].strip() and lines[i][0] not in " \t#"), len(lines))
+    section = "".join(lines[start:end])
+    flow = re.search(r"(classes\s*:\s*)\[[^\]]*\]", section)
+    if flow:
+        section = (section[:flow.start()] + flow.group(1) + "[" + ", ".join(_scalar(n) for n in expected) + "]"
+                   + section[flow.end():])
+    else:
+        seen, rewritten = set(), []
+        for line in lines[start:end]:
+            item = re.match(r"(\s+-\s+)(.*?)(\s+#.*)?\n?$", line)
+            value = yamlio.load(item.group(2)) if item else None
+            if not item or value not in old:
+                rewritten.append(line)
+                continue
+            name = mapping.get(value, value)
+            if name in seen:
+                continue
+            seen.add(name)
+            rewritten.append(f"{item.group(1)}{_scalar(name)}{item.group(3) or ''}\n")
+        section = "".join(rewritten)
+    new_text = "".join(lines[:start]) + section + "".join(lines[end:])
+    try:
+        written = yamlio.load(new_text)
+    except Exception:
+        written = None
+    wanted = {**document, "cascade": {**document["cascade"], "classes": expected}}
+    if written != wanted:
+        raise TrainError(f"{spec_path}: rewriting cascade.classes did not give {expected}; edit it by hand")
+    fd, name = paths.temporary_file(spec_path)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(new_text)
+    os.replace(name, spec_path)
+    return expected
+
+
 def skeleton(model_id: str, task: str, classes: list[str], display_name: str = "", parent: str = "",
              parent_classes: list[str] | None = None, attribute: str = "") -> str:
     tasks.get(task)  # 尚未支持的任务在生成规格时就报告，而不是到训练时

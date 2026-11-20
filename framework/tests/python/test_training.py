@@ -1736,15 +1736,41 @@ class SecondStagePrepareTest(SecondStageTestCase):
         [problem] = lock.missing_classes(self.child(), lock.current(self.root, self.child()))
         self.assertIn("has no class 龙门架A (cascade.classes of occ)", problem)
 
-    def test_renaming_a_parent_class_points_at_the_second_stage_model(self):
+    def test_renaming_a_parent_class_rewrites_the_second_stage_model(self):
         self.labeled_groups()
         dataset.prepare(self.repo, self.root, self.spec())
         dataset.prepare(self.repo, self.root, self.child())
+        path = spec.path(self.repo, "occ")
+        before = path.read_text(encoding="utf-8")
         result = update.rename(self.repo, self.root, self.spec(), self.PARENT_CLASS, "圆牌")
-        self.assertTrue(any("second-stage model occ triggers on 标志牌(圆牌): rename it to 圆牌 in its "
-                            "cascade.classes" in line for line in result.lines), result.lines)
-        with self.assertRaisesRegex(TrainError, "cascade.classes: m has no class 标志牌\\(圆牌\\)"):
-            self.child()
+        self.assertTrue(any("second-stage model occ: cascade.classes 标志牌(圆牌) -> 圆牌" in line
+                            for line in result.lines), result.lines)
+        self.assertEqual(self.child()["cascade"]["classes"], ["圆牌"])
+        # 只改了那一项：注释与其他字段原样保留。
+        self.assertEqual([l for l in before.splitlines() if "标志牌(圆牌)" not in l],
+                         [l for l in path.read_text(encoding="utf-8").splitlines() if "圆牌" not in l])
+
+    def test_retiring_a_parent_class_waits_for_the_second_stage_model_and_merging_rewrites_it(self):
+        self.labeled_groups()
+        dataset.prepare(self.repo, self.root, self.spec())
+        before = spec.path(self.repo, "m").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(TrainError, "second-stage model occ triggers on 标志牌\\(圆牌\\): remove"):
+            update.retire(self.repo, self.root, self.spec(), self.PARENT_CLASS)
+        self.assertEqual(spec.path(self.repo, "m").read_text(encoding="utf-8"), before)   # 什么也没改
+        result = update.retire(self.repo, self.root, self.spec(), self.PARENT_CLASS, into=CLASSES[1])
+        self.assertTrue(any(f"cascade.classes 标志牌(圆牌) -> {CLASSES[1]}" in line for line in result.lines),
+                        result.lines)
+        self.assertEqual(self.child()["cascade"]["classes"], [CLASSES[1]])
+
+    def test_cascade_classes_in_flow_style_are_rewritten_and_merged_names_kept_once(self):
+        path = spec.path(self.repo, "occ")
+        text = path.read_text(encoding="utf-8")
+        start = text.index("cascade:")
+        end = text.index("\n\n", start)
+        path.write_text(text[:start] + f"cascade: {{parent: m, classes: [{CLASSES[0]}, {CLASSES[1]}]}}" + text[end:],
+                        encoding="utf-8")
+        self.assertEqual(spec.write_cascade_classes(self.repo, "occ", {CLASSES[0]: CLASSES[1]}), [CLASSES[1]])
+        self.assertEqual(self.child()["cascade"], {"parent": "m", "classes": [CLASSES[1]]})
 
 
 class AttributesTest(SecondStageTestCase):
@@ -1779,9 +1805,16 @@ class AttributesTest(SecondStageTestCase):
         code, out, err = self.train("import", "m", str(self.raw / "more"), "--source", "batch-01")
         self.assertEqual(code, 0, err)
         self.assertTrue((self.source() / "attributes.json").is_file())
-        # 父类别改名后二级模型的 cascade.classes 还是旧名：update 照常完成，属性文件暂不计入它并说明原因。
+        # 父类别改名同时改写二级模型的 cascade.classes：属性文件中新名称的类别带着它的属性。
         lock.check(self.repo, self.root, self.spec(), record_new=True)  # rename 要求确认过的类别依赖
         code, out, err = self.train("update", "m", "rename", self.PARENT_CLASS, "圆牌")
+        self.assertEqual(code, 0, err)
+        document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))
+        self.assertEqual(document["圆牌"], {"破损": ["否", "是"], "遮挡": ["否", "是", "未知", "也许"]})
+        # 二级模型的规格暂时不成立时：import 照常完成，属性文件暂不计入它并说明原因。
+        self.edit_child("  - 圆牌\n", "  - 不存在\n")
+        image(self.raw / "more2/c.jpg", "green", size=(640, 480))
+        code, out, err = self.train("import", "m", str(self.raw / "more2"), "--source", "batch-01")
         self.assertEqual(code, 0, err)
         self.assertIn("note: the attributes of occ are not in attributes.json until its model.yaml is valid again", out)
         document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))

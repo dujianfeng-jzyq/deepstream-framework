@@ -35,16 +35,25 @@ def _labels(spec: dict) -> list[str]:
     return [] if spec.get("cascade") else spec["classes"]
 
 
-def _cascade_lines(models: dict[str, dict], parents: set[str], name: str, renamed_to: str | None = None) -> list[str]:
-    """触发类别中有 name 的二级模型：cascade.classes 由人改写（自动改写尚未实现），父模型类别号的变化由打包时
-    的级联校验对照 operate-on-class-ids。"""
+def _children(models: dict[str, dict], parents: set[str], name: str) -> list[str]:
+    """以这些模型为父、触发类别中有 name 的二级模型。"""
+    return [model_id for model_id, spec in sorted(models.items())
+            if (spec.get("cascade") or {}).get("parent") in parents and name in spec["cascade"].get("classes", [])]
+
+
+def _rewrite_cascades(repo: Path, models: dict[str, dict], parents: set[str], name: str, new: str) -> list[str]:
+    """父类别 name 改名或并入 new：改写触发它的二级模型的 cascade.classes。父模型的类别号随之变化，二级
+    模型 nvinfer 配置中的 operate-on-class-ids 由人对照（打包时的级联校验发现不符）。"""
     lines = []
-    for model_id, spec in sorted(models.items()):
-        cascade = spec.get("cascade") or {}
-        if cascade.get("parent") in parents and name in cascade.get("classes", []):
-            change = f"rename it to {renamed_to}" if renamed_to else "remove it"
-            lines.append(f"  second-stage model {model_id} triggers on {name}: {change} in its cascade.classes "
-                         "(not rewritten automatically) and check operate-on-class-ids in its nvinfer config")
+    for model_id in _children(models, parents, name):
+        try:
+            classes = specs.write_cascade_classes(repo, model_id, {name: new})
+        except TrainError as error:
+            lines.append(f"  second-stage model {model_id} triggers on {name}: change it to {new} in its "
+                         f"cascade.classes by hand ({error})")
+            continue
+        lines.append(f"  second-stage model {model_id}: cascade.classes {name} -> {new} ({', '.join(classes)}); "
+                     "check operate-on-class-ids in its nvinfer config after the parent is republished")
     return lines
 
 
@@ -172,7 +181,7 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
         specs.write_classes(repo, model_id, renamed(models[model_id]["classes"]))
         result.lines.append(f"  model {model_id}: class {models[model_id]['classes'].index(old)} renamed")
     result.lines += _lock_lines(updated, pending)
-    result.lines += _cascade_lines(models, scope_models, old, new)
+    result.lines += _rewrite_cascades(repo, models, scope_models, old, new)
     result.lines += _republish_lines(repo, sorted(scope_models), sources_changed=True)
     return result
 
@@ -193,13 +202,17 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
         return [c for c in names if c != name] if into is not None else names
 
     _require_confirmed(repo, root, spec, merged)
+    models = _models(repo)
+    children = _children(models, {spec["id"]}, name)
+    if into is None and children:
+        # 父模型不再输出这个类别，二级模型却仍作用于它：先由人决定二级模型改作用于哪些类别。
+        raise TrainError(f"second-stage model {', '.join(children)} triggers on {name}: remove {name} from its "
+                         f"cascade.classes first (or merge: train update {spec['id']} retire {name} --into …)")
     if into is None:
         specs.write_classes(repo, spec["id"], remaining)
         return Result([f"retired {name} from {spec['id']} (the sources keep it; {spec['id']} ignores it)",
-                       *_renumber_lines(classes, name), *_cascade_lines(_models(repo), {spec["id"]}, name),
-                       *_republish_lines(repo, [spec["id"]])])
+                       *_renumber_lines(classes, name), *_republish_lines(repo, [spec["id"]])])
 
-    models = _models(repo)
     own = set(spec["data"]["sources"])
     others = [model_id for model_id in _users(models, own) if model_id != spec["id"]]
     conflicts = [f"model {model_id} has {name} as a class of its own: merge it there first "
@@ -224,7 +237,7 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
     specs.write_classes(repo, spec["id"], remaining)
     result.lines += _renumber_lines(classes, name)
     result.lines += _lock_lines(updated, pending)
-    result.lines += _cascade_lines(models, {spec["id"]}, name)
+    result.lines += _rewrite_cascades(repo, models, {spec["id"]}, name, into)
     result.lines += _republish_lines(repo, [spec["id"]], sources_changed=True)
     return result
 
