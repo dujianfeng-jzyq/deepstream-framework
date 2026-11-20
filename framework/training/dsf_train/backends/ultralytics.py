@@ -24,6 +24,8 @@ LAYOUTS = {"detect": ("xyxy-confidence-class_id",), "classify": ("softmax",)}
 # 分类视图中类别目录的名字：Ultralytics（torchvision ImageFolder）按目录名排序决定类别号，补零的序号
 # 排序后就是 classes 的顺序。
 CLASS_DIR_DIGITS = 3
+# 分类推理时每次交给 Ultralytics 的图片数。
+PREDICT_CHUNK = 256
 # 检测头的原始输出 [batch, 4 + 类别数, 候选数]：中心点与宽高（输入像素）后接各类别分数。
 # [cx, cy, w, h] 乘以它得到 [x1, y1, x2, y2]。
 _XYWH_TO_XYXY = [[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [-0.5, 0.0, 0.5, 0.0], [0.0, -0.5, 0.0, 0.5]]
@@ -43,6 +45,14 @@ CJK_FAMILY = "WenQuanYi Micro Hei"
 def sample_name(sample: dict) -> str:
     """视图中的文件名：来源与原文件名，避免不同来源的同名图像冲突。"""
     return f"{sample['source']}__{sample['image']}"
+
+
+def crops(view: Path, split: str) -> list[tuple[Path, int]]:
+    """分类视图中一个划分的样本：(文件, 类别号)，按文件名排序。文件名是 <来源>__<图片名>__<对象序号>.png。"""
+    found = []
+    for directory in sorted((view / split).iterdir()) if (view / split).is_dir() else []:
+        found += [(path, int(directory.name)) for path in sorted(directory.glob("*.png"))]
+    return found
 
 
 def data_path(task: str, view: Path) -> Path:
@@ -189,8 +199,18 @@ def predict(task: str, weights: Path, images: list[Path], options: dict, conf: f
     """逐张推理，按 images 的顺序产出 [{"class", "box", "score"}]。stream 模式按批读入图片，
     不把全部结果留在内存中。Ultralytics 默认按类别分别做 NMS，agnostic 对应它的 agnostic_nms。"""
     from ultralytics import YOLO
-    if task != "detect":
-        raise ValueError(f"backend {NAME} predicts boxes for task detect only, not {task}")
+    if task == "classify":
+        # 分类：images 是视图中已裁剪、已拉伸的样本；每张产出一项 {"class", "score", "probs"}。
+        # 分块交给 Ultralytics：一次给它数千个路径会打开过多文件（训练划分的裁剪有数千个）。
+        with _settings(workdir):
+            model = YOLO(str(weights), task=task)
+            for start in range(0, len(images), PREDICT_CHUNK):
+                chunk = [str(path) for path in images[start:start + PREDICT_CHUNK]]
+                for result in model.predict(chunk, stream=True, verbose=False, **_inference_arguments(options)):
+                    probs = [float(v) for v in result.probs.data.tolist()]
+                    top = max(range(len(probs)), key=probs.__getitem__)
+                    yield [{"class": top, "score": probs[top], "probs": probs}]
+        return
     with _settings(workdir):
         model = YOLO(str(weights), task=task)
         for result in model.predict([str(path) for path in images], conf=conf, stream=True, verbose=False,

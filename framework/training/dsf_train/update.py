@@ -15,8 +15,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dsf_deploy import layout
-
 from . import lock, paths, sources, spec as specs, xanylabeling
 from .errors import TrainError
 
@@ -24,15 +22,12 @@ from .errors import TrainError
 @dataclass
 class Result:
     lines: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)  # 标注与 labels.txt 被改写的来源
 
 
 def _models(repo: Path) -> dict[str, dict]:
     """仓库中全部模型的规格。任何一个规格不成立都报错：影响范围算不全时不能改写共用的来源。"""
-    root = repo / layout.MODELS
-    found = {}
-    for directory in sorted(p for p in root.iterdir() if (p / "model.yaml").is_file()) if root.is_dir() else []:
-        found[directory.name] = specs.load(repo, directory.name)
-    return found
+    return specs.load_all(repo)
 
 
 def _labels(spec: dict) -> list[str]:
@@ -166,7 +161,7 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
         raise TrainError(f"cannot rename {old} to {new}:\n  " + "\n  ".join(conflicts))
     _check_writable(_source_files(root, sorted(scope_sources)) +
                     [specs.path(repo, model_id) for model_id in scope_models])
-    result = Result([f"renamed {old} to {new}"])
+    result = Result([f"renamed {old} to {new}"], sorted(scope_sources))
     after = {source: renamed(names) for source, names in before.items()}
     for source in sorted(scope_sources):
         count = _rewrite_source(root, source, {old: new}, after[source])
@@ -219,7 +214,7 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
         before[source] = sources.class_list(directory, sources.read_record(directory))
     _check_writable(_source_files(root, sorted(own)) + [specs.path(repo, spec["id"])])
     after = {source: [c for c in names if c != name] for source, names in before.items()}
-    result = Result([f"merged {name} into {into} in {spec['id']} and its sources"])
+    result = Result([f"merged {name} into {into} in {spec['id']} and its sources"], sorted(own))
     for source in sorted(own):
         count = _rewrite_source(root, source, {name: into}, after[source])
         result.lines.append(f"  source {source}: {count} annotations rewritten")
@@ -279,7 +274,8 @@ def add(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = 
     _check_writable(_source_files(root, [s for s, plan in plans.items() if plan is not None]) +
                     [specs.path(repo, spec["id"])])
 
-    result = Result([f"added {name} to {spec['id']} as class {len(spec['classes'])}"])
+    result = Result([f"added {name} to {spec['id']} as class {len(spec['classes'])}"],
+                    sorted(source for source, plan in plans.items() if plan is not None))
     after = {}
     for source, plan in plans.items():
         directory = paths.source_dir(root, source)

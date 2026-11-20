@@ -145,3 +145,12 @@ def consistency_inputs(root, samples: list[dict], spec: dict, limit: int) -> lis
         if len(inputs) >= limit:
             break
     return inputs
+
+
+def resolution(metric: str, counts: dict[str, int]) -> tuple[float, str | None]:
+    """发布门槛能分辨的最小变化（见 publish.check_gate）：accuracy 按全部裁剪计，一个裁剪变化 1/总数；
+    recall、precision 是各类的平均。"""
+    if metric == "accuracy":
+        total = sum(counts.values())
+        return (1 / total if total else 0.0), None
+    return detect.macro_resolution(counts)

@@ -124,6 +124,16 @@ export:
 FROM_PARENT_KEYS = ("attribute", "min_size")
 
 
+def load_all(repo: Path) -> dict[str, dict]:
+    """仓库中全部模型的规格（按 id 排序）。任何一个规格不成立都报错：依赖它们的结果算不全。"""
+    from dsf_deploy import layout
+    root = repo / layout.MODELS
+    found = {}
+    for directory in sorted(p for p in root.iterdir() if (p / models.SPEC).is_file()) if root.is_dir() else []:
+        found[directory.name] = load(repo, directory.name)
+    return found
+
+
 def path(repo: Path, model_id: str) -> Path:
     return paths.model_dir(repo, model_id) / models.SPEC
 

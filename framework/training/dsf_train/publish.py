@@ -26,6 +26,7 @@ from dsf_deploy import layout, models, naming
 
 from . import backends, dataset, lock, onnxio, paths, runs, sources, tasks
 from .errors import TrainError
+from .tasks import detect
 
 EXPORT = "export"
 EXPORT_RECORD = "export.json"
@@ -229,15 +230,23 @@ def check_gate(repo: Path, root: Path, spec: dict, evaluation: dict, current: di
             result["regression"] = {"skipped": unavailable}
         else:
             drop = old - new if task.METRICS[metric] == "higher" else new - old
-            passed = drop <= max_drop
+            # 测试实例少时，一个实例的变化就可能超过 max_drop：小于它的下降不是退化的证据（只是这一个实例），
+            # 门槛允许 max(max_drop, 一个实例造成的变化)，并记下原因，测试划分需要多少实例一目了然。
+            counts = {item["name"]: item["instances"] for item in evaluation["classes"]
+                      if not shared or item["name"] in shared["classes"]}
+            step, rarest = (detect.macro_resolution(counts) if shared else task.resolution(metric, counts))
+            allowed = max(max_drop, step)
+            passed = drop <= allowed
             result["regression"] = {"metric": metric, "max_drop": max_drop, "release": current["release"],
                                     "run": old_run, "published": old, "value": new, "drop": drop,
-                                    "passed": passed, **shared}
+                                    "resolution": {"one_instance": step, "class": rarest,
+                                                   "instances": counts.get(rarest) if rarest else sum(counts.values())},
+                                    "allowed": allowed, "passed": passed, **shared}
             if not passed:
                 over = f" (mean over the {len(shared['classes'])} shared classes)" if shared else ""
                 failures.append(f"{metric}{over} {new:.4f} is {drop:.4f} below the published release "
                                 f"{current['release']} ({old:.4f}) on the same test split; "
-                                f"evaluate.gate.regression allows {max_drop}")
+                                f"{_allowance_text(result['regression'])}")
     if failures:
         raise TrainError("the run does not pass the publish gate:\n  " + "\n  ".join(failures))
     compared = bool(result["min"]) or "passed" in result["regression"]
@@ -250,6 +259,18 @@ def check_gate(repo: Path, root: Path, spec: dict, evaluation: dict, current: di
                          "(or set evaluate.gate.min)")
     result["accepted_without_comparison"] = bool(unavailable) or not compared
     return result
+
+
+def _allowance_text(regression: dict) -> str:
+    """门槛允许的下降与原因：max_drop，或测试实例少时一个实例造成的变化（更大时）。"""
+    resolution = regression.get("resolution") or {}
+    if regression.get("allowed", regression["max_drop"]) <= regression["max_drop"]:
+        return f"evaluate.gate.regression allows {regression['max_drop']}"
+    where = (f"one test instance of {resolution['class']} ({resolution['instances']} in the test split)"
+             if resolution.get("class") else f"one of the {resolution.get('instances')} test samples")
+    return (f"allowed {regression['allowed']:.4f}: {where} moves {regression['metric']} by "
+            f"{resolution['one_instance']:.4f}, more than max_drop {regression['max_drop']}; "
+            "add test instances for a tighter gate")
 
 
 def _better_or_equal(task, name: str, value: float, bound: float) -> bool:
@@ -461,9 +482,11 @@ def report(result: Result) -> list[str]:
         lines.append(f"  gate min: {name} {item['value']:.4f} >= {item['bound']}")
     regression = gate["regression"]
     if "passed" in regression:
+        change = (f"drop {regression['drop']:.4f}" if regression["drop"] > 0 else
+                  f"improved by {-regression['drop']:.4f}")
         lines.append(f"  gate regression: {regression['metric']} {regression['value']:.4f} vs release "
-                     f"{regression['release']} {regression['published']:.4f} (drop {regression['drop']:.4f}, "
-                     f"allowed {regression['max_drop']})")
+                     f"{regression['release']} {regression['published']:.4f} ({change}); "
+                     f"{_allowance_text(regression)}")
     else:
         lines.append(f"  gate regression skipped: {regression['skipped']}")
     if regression.get("classes"):

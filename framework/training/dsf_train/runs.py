@@ -221,6 +221,59 @@ def evaluate_as(root: Path, spec: dict, run: str, dataset_id: str, mapping: dict
     return document
 
 
+def errors(root: Path, spec: dict, run: str, dataset_id: str | None = None, split_name: str = "test",
+           device: str | None = None) -> dict:
+    """二级分类模型在一个划分上分错的裁剪，按错误预测的置信度从高到低：置信度高的错误最可能是标错了，
+    逐个在 X-AnyLabeling 中核对。写入 eval/<数据集>/errors-<划分>.json。训练划分上的结果偏乐观
+    （模型见过这些样本），仍能找出与模型强烈不一致的标注。"""
+    task = tasks.get(spec["task"])
+    if task.NAME != "classify":
+        raise TrainError(f"--errors lists misclassified crops of classify models; {spec['id']} is a {task.NAME} model")
+    run_dir, record = load(root, spec["id"], run)
+    if record["status"] != "completed":
+        raise TrainError(f"run {run} is {record['status']}; only completed runs can be evaluated")
+    if record["classes"] != spec["classes"]:
+        raise TrainError(f"run {run} was trained with other classes than {spec['id']}/model.yaml has now")
+    dataset_id, directory, manifest = dataset.locate(root, spec, dataset_id)
+    backend = backends.get(record["backend"]["name"], task.NAME)
+    found = backend.crops(directory / paths.VIEW / backend.NAME, split_name)
+    if not found:
+        raise TrainError(f"the {split_name} split of dataset {dataset_id} has no crops")
+    samples = {Path(sample["source"] + "__" + sample["image"]).stem: sample for sample in manifest["samples"]}
+    options = {**record["options"], **({"device": device} if device is not None else {})}
+    wrong = []
+    predictions = backend.predict(task.NAME, run_dir / TRAIN / backend.BEST, [path for path, _ in found], options,
+                                  0.0, root / paths.PRETRAINED, agnostic=False)
+    for (path, actual), [prediction] in zip(found, predictions):
+        if prediction["class"] == actual:
+            continue
+        stem, _, number = path.stem.rpartition("__")
+        sample = samples[stem]
+        item = sample["objects"][int(number)]
+        wrong.append({"source": sample["source"], "image": sample["image"], "box": item["box"], "split": split_name,
+                      "parent": item.get("parent"), "label": spec["classes"][actual],
+                      "predicted": spec["classes"][prediction["class"]], "confidence": round(prediction["score"], 4),
+                      "crop": str(path)})
+    wrong.sort(key=lambda e: -e["confidence"])
+    document = {"schema": SCHEMA, "run": run, "dataset": dataset_id, "split": split_name, "crops": len(found),
+                "errors": wrong, "evaluated_at": _now()}
+    paths.write_json(run_dir / EVAL / dataset_id / f"errors-{split_name}.json", document)
+    return document
+
+
+def errors_report(document: dict, root: Path, limit: int = 40) -> list[str]:
+    errors_ = document["errors"]
+    lines = [f"{len(errors_)} of {document['crops']} crops in the {document['split']} split are misclassified by run "
+             f"{document['run']} (most confident first; check these labels in X-AnyLabeling):"]
+    for entry in errors_[:limit]:
+        box = ", ".join(f"{v:.0f}" for v in entry["box"])
+        lines.append(f"  labeled {entry['label']}, predicted {entry['predicted']} {entry['confidence']:.3f}  "
+                     f"{paths.source_dir(root, entry['source']) / entry['image']}  [{box}] {entry['parent'] or ''}")
+    if len(errors_) > limit:
+        lines.append(f"  … and {len(errors_) - limit} more")
+    return lines
+
+
 def test_split_empty(root: Path, spec: dict, run: str) -> bool:
     _, record = load(root, spec["id"], run)
     _, _, manifest = dataset.locate(root, spec, record["dataset"])

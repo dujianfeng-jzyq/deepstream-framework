@@ -167,3 +167,18 @@ def compare(layout: str, native, exported) -> dict:
     return {"passed": passed, "candidates": int(rows.sum()), "confident": int(confident.sum()),
             "max_box_diff": box, "max_conf_diff": conf, "class_mismatches": classes, "finite": finite,
             "limits": limits}
+
+
+def macro_resolution(counts: dict[str, int]) -> tuple[float, str | None]:
+    """各类指标的平均（宏平均）中，一个测试实例能造成的最大变化：稀有类别的一个实例使它的指标变化约 1/n，
+    平均之后再除以类别数。返回 (变化量, 最稀有的类别)；只算测试划分中有实例的类别。"""
+    present = {name: n for name, n in counts.items() if n}
+    if not present:
+        return 0.0, None
+    rarest = min(present, key=lambda name: (present[name], name))
+    return 1 / (len(present) * present[rarest]), rarest
+
+
+def resolution(metric: str, counts: dict[str, int]) -> tuple[float, str | None]:
+    """发布门槛能分辨的最小变化（见 publish.check_gate）：检测的全部指标都是各类的平均。"""
+    return macro_resolution(counts)

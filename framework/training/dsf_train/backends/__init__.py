@@ -15,7 +15,9 @@
   predict(task, weights, images, options, conf, workdir, *, agnostic)
                                            原生推理（预标注用），逐张产出 [{"class", "box", "score"}]，
                                            box 是像素坐标 [x1, y1, x2, y2]，顺序与 images 相同；agnostic 为真时
-                                           NMS 不区分类别，重叠的框只保留得分最高的一个，不论类别是否相同
+                                           NMS 不区分类别，重叠的框只保留得分最高的一个，不论类别是否相同；
+                                           分类时 images 是视图中的裁剪，每张产出一项 {"class", "score", "probs"}
+  crops(view, split)                       分类视图中一个划分的样本 (文件, 类别号)（列出错分的样本用）
   LAYOUTS                                  任务 → 导出时能追加转换的部署输出布局
   export(task, weights, layout, size, settings, target, workdir)
                                            导出 ONNX 到 target，输出已是 layout；size 是 (宽, 高)，settings 是

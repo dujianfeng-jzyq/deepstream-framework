@@ -11,6 +11,8 @@
   consistency_inputs(root, samples, spec, limit)
                                导出一致性比较的网络输入（float32 [3, 高, 宽]，最多 limit 个），与训练样本的生成方式相同
   METRICS                      评估指标的名称 → 比较方向（"higher" 或 "lower"），发布门槛按它比较
+  resolution(metric, counts)   一个测试实例能使该指标变化多少（counts 是类别 → 测试实例数），返回 (变化量, 最稀有的类别)：
+                               退化门槛不把小于它的下降当作退化
   LAYOUTS                      支持的部署输出布局（model.yaml 的 output_layout）
   labels_text(classes)         发布的 labels.txt 的内容（格式由 nvinfer 的网络类型决定）
   compare(layout, native, exported)

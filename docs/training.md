@@ -104,7 +104,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ### 5.2 标注：X-AnyLabeling
 
-在 X-AnyLabeling 中打开 `sources/<来源>/`，先导入 `labels.txt` 作为预设类别。标注保存为图像旁的同名 JSON（LabelMe 兼容格式），以 4.0.6 实际保存的文件为准（样例见 `framework/tests/python/data/x-anylabeling-4.0.6/`）：
+在 X-AnyLabeling 中打开 `sources/<来源>/`，先导入 `labels.txt` 作为预设类别。要标形状属性（二级模型的标签，§12）时载入 `sources/<来源>/attributes.json`：Image Classifier（Ctrl+3）的 MultiTask 中对象选择框旁的上传按钮。它和 `labels.txt` 一样由工具生成、不手写，也没有单独的命令：`train import`、`train prepare`（在读取标注之前，所以 prepare 因标注问题失败时它已是最新）与改写来源的 `train update` 顺带重新生成，输出中给出它的位置。内容：二级模型声明的属性（`data.from_parent.attribute`）出现在它的 `cascade.classes` 上，取值为 `classes` 加 `ignore_classes`；来源标注中已有的属性全部保留（文件中缺少的属性在工具中看不到）；同一来源中同名属性的取值取各类别上的并集，模型没有声明的取值按字符排序，重新生成时顺序不变。标注中有模型不接受的取值时给出警告（`prepare` 会拒绝它们）。暂时不成立的二级模型规格（例如父类别改名后 `cascade.classes` 还没改写）不使命令失败，只是这次不计入它的属性，并说明原因。修改二级模型的属性或取值后运行一次 `train prepare <模型>` 即可刷新。标注保存为图像旁的同名 JSON（LabelMe 兼容格式），以 4.0.6 实际保存的文件为准（样例见 `framework/tests/python/data/x-anylabeling-4.0.6/`）：
 
 - 顶层：`imagePath`、`imageWidth`、`imageHeight`、`shapes`、图像级 `flags`、`checked`（工具中的“已检查”状态）；`imageData` 为空（图像不嵌入 JSON，非空时忽略）。
 - 每个形状：`label`、`points`、`shape_type`、`difficult`、`attributes`（形状属性，例如 `{"遮挡": "否", "破损": "否"}`），以及读取时忽略的 `group_id`、`description`、`flags`、`kie_linking`。
@@ -169,6 +169,8 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 `train eval <id> <run> [--dataset <标识>]` 单独重新评估，例如数据集更新后在新的测试划分上比较新旧 run；每个数据集的结果分别保存，摘要记入 `run.json` 的 `evaluations`。
 
+`train eval <id> <run> --errors [--split test|val|train …] [--device <设备>]`（二级分类；`--split` 可重复）列出这些划分中分错的裁剪：标注的值、预测的值与置信度、来源图片与框，置信度高的错误排在前面——它们最可能是标错了。完整列表写入 `eval/<数据集标识>/errors-<划分>.json`，同时建立复核集 `reviews/<id>-<run>-<划分…>/`：只含这些图片（硬链接）与它们标注的副本，、列出要核对的框的 `checklist.txt`，以及来源的 `attributes.json`（图片都来自一个来源时）。在 X-AnyLabeling 中打开这个目录、按 D 逐张核对并保存，然后 `train review apply <名称>` 把改过的副本写回来源（`imagePath` 恢复为来源中的文件名）。标注只能复制、不能链接：X-AnyLabeling 4.0.6 保存时写临时文件再替换，链接会被换成复核目录中的新文件。来源标注自复制以来变了的不写回、报告冲突；有未应用修改的复核集不会被同名的新复核集替换；`train prepare` 提醒涉及它的来源中有未应用的复核；`train review` 列出全部复核集。改正时按图片判断，不要因为模型不同意就改测试划分的标注，否则测试指标虚高；训练划分上的结果偏乐观（模型见过这些样本），仍能找出与模型强烈不一致的标注。
+
 分片评估（`evaluate.slices`：按来源、按形状属性，例如“遮挡=是”的目标，或按 `difficult`）尚未实现：按来源是图片级的子集，按属性是目标级的子集，后者需要在评估时忽略其余目标，等有实际需要时再设计。
 
 ## 8. 导出与发布：`train publish <id> <run> [--dataset <标识>] [--accept-metrics] [--device <设备>]`
@@ -179,6 +181,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 1. **门槛**（在数据集的测试划分上，默认最近一次 prepare）：`evaluate.gate.min` 中的每项指标达到下限（按任务定义的比较方向）；`regression` 把 `release.json` 中的当前模型在同一测试划分上评估，新模型的指定指标下降不超过 `max_drop`。run 在该数据集上已有评估结果时直接使用（权重与数据集都不可变），`--device` 只用于需要新做的评估。
    - 没有当前模型（首次发布，§5.3）时跳过退化比较；此时 `min` 为空就没有任何门槛，要求显式的 `--accept-metrics`。
+   - **测试实例少时按一个实例的影响放宽。** 一个测试实例能使指标变化多少由任务给出：各类平均的指标（检测的全部指标、二级分类的 `recall` 与 `precision`）是 1/(有测试实例的类别数 × 最稀有类别的实例数)，二级分类的 `accuracy` 是 1/裁剪总数。小于它的下降不是退化的证据（只是这一个实例），门槛允许 max(`max_drop`, 它)，在输出与 `release.json` 的 `resolution`、`allowed` 中写明是哪个类别、多少实例。例如测试划分中“遮挡=是”只有 22 个时，一个裁剪使宏平均 recall 变化 0.0227，0.01 的 `max_drop` 无从判断；要更严的门槛，就给测试划分增加这个类别的实例。
    - 当前模型无法重新评估（它的 run 不在这台训练机上、权重的 sha256 不符、类别已改变）时同样要求 `--accept-metrics`，而不是悄悄跳过比较。
    - `--accept-metrics` 只放行“没有可对照的东西”，未达到下限或退化超限时总是拒绝。门槛的结果（含是否靠 `--accept-metrics` 放行）写进 `release.json`。
 2. **导出**：后端按 `export`（`format: onnx`、`opset`、`batch`、`dynamic`、`simplify`，`model.yaml` 加载时校验）以 `input` 的尺寸在 CPU 上导出 ONNX，并在输出端追加到 `output_layout` 的转换；输入与输出名固定为 `input`、`output`；去掉导出时间与含本机路径的描述，同一份权重总是导出同一个文件。导出的 ONNX 与当前发布相同时拒绝发布：新的发布标识只会让目标机为同一个模型重建 engine。生成任务要求格式的 `labels.txt`。导出物在 `runs/<id>/<run>/export/`，每次发布重新生成。
@@ -246,7 +249,7 @@ data:
 
 - **数据**：二级模型复用父模型的来源。X-AnyLabeling 的形状属性让一次标注同时得到一级框与二级标签；`prepare` 从父类别框裁剪出样本，划分沿用这些框所在图片的采集组，两级模型的测试集来自同一批图片。没有该属性的框、属性值在 `ignore_classes` 中的框、小于 `min_size` 的框不收入，在报告中按原因计数；其他属性值是错误。类别依赖（§15.1）检查的是来源中有 `cascade.classes`。训练划分中没有样本的类别报错：它无法学习。
 - **裁剪与现场一致**：二级 nvinfer（`process-mode=2`）把检测框原样缩放到网络输入，不保持宽高比、不外扩。训练样本按同样的方式生成（拉伸到 `input`，写成 PNG），所以不提供外扩（`padding`）；nvinfer 配置用 `maintain-aspect-ratio=0`，`input-object-min-width/height` 与 `min_size` 一致。后端评估时的“缩放 + 中心裁剪”对正方形样本不起作用。
-- **评估**：在真实框的裁剪上评估二级模型本身。类别常常极不均衡（“遮挡=是”只占百分之几），全猜多数类也有很高的 accuracy，所以指标是 accuracy、各类 recall 的平均（`recall`）与各类 precision 的平均（`precision`），每类给出 recall 与 precision，骨架的退化门槛比较 `recall`。端到端评估（一级检测框 → 二级分类）以后按需要增加。
+- **评估**：在真实框的裁剪上评估二级模型本身。类别常常极不均衡（“遮挡=是”只占百分之几），全猜多数类也有很高的 accuracy，所以指标是 accuracy、各类 recall 的平均（`recall`）与各类 precision 的平均（`precision`），每类给出 recall 与 precision，骨架的退化门槛比较 `recall`。训练时也按验证划分上的 `recall` 选择 `best.pt` 并判断早停（Ultralytics 默认按 top-1/top-5 的平均，二分类时就是 accuracy，会保留少数类召回差的检查点、过早停止），`results.csv` 中为 `metrics/recall_mean`。端到端评估（一级检测框 → 二级分类）以后按需要增加。
 - **导出**：Ultralytics 的分类头输出 logits（softmax 只在它的 Python 预测器中做），而 nvinfer 内置的分类解析把输出当作概率与 `classifier-threshold` 比较，所以导出时追加 Softmax，输出为 `[batch, 类别数]`。一致性验证在测试划分的裁剪上比较概率。
 - **部署契约**：二级模型的 nvinfer 配置使用 `network-type=1`、`process-mode=2`，`operate-on-gie-id` 等于父模型配置的 `gie-unique-id`，`operate-on-class-ids` 由 `cascade.classes` 按父模型发布的 `classes` 换算出类别号。打包与发布时校验：父模型重新发布并改变了类别号时，二级模型的配置在打包前失败，而不是在现场作用于错误的类别。
 - 应用配置的 `inference` 链按顺序串接一级与二级模型（已支持），二级结果在检测消息对象的 `classes[]` 中。

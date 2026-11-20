@@ -19,7 +19,7 @@ from unittest import mock
 
 from deploy_support import ROOT
 from dsf_deploy import classes as class_diff, models
-from dsf_train import (backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, update,
+from dsf_train import (attributes, backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, update,
                        xanylabeling)
 from dsf_train.backends import ultralytics
 from dsf_train.tasks import classify, detect
@@ -711,6 +711,7 @@ class FakeBackend(types.ModuleType):
 
     write_view = staticmethod(ultralytics.write_view)
     data_path = staticmethod(ultralytics.data_path)
+    crops = staticmethod(ultralytics.crops)
     check_options = staticmethod(ultralytics.check_options)
 
     def version(self):
@@ -757,6 +758,10 @@ class FakeBackend(types.ModuleType):
 
     def predict(self, task, weights, images, options, conf, workdir, *, agnostic):
         self.calls.append(("predict", weights, list(images), dict(options), conf, agnostic))
+        if task == "classify":  # 总是预测 0 号类别：标成其他类别的裁剪都是错分
+            for path in images:
+                yield [{"class": 0, "score": 0.9, "probs": [0.9, 0.1]}]
+            return
         for path in images:
             if self.during_predict:
                 self.during_predict(path)
@@ -1100,6 +1105,9 @@ class ChangedClassesGateTest(RunTestCase):
         return publish.check_gate(self.repo, self.root, self.spec(), evaluation, self.current, accept)
 
     def test_a_new_class_is_compared_on_the_classes_both_models_know(self):
+        patcher = mock.patch.object(detect, "macro_resolution", return_value=(0.0, None))  # 只检查比较本身
+        patcher.start()
+        self.addCleanup(patcher.stop)
         second, evaluation = self.retrain("add", "防撞墩")
         self.backend.map50_95 = {self.first: 0.6, second: 0.5}
         with self.assertRaisesRegex(TrainError, "map50_95 \\(mean over the 1 shared classes\\) 0.5000 is 0.1000 "
@@ -1325,6 +1333,10 @@ class PublishTest(RunTestCase):
         self.assertIn("gate min: map50_95 0.5000 >= 0.5", out)
 
     def test_a_new_run_is_compared_with_the_published_one(self):
+        # 这里检查比较本身：把一个测试实例造成的变化设为 0（实例数的影响见下一个测试）。
+        patcher = mock.patch.object(detect, "macro_resolution", return_value=(0.0, None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
         first = json.loads((self.model_dir / "release.json").read_text())["release"]
         second = self.second_run()
@@ -1350,6 +1362,24 @@ class PublishTest(RunTestCase):
         self.assertIn(("evaluate", self.root / "runs/m" / second / "train" / ultralytics.BEST,
                        self.root / "datasets/m" / self.dataset_id / "view/fake/data.yaml", "test", "1"),
                       self.backend.calls)                                      # --device 只用于门槛的评估
+
+    def test_with_few_test_instances_one_instance_sets_the_allowed_drop(self):
+        self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
+        second = self.second_run()
+        self.backend.map50_95[second] = 0.48                    # 下降 0.02：大于 max_drop，却小于一个测试实例的影响
+        shutil.rmtree(self.root / "runs/m" / second / "eval")
+        code, out, err = self.train("publish", "m", second)
+        self.assertEqual(code, 0, err)
+        regression = json.loads((self.model_dir / "release.json").read_text())["gate"]["regression"]
+        test = [s for s in json.loads((self.root / "datasets/m" / self.dataset_id / "manifest.json").read_text())[
+            "samples"] if s["split"] == "test"]
+        count = sum(len(s["objects"]) for s in test)
+        self.assertEqual(regression["resolution"], {"one_instance": 1 / count, "class": CLASSES[0], "instances": count})
+        self.assertEqual((regression["allowed"], regression["passed"]), (1 / count, True))
+        self.assertIn(f"allowed {1 / count:.4f}: one test instance of {CLASSES[0]} ({count} in the test split) moves "
+                      f"map50_95 by {1 / count:.4f}, more than max_drop 0.01; add test instances for a tighter gate",
+                      out)
+        self.assertIn("(drop 0.0200)", out)
 
     def test_a_published_model_that_cannot_be_reevaluated_needs_explicit_acceptance(self):
         self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
@@ -1482,8 +1512,8 @@ def boxes(path: Path, items, checked=True, size=(640, 480)) -> Path:
     document = json.loads(LABELED.read_text(encoding="utf-8"))
     [template] = document["shapes"]
     shapes = []
-    for label, (x1, y1, x2, y2), attributes in items:
-        shapes.append({**template, "label": label, "attributes": attributes,
+    for label, (x1, y1, x2, y2), values in items:
+        shapes.append({**template, "label": label, "attributes": values,
                        "points": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]})
     document.update({"imagePath": path.with_suffix(".jpg").name, "checked": checked, "shapes": shapes,
                      "imageWidth": size[0], "imageHeight": size[1]})
@@ -1672,6 +1702,59 @@ class SecondStagePrepareTest(SecondStageTestCase):
             self.child()
 
 
+class AttributesTest(SecondStageTestCase):
+    def setUp(self):
+        super().setUp()
+        [group] = groups_in("train", 1)
+        image(self.raw / group / "a.jpg", "red", size=(640, 480))
+        boxes(self.raw / group / "a.json", [
+            (self.PARENT_CLASS, [10, 10, 110, 90], {"遮挡": "是", "破损": "否"}),
+            ("防撞桶", [200, 50, 260, 130], {"破损": "是", "数量": "一个"}),
+            ("龙门架A", [300, 50, 360, 130], {"遮挡": "也许"}),
+        ], checked=False)  # 未检查的标注中的属性同样保留：它们也会在工具中被编辑
+        self.import_(self.raw)
+
+    def test_the_file_joins_the_model_attribute_with_the_attributes_in_the_source(self):
+        code, out, err = self.train("prepare", "occ")   # 标注都没有勾选：prepare 失败
+        self.assertEqual((code, "no checked images in batch-01" in err), (1, True))
+        self.assertIn("warning: 1 boxes of batch-01 have 遮挡=也许, which occ does not accept", out)
+        # 失败之前已经写好属性文件：改正标注所需的取值已经在里面。
+        document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))
+        # 模型声明的属性在触发类别上，取值为 classes + ignore_classes；同名属性的取值是各类别上的并集。
+        self.assertEqual(document[self.PARENT_CLASS], {"破损": ["否", "是"], "遮挡": ["否", "是", "未知", "也许"]})
+        self.assertEqual(document["防撞桶"], {"数量": ["一个"], "破损": ["否", "是"]})
+        self.assertEqual(document["龙门架A"], {"遮挡": ["否", "是", "未知", "也许"]})
+        self.assertEqual(list(document)[:3], [self.PARENT_CLASS, "龙门架A", "防撞桶"])   # labels.txt 的顺序
+        self.assertEqual(document["__widget_types__"]["防撞桶"], {"数量": "radiobutton", "破损": "radiobutton"})
+        self.assertIn("attributes: " + str(self.source() / "attributes.json"), out)
+
+    def test_import_writes_the_file_and_update_rewrites_it(self):
+        self.assertFalse((self.source() / "attributes.json").exists())  # setUp 直接导入，没有经过命令
+        image(self.raw / "more/b.jpg", "blue", size=(640, 480))
+        code, out, err = self.train("import", "m", str(self.raw / "more"), "--source", "batch-01")
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.source() / "attributes.json").is_file())
+        # 父类别改名后二级模型的 cascade.classes 还是旧名：update 照常完成，属性文件暂不计入它并说明原因。
+        lock.check(self.repo, self.root, self.spec(), record_new=True)  # rename 要求确认过的类别依赖
+        code, out, err = self.train("update", "m", "rename", self.PARENT_CLASS, "圆牌")
+        self.assertEqual(code, 0, err)
+        self.assertIn("note: the attributes of occ are not in attributes.json until its model.yaml is valid again", out)
+        document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))
+        self.assertEqual(document["圆牌"], {"破损": ["否", "是"], "遮挡": ["也许", "是"]})  # 只剩标注中已有的
+
+    def test_many_values_use_a_combobox(self):
+        boxes(self.source() / "a.json", [("防撞桶", [1, 1, 50, 50], {"编号": str(n)}) for n in range(7)])
+        result = attributes.generate(self.repo, self.root, "batch-01")
+        self.assertEqual(result.document["__widget_types__"]["防撞桶"]["编号"], "combobox")
+
+    def test_models_must_agree_on_the_values_of_an_attribute(self):
+        (self.repo / "models/occ2").mkdir()
+        spec.path(self.repo, "occ2").write_text(spec.path(self.repo, "occ").read_text(encoding="utf-8").replace(
+            "id: occ", "id: occ2").replace("ignore_classes: [\"未知\"]", "ignore_classes: []"), encoding="utf-8")
+        with self.assertRaisesRegex(TrainError, "models occ and occ2 give different values for attribute 遮挡"):
+            attributes.generate(self.repo, self.root, "batch-01")
+
+
 class ClassifyTaskTest(unittest.TestCase):
     def test_metrics_from_the_confusion_matrix(self):
         result = classify.metrics([[90, 5], [3, 2]])
@@ -1682,6 +1765,13 @@ class ClassifyTaskTest(unittest.TestCase):
         # 测试划分中没有样本的类别不列出，也不进入宏平均。
         self.assertEqual(sorted(classify.metrics([[4, 0], [0, 0]])["classes"]), [0])
         self.assertEqual(classify.metrics([[4, 0], [0, 0]])["metrics"]["recall"], 1.0)
+
+    def test_one_test_instance_sets_the_resolution_of_a_metric(self):
+        counts = {"否": 802, "是": 22, "从未出现": 0}
+        self.assertEqual(classify.resolution("recall", counts), (1 / (2 * 22), "是"))   # 宏平均：稀有类别决定
+        self.assertEqual(classify.resolution("accuracy", counts), (1 / 824, None))      # 按全部裁剪计
+        self.assertEqual(detect.resolution("map50_95", {"a": 3, "b": 40}), (1 / 6, "a"))
+        self.assertEqual(detect.resolution("map50_95", {}), (0.0, None))
 
     def test_labels_are_one_semicolon_separated_line(self):
         self.assertEqual(classify.labels_text(["否", "是"]), "否;是\n")
@@ -1760,6 +1850,77 @@ class SecondStagePublishTest(SecondStageTestCase):
         [export] = [c for c in self.backend.calls if c[0] == "export"]
         self.assertEqual((export[2], export[3]), ("softmax", (128, 128)))
         self.assertEqual(models.check_model(self.model_dir), [])
+
+    def test_misclassified_crops_are_listed_with_their_source_box(self):
+        self.assertEqual(self.train("prepare", "occ")[0], 0)
+        self.assertEqual(self.train("run", "occ")[0], 0)
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        code, out, err = self.train("eval", "occ", run, "--errors", "--split", "train")
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 of 4 crops in the train split are misclassified", out)
+        self.assertIn("labeled 是, predicted 否 0.900", out)
+        self.assertIn("[10, 10, 110, 90] 标志牌(圆牌)", out)
+        [dataset_id] = [p.name for p in (self.root / "runs/occ" / run / "eval").iterdir()]
+        document = json.loads((self.root / "runs/occ" / run / "eval" / dataset_id / "errors-train.json").read_text())
+        self.assertEqual({(e["label"], e["predicted"], e["source"]) for e in document["errors"]},
+                         {("是", "否", "batch-01")})
+        self.assertIn("--split and --device go with --errors", self.train("eval", "occ", run, "--split", "val")[2])
+        self.assertIn("lists misclassified crops of classify models", self.train("eval", "m", run, "--errors")[2])
+
+    def review_of_train_errors(self):
+        self.assertEqual(self.train("prepare", "occ")[0], 0)
+        self.assertEqual(self.train("run", "occ")[0], 0)
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        code, out, err = self.train("eval", "occ", run, "--errors", "--split", "train", "--split", "val")
+        self.assertEqual(code, 0, err)
+        name = f"occ-{run}-train-val"
+        self.assertIn(f"train review apply {name}", out)
+        return name, self.root / "reviews" / name
+
+    def test_a_review_holds_only_the_images_to_check_and_applies_edits_back(self):
+        name, folder = self.review_of_train_errors()
+        [group, *_] = groups_in("train", 2)
+        image_name = f"batch-01__{group}.jpg"
+        self.assertEqual(sorted(p.name for p in folder.iterdir() if p.suffix == ".jpg"),
+                         sorted(f"batch-01__{g}.jpg" for g in [*groups_in("train", 2), *groups_in("val", 1)]))
+        self.assertEqual((folder / image_name).stat().st_ino, (self.source() / f"{group}.jpg").stat().st_ino)
+        copy = folder / f"batch-01__{group}.json"
+        self.assertEqual(json.loads(copy.read_text(encoding="utf-8"))["imagePath"], image_name)
+        self.assertIn(f"[ ] {image_name}  [10, 10, 110, 90] 标志牌(圆牌)  labeled 是, model says 否 (0.90)  train",
+                      (folder / "checklist.txt").read_text(encoding="utf-8"))
+        self.assertIn(f"{name}: 3 images, 0 edited and not applied", self.train("review")[1])
+        self.assertTrue((folder / "attributes.json").is_file())   # prepare 生成的属性文件随复核集带上
+        # 人在复核集中改了一个框的属性（X-AnyLabeling 写临时文件再替换：副本换成新文件）。
+        document = json.loads(copy.read_text(encoding="utf-8"))
+        document["shapes"][0]["attributes"]["遮挡"] = "否"
+        copy.unlink()
+        copy.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.train("prepare", "occ")
+        self.assertIn(f"warning: review {name} has 1 edited annotations that are not applied", out)
+        code, out, err = self.train("review", "apply", name)
+        self.assertEqual(code, 0, err)
+        self.assertIn("wrote 1 annotations back, 2 unchanged", out)
+        written = json.loads((self.source() / f"{group}.json").read_text(encoding="utf-8"))
+        self.assertEqual((written["imagePath"], written["shapes"][0]["attributes"]["遮挡"]), (f"{group}.jpg", "否"))
+        self.assertIn("wrote 0 annotations back, 3 unchanged", self.train("review", "apply", name)[1])
+        self.assertNotIn("warning: review", self.train("prepare", "occ")[1])
+
+    def test_an_annotation_changed_in_its_source_meanwhile_is_not_overwritten(self):
+        name, folder = self.review_of_train_errors()
+        [group, *_] = groups_in("train", 2)
+        copy = folder / f"batch-01__{group}.json"
+        copy.write_text(copy.read_text(encoding="utf-8").replace('"是"', '"否"'), encoding="utf-8")
+        source = self.source() / f"{group}.json"
+        source.write_text(source.read_text(encoding="utf-8").replace('"是"', '"未知"'), encoding="utf-8")
+        before = source.read_bytes()
+        code, out, _ = self.train("review", "apply", name)
+        self.assertEqual(code, 1)
+        self.assertIn(f"conflict: batch-01/{group}.jpg changed in its source since the review was made", out)
+        self.assertEqual(source.read_bytes(), before)
+        # 未应用的修改还在：重新建立同名复核集被拒绝，不会丢掉它们。
+        [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        code, _, err = self.train("eval", "occ", run, "--errors", "--split", "train", "--split", "val")
+        self.assertIn(f"review {name} has 1 edited annotations that are not applied yet", err)
 
     def test_a_config_that_acts_on_other_parent_classes_is_not_published(self):
         (self.model_dir / "nvinfer.txt").write_text(

@@ -1,4 +1,4 @@
-"""命令行入口：init / import / accept / prelabel / prepare / run / eval / publish / update。由 framework/training/dsf-train.py 调用，
+"""命令行入口：init / import / accept / prelabel / prepare / run / eval / review / publish / update。由 framework/training/dsf-train.py 调用，
 通常经 scripts/train.sh 在训练镜像中运行。"""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, lock, paths, prelabel, publish, runs, sources, spec, update
+from . import attributes, dataset, lock, paths, prelabel, publish, review, runs, sources, spec, update
 from .errors import TrainError
 
 
@@ -34,6 +34,11 @@ def _options(values: list[str]) -> dict:
         except Exception as error:
             raise TrainError(f"--option {value!r}: {error}") from error
     return options
+
+
+def _print(lines: list[str]) -> None:
+    if lines:
+        print("\n".join(lines))
 
 
 def _evaluate(root: Path, model: dict, run: str, dataset_id: str | None = None) -> None:
@@ -100,6 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("model")
     p.add_argument("run")
     p.add_argument("--dataset", help="dataset id (defaults to the latest train prepare)")
+    p.add_argument("--errors", action="store_true",
+                   help="classify: list the misclassified crops instead (most confident first)")
+    p.add_argument("--split", choices=("test", "val", "train"), action="append",
+                   help="split for --errors (repeat for several; default test)")
+    p.add_argument("--device", help="device for --errors (defaults to the run's)")
+
+    p = commands.add_parser("review", help="list reviews, or apply the labels fixed in one back to its sources")
+    p.add_argument("action", nargs="?", choices=("apply",))
+    p.add_argument("name", nargs="?")
 
     p = commands.add_parser("publish", help="gate, export and verify a run, then write it to models/<id>/")
     p.add_argument("model")
@@ -164,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             for key, count in sorted(importer.report.items()):
                 print(f"  {key}: {count}")
             print(f"source {args.source}: {importer.directory} ({len(importer.record['images'])} images)")
+            _print(attributes.refresh(repo, root, [args.source]))
             print("  label it in X-AnyLabeling (load labels.txt as the predefined labels) and mark finished "
                   "images as checked")
             if args.source not in model["data"]["sources"]:
@@ -173,6 +188,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"marked {count} annotations of {args.source} as checked")
         elif args.command == "prepare":
             model = spec.load(repo, args.model)
+            # 先于读取标注：prepare 因标注问题失败时，改正它们所需的属性文件已经是最新的。
+            _print(attributes.refresh(repo, root, model["data"]["sources"]))
+            for name, count in review.pending(root, model["data"]["sources"]):
+                print(f"  warning: review {name} has {count} edited annotations that are not applied: "
+                      f"train review apply {name}")
             result = dataset.prepare(repo, root, model)
             print("\n".join(dataset.report(result, model)))
             for source in model["data"]["sources"]:
@@ -210,7 +230,41 @@ def main(argv: list[str] | None = None) -> int:
                 _evaluate(root, model, run)
         elif args.command == "eval":
             model = spec.load(repo, args.model)
-            _evaluate(root, model, args.run, args.dataset)
+            if args.errors:
+                splits = list(dict.fromkeys(args.split or ["test"]))
+                found = []
+                for split_name in splits:
+                    document = runs.errors(root, model, args.run, args.dataset, split_name, args.device)
+                    print("\n".join(runs.errors_report(document, root, limit=10)))
+                    print(f"  all of them: {paths.run_dir(root, model['id'], args.run) / runs.EVAL}/"
+                          f"{document['dataset']}/errors-{split_name}.json")
+                    found += document["errors"]
+                if found:
+                    name = f"{model['id']}-{args.run}-{'-'.join(splits)}"
+                    target = review.create(root, name, model["id"], args.run, found)
+                    print(f"review {name}: {target}\n  open it in X-AnyLabeling and step through with D (the boxes to "
+                          f"check are in {review.CHECKLIST}); fix and save, then: train review apply {name}")
+            else:
+                if args.split or args.device:
+                    raise TrainError("--split and --device go with --errors")
+                _evaluate(root, model, args.run, args.dataset)
+        elif args.command == "review":
+            if args.action is None:
+                if args.name:
+                    raise TrainError("usage: train review [apply <name>]")
+                print("\n".join(review.listing(root)))
+            else:
+                if not args.name:
+                    raise TrainError("name the review to apply (train review lists them)")
+                result = review.apply(root, args.name)
+                print(f"review {args.name}: wrote {len(result.written)} annotations back, {result.unchanged} unchanged")
+                for item in result.written:
+                    print(f"  wrote {item}")
+                for item in result.conflicts:
+                    print(f"  conflict: {item} changed in its source since the review was made; not written "
+                          "(fix it in the source directly)")
+                if result.conflicts:
+                    return 1
         elif args.command == "publish":
             model = spec.load(repo, args.model)
             if args.run is None:
@@ -237,11 +291,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise TrainError("--skip-source and --reason go together")
             if args.operation == "add":
                 skip = {source: args.reason for source in args.skip_source}
-                print("\n".join(update.add(repo, root, model, args.names[0], args.from_class, skip).lines))
+                result = update.add(repo, root, model, args.names[0], args.from_class, skip)
+                print("\n".join(result.lines + attributes.refresh(repo, root, result.sources)))
             elif args.operation == "rename":
-                print("\n".join(update.rename(repo, root, model, *args.names).lines))
+                result = update.rename(repo, root, model, *args.names)
+                print("\n".join(result.lines + attributes.refresh(repo, root, result.sources)))
             elif args.operation == "retire":
-                print("\n".join(update.retire(repo, root, model, args.names[0], args.into).lines))
+                result = update.retire(repo, root, model, args.names[0], args.into)
+                print("\n".join(result.lines + attributes.refresh(repo, root, result.sources)))
             elif args.confirm:
                 lines = lock.confirm(repo, root, model)
                 print(f"confirmed the classes of the sources of {args.model} in {lock.path(repo, args.model)}")
