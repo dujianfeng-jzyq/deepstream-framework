@@ -23,6 +23,10 @@ METRICS = {"accuracy": "higher", "recall": "higher", "precision": "higher"}
 LAYOUTS = ("softmax",)
 # 导出一致性：原生推理与 ONNX 的概率差异上限；最高类别只在它领先第二名超过 max_prob_diff 时比较。
 CONSISTENCY = {"max_prob_diff": 0.001}
+# nvinfer 只在最高类别的 softmax 概率不低于 classifier-threshold 时给目标分类结果，低于时目标没有结果。
+# 评估在这些阈值上扫描（thresholds），发布时对照 nvinfer 配置中的取值（docs/training.md §7）。
+THRESHOLD_KEY = "classifier-threshold"
+THRESHOLDS = tuple(round(0.05 * step, 2) for step in range(1, 20))
 # data.from_parent.min_size 的默认值：短边小于它的框不收入（现场同样太小，无法可靠分类）。
 DEFAULT_MIN_SIZE = 16
 
@@ -105,6 +109,64 @@ def metrics(matrix: list[list[int]]) -> dict:
                         "recall": sum(c["recall"] for c in present) / len(present) if present else 0.0,
                         "precision": sum(c["precision"] for c in present) / len(present) if present else 0.0},
             "classes": classes}
+
+
+def thresholds(outcomes: list[tuple[int, list[float]]], classes: list[str]) -> list[dict]:
+    """outcomes 是测试划分每个裁剪的 (真实类别号, softmax 概率)。每个阈值一行：labeled 是得到类别的裁剪
+    比例；每类 recall 的分母是该类的全部裁剪（没有得到类别的算未召回），precision 只看得到类别的裁剪，
+    该类一个也没有得到时为 None。宏平均与 metrics 相同，只算测试划分中有样本的类别（precision 另外跳过
+    None）。低于 1/类别数的阈值与不设阈值等效（最高概率不会更低），不列出。"""
+    size = len(classes)
+    actual = Counter(truth for truth, _ in outcomes)
+    rows = []
+    for threshold in THRESHOLDS:
+        if threshold * size < 1 - 1e-9:
+            continue
+        matrix = [[0] * size for _ in range(size)]
+        labeled = 0
+        for truth, probs in outcomes:
+            best = max(range(size), key=lambda index: probs[index])
+            if probs[best] >= threshold:
+                matrix[truth][best] += 1
+                labeled += 1
+        per_class = {}
+        for index in range(size):
+            if not actual[index]:
+                continue
+            predicted = sum(matrix[row][index] for row in range(size))
+            per_class[classes[index]] = {"recall": matrix[index][index] / actual[index],
+                                         "precision": matrix[index][index] / predicted if predicted else None}
+        recalls = [item["recall"] for item in per_class.values()]
+        precisions = [item["precision"] for item in per_class.values() if item["precision"] is not None]
+        rows.append({"threshold": threshold, "labeled": labeled / len(outcomes) if outcomes else 0.0,
+                     "recall": sum(recalls) / len(recalls) if recalls else 0.0,
+                     "precision": sum(precisions) / len(precisions) if precisions else None,
+                     "classes": per_class})
+    return rows
+
+
+def threshold_lines(rows: list[dict]) -> list[str]:
+    """阈值扫描的表格：每行一个阈值，每类给出 recall/precision。"""
+    if not rows:
+        return []
+    from ..dataset import pad
+    names = list(rows[0]["classes"])
+    lines = [f"  {THRESHOLD_KEY} sweep (crops below it get no class in nvinfer):",
+             "    threshold  labeled   recall  precision  " + "  ".join(pad(f"{name} r/p", 9) for name in names)]
+    for row in rows:
+        lines.append(f"    {row['threshold']:9.2f}  {row['labeled']:6.1%}  {row['recall']:7.4f}  "
+                     f"{_number(row['precision']):>9}  " + "  ".join(
+                         f"{_number(row['classes'][n]['recall'], 2)}/{_number(row['classes'][n]['precision'], 2)}"
+                         for n in names))
+    return lines
+
+
+def threshold_row(rows: list[dict], value: float) -> dict | None:
+    return next((row for row in rows if abs(row["threshold"] - value) < 1e-9), None)
+
+
+def _number(value, digits: int = 4) -> str:
+    return "-" if value is None else f"{value:.{digits}f}"
 
 
 def labels_text(classes: list[str]) -> str:

@@ -211,7 +211,7 @@ def _check_parsers(changes: list[Change], payload: str, base_image: str, docker:
     workspace = layout.MOUNTS["CONTAINER_WORKSPACE"]
     for change in changes:
         for config in sorted(change.candidate.glob("*.txt")):
-            properties = models._properties(config) or {}
+            properties = models.nvinfer_properties(config) or {}
             library = properties.get("custom-lib-path", "")
             if not library.startswith(workspace + "/"):
                 continue

@@ -175,7 +175,7 @@ def check_model(directory: Path, models_root: Path | None = None) -> list[str]:
         return problems + [parent]
     for config in sorted(directory.glob("*.txt")):
         problems += _check_nvinfer(directory, config, spec, release)
-        if parent is not None and release is not None and _properties(config) is not None:
+        if parent is not None and release is not None and nvinfer_properties(config) is not None:
             problems += _check_cascade(config, spec, parent)
     return problems
 
@@ -274,7 +274,7 @@ def check_signature(spec: dict, onnx: object) -> list[str]:
     return problems
 
 
-def _properties(config: Path) -> dict[str, str] | None:
+def nvinfer_properties(config: Path) -> dict[str, str] | None:
     """nvinfer 配置的 [property] 段；没有该段（例如标签文件）返回 None。"""
     section, values, found = None, {}, False
     for raw in config.read_text(encoding="utf-8").splitlines():
@@ -289,7 +289,7 @@ def _properties(config: Path) -> dict[str, str] | None:
 
 
 def _check_nvinfer(directory: Path, config: Path, spec: dict, release: dict | None) -> list[str]:
-    properties = _properties(config)
+    properties = nvinfer_properties(config)
     if properties is None:
         return []
     name = config.name
@@ -336,7 +336,7 @@ def _parent(models_root: Path, spec: dict) -> dict | str:
         return f"cascade.classes: the published release of {parent} has no class {', '.join(missing)}"
     gie_ids = {}
     for config in sorted(directory.glob("*.txt")):
-        properties = _properties(config)
+        properties = nvinfer_properties(config)
         if properties is not None:
             gie_ids[config.name] = properties.get("gie-unique-id", "")
     if not gie_ids:
@@ -346,7 +346,7 @@ def _parent(models_root: Path, spec: dict) -> dict | str:
 
 def _check_cascade(config: Path, spec: dict, parent: dict) -> list[str]:
     """二级模型的 nvinfer 配置作用于父模型的输出：只处理父模型检测到的 cascade.classes 中的目标。"""
-    properties = _properties(config) or {}
+    properties = nvinfer_properties(config) or {}
     name = config.name
     problems = []
     if properties.get("process-mode") != "2":

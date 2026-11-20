@@ -1811,6 +1811,26 @@ class ClassifyTaskTest(unittest.TestCase):
         self.assertEqual(sorted(classify.metrics([[4, 0], [0, 0]])["classes"]), [0])
         self.assertEqual(classify.metrics([[4, 0], [0, 0]])["metrics"]["recall"], 1.0)
 
+    def test_the_threshold_sweep_counts_crops_below_it_as_unlabeled(self):
+        outcomes = [(0, [0.9, 0.1]), (0, [0.6, 0.4]), (1, [0.3, 0.7]), (1, [0.55, 0.45])]
+        rows = classify.thresholds(outcomes, ["否", "是"])
+        self.assertEqual([row["threshold"] for row in rows], [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95])
+        first = rows[0]                                       # 二分类时 0.5 以下与不设阈值等效
+        self.assertEqual(first["labeled"], 1.0)
+        self.assertEqual(first["classes"], {"否": {"recall": 1.0, "precision": 2 / 3},
+                                            "是": {"recall": 0.5, "precision": 1.0}})
+        self.assertAlmostEqual(first["recall"], 0.75)
+        self.assertAlmostEqual(first["precision"], (2 / 3 + 1) / 2)
+        row = classify.threshold_row(rows, 0.65)              # 0.6 与 0.55 的裁剪没有结果：未召回，不计 precision
+        self.assertEqual((row["labeled"], row["recall"], row["precision"]), (0.5, 0.5, 1.0))
+        last = rows[-1]
+        self.assertEqual((last["labeled"], last["recall"], last["precision"]), (0.0, 0.0, None))
+        self.assertEqual(classify.thresholds([(0, [0.5, 0.3, 0.2])], ["a", "b", "c"])[0]["threshold"], 0.35)
+        lines = classify.threshold_lines(rows)
+        self.assertTrue(lines[1].endswith("否 r/p     是 r/p   "), lines[1])
+        self.assertTrue(lines[5].endswith("0.65   50.0%   0.5000     1.0000  0.50/1.00  0.50/1.00"), lines[4])
+        self.assertTrue(lines[-1].endswith("0.95    0.0%   0.0000          -  0.00/-  0.00/-"), lines[-1])
+
     def test_one_test_instance_sets_the_resolution_of_a_metric(self):
         counts = {"否": 802, "是": 22, "从未出现": 0}
         self.assertEqual(classify.resolution("recall", counts), (1 / (2 * 22), "是"))   # 宏平均：稀有类别决定
@@ -1846,6 +1866,7 @@ process-mode=2
 gie-unique-id=2
 operate-on-gie-id=1
 operate-on-class-ids=0
+classifier-threshold=0.6
 """
 
 
@@ -1878,7 +1899,12 @@ class SecondStagePublishTest(SecondStageTestCase):
         code, out, err = self.train("run", "occ")
         self.assertEqual(code, 0, err)
         self.assertIn("accuracy 0.7857  recall 0.7750  precision 0.7444", out)
+        self.assertIn("classifier-threshold sweep", out)
         [run] = [p.name for p in (self.root / "runs/occ").iterdir()]
+        [dataset_id] = [p.name for p in (self.root / "runs/occ" / run / "eval").iterdir()]
+        metrics = json.loads((self.root / "runs/occ" / run / "eval" / dataset_id / "metrics.json").read_text())
+        # 假后端总是以 0.9 预测“否”：0.9 及以下的阈值都给出类别，0.95 一个也不给。
+        self.assertEqual([row["labeled"] for row in metrics["thresholds"]], [1.0] * 9 + [0.0])
         [train_call] = [c for c in self.backend.calls if c[0] == "train"]
         self.assertEqual(train_call[2]["imgsz"], 128)
         [evaluate_call] = [c for c in self.backend.calls if c[0] == "evaluate"]
@@ -1890,6 +1916,9 @@ class SecondStagePublishTest(SecondStageTestCase):
         self.assertTrue(release["consistency"]["passed"])
         self.assertEqual(release["consistency"]["crops"], 2)   # 测试划分中一张图的两个裁剪
         self.assertEqual(release["training_data"]["batch-01"]["instances"], {"否": 4, "是": 4})
+        self.assertEqual(release["thresholds"], metrics["thresholds"])
+        self.assertIn("nvinfer.txt: classifier-threshold=0.6 labels 100.0% of the test crops; recall/precision 否 "
+                      "1.00/0.50, 是 0.00/-", out)
         self.assertEqual((self.model_dir / "artifacts/labels.txt").read_text(encoding="utf-8"), "否;是\n")
         self.assertIn("2 crops compared", out)
         [export] = [c for c in self.backend.calls if c[0] == "export"]

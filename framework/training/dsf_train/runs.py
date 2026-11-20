@@ -199,6 +199,7 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
                               backend.data_path(task.NAME, directory / paths.VIEW / backend.NAME), "test",
                               inference_options(record["options"], device),
                               output / backend.NAME, root / paths.PRETRAINED)
+    sweep = _thresholds(root, spec, task, backend, run_dir, directory, record, device)
     instances = task.statistics(test, spec)
     classes = []
     for index, name in enumerate(spec["classes"]):
@@ -207,12 +208,25 @@ def evaluate(root: Path, spec: dict, run: str, dataset_id: str | None = None, de
                         **{metric: (found or {}).get(metric) for metric in task.METRICS}})
     document = {"schema": SCHEMA, "run": run, "dataset": dataset_id, "split": "test", "images": len(test),
                 "groups": len({sample["group"] for sample in test}), "metrics": result["metrics"],
-                "classes": classes, "backend": {"name": backend.NAME, **backend.version()},
-                "evaluated_at": _now()}
+                "classes": classes, **({"task": task.NAME, "thresholds": sweep} if sweep is not None else {}),
+                "backend": {"name": backend.NAME, **backend.version()}, "evaluated_at": _now()}
     paths.write_json(output / METRICS, document)
     record["evaluations"][dataset_id] = result["metrics"]
     paths.write_json(run_dir / RECORD, record)
     return document
+
+
+def _thresholds(root: Path, spec: dict, task, backend, run_dir: Path, directory: Path, record: dict,
+                device: str | None) -> list[dict] | None:
+    """任务有部署时的置信度阈值（分类的 classifier-threshold）时，在测试划分上逐个裁剪推理并扫描阈值。"""
+    if not hasattr(task, "thresholds"):
+        return None
+    found = backend.crops(directory / paths.VIEW / backend.NAME, "test")
+    predictions = backend.predict(task.NAME, run_dir / TRAIN / backend.BEST, [path for path, _ in found],
+                                  inference_options(record["options"], device), 0.0, root / paths.PRETRAINED,
+                                  agnostic=False)
+    outcomes = [(actual, prediction["probs"]) for (_, actual), [prediction] in zip(found, predictions)]
+    return task.thresholds(outcomes, spec["classes"])
 
 
 def evaluate_as(root: Path, spec: dict, run: str, dataset_id: str, mapping: dict[str, str],
@@ -334,6 +348,8 @@ def report(document: dict) -> list[str]:
         lines.append(f"  {dataset.pad(item['name'], width)}  {item['instances']:5d} {values}")
     if missing:
         lines.append(f"  not evaluated (no test instances): {', '.join(missing)}")
+    if document.get("thresholds"):
+        lines += tasks.get(document["task"]).threshold_lines(document["thresholds"])
     return lines
 
 

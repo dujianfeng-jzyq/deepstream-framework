@@ -46,6 +46,7 @@ class Result:
     consistency: dict
     engines: list[tuple[str, str, str]] = field(default_factory=list)  # (配置, 旧路径, 新路径)
     changed: list[str] = field(default_factory=list)
+    thresholds: list[str] = field(default_factory=list)  # 部署阈值在测试划分上的效果
 
 
 def publish(repo: Path, root: Path, spec: dict, run: str, dataset_id: str | None = None,
@@ -117,6 +118,7 @@ def publish(repo: Path, root: Path, spec: dict, run: str, dataset_id: str | None
                 "backend": record["backend"], "weights_sha256": record["weights"]["best_sha256"]},
         "evaluated_on": dataset_id, "metrics": evaluation["metrics"],
         "class_metrics": [item for item in evaluation["classes"] if item["instances"]],
+        **({"thresholds": evaluation["thresholds"]} if "thresholds" in evaluation else {}),
         "gate": gate, "classes": spec["classes"], "input": spec["input"], "output_layout": output_layout,
         **({"class_changes": class_changes(repo, spec, current)} if current and current.get("classes") !=
            spec["classes"] else {}),
@@ -127,7 +129,34 @@ def publish(repo: Path, root: Path, spec: dict, run: str, dataset_id: str | None
     }
     changed = _install(directory, spec, release, export_dir, {name: text for name, (text, _, _) in configs.items()})
     return Result(release_id, directory, gate, evaluation["metrics"], consistency,
-                  [(name, old, new) for name, (_, old, new) in configs.items()], changed)
+                  [(name, old, new) for name, (_, old, new) in configs.items()], changed,
+                  threshold_notes(directory, spec, evaluation.get("thresholds")))
+
+
+def threshold_notes(directory: Path, spec: dict, rows: list[dict] | None) -> list[str]:
+    """nvinfer 配置中的部署阈值在测试划分上的效果（扫描中的那一行），人据此决定是否调整阈值。"""
+    task = tasks.get(spec["task"])
+    if not rows or not hasattr(task, "THRESHOLD_KEY"):
+        return []
+    notes = []
+    for config in sorted(directory.glob("*.txt")):
+        value = (models.nvinfer_properties(config) or {}).get(task.THRESHOLD_KEY)
+        if value is None:
+            continue
+        try:
+            row = task.threshold_row(rows, float(value))
+        except ValueError:
+            row = None
+        if row is None:
+            notes.append(f"{config.name}: {task.THRESHOLD_KEY}={value} is not in the sweep (steps of 0.05); "
+                         f"see thresholds in {models.RELEASE}")
+            continue
+        per_class = ", ".join(f"{name} {item['recall']:.2f}/" + ("-" if item["precision"] is None else
+                                                                 f"{item['precision']:.2f}")
+                              for name, item in row["classes"].items())
+        notes.append(f"{config.name}: {task.THRESHOLD_KEY}={value} labels {row['labeled']:.1%} of the test crops; "
+                     f"recall/precision {per_class}")
+    return notes
 
 
 def candidates(root: Path, spec: dict, dataset_id: str | None = None,
@@ -405,7 +434,10 @@ def _metrics(root: Path, spec: dict, run: str, dataset_id: str, device: str | No
     run_dir, _ = runs.load(root, spec["id"], run)
     path = run_dir / runs.EVAL / dataset_id / runs.METRICS
     if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        # 早于阈值扫描的评估结果缺少它：重新评估一次（结果相同，另加扫描）。
+        if "thresholds" in document or not hasattr(tasks.get(spec["task"]), "thresholds"):
+            return document
     return runs.evaluate(root, spec, run, dataset_id, device)
 
 
@@ -548,6 +580,8 @@ def report(result: Result) -> list[str]:
     if gate["accepted_without_comparison"]:
         lines.append("  metrics accepted without comparison (--accept-metrics)")
     lines.append(f"  export consistency: {_consistency_text(result.consistency)}")
+    for note in result.thresholds:
+        lines.append(f"  {note}")
     for config, old, new in result.engines:
         lines.append(f"  {config}: model-engine-file {old} -> {new}")
     if not result.engines:

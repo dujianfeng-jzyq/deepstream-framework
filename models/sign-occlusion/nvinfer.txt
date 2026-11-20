@@ -25,5 +25,6 @@ input-object-min-width=16
 input-object-min-height=16
 # 同步分类：结果附在当前帧的目标上，不依赖跟踪器缓存。
 classifier-async-mode=0
-# softmax 概率不低于它才输出类别；“是”是少数类，阈值按发布记录中的每类 precision/recall 调整。
+# softmax 概率不低于它才输出类别；“是”是少数类，按 release.json 的 thresholds（每个阈值的每类
+# recall/precision，train eval 与 train publish 也打印）调整。
 classifier-threshold=0.5
