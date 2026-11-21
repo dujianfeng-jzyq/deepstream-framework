@@ -24,7 +24,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import media, paths, xanylabeling
+from . import media, paths, tasks, xanylabeling
 from .errors import TrainError
 
 SCHEMA = 1
@@ -54,6 +54,34 @@ def class_list(directory: Path, record: dict) -> list[str]:
             len(set(value)) != len(value):
         raise TrainError(f"{directory}: the classes of the source must be distinct names")
     return value
+
+
+def model_sources(root: Path, spec: dict) -> dict[str, list[str]]:
+    """模型的 data.sources 中每个来源当前的类别。"""
+    result = {}
+    for source in spec["data"]["sources"]:
+        directory = paths.source_dir(root, source)
+        result[source] = class_list(directory, read_record(directory))
+    return result
+
+
+def missing_classes(spec: dict, source_classes: dict[str, list[str]]) -> list[str]:
+    """模型用到的标签必须都在每个来源中，否则这个来源的图片无法为它作证（缺的类别在图上是背景）。
+    检测模型用到的是它的类别；二级模型用到的是触发它的父类别（cascade.classes），它的类别是属性值。"""
+    task = tasks.get(spec["task"])
+    problems = []
+    for source, names in source_classes.items():
+        missing = [name for name in task.source_labels(spec) if name not in names]
+        if not missing:
+            continue
+        if task.source_labels(spec) is spec["classes"]:
+            problems.append(f"source {source} has no class {', '.join(missing)}: its images cannot show them. "
+                            f"Add sources with train update {spec['id']} source add <source> and classes with "
+                            f"train update {spec['id']} add <class>, not by editing model.yaml")
+        else:
+            problems.append(f"source {source} has no class {', '.join(missing)} (cascade.classes of {spec['id']}): "
+                            "list only parent classes that the source labels")
+    return problems
 
 
 def review_classes(record: dict) -> dict[str, list[str]]:

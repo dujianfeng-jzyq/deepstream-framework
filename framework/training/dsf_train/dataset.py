@@ -18,7 +18,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import backends, lock, paths, sources, split, tasks, xanylabeling
+from . import backends, paths, sources, split, tasks, xanylabeling
 from .errors import TrainError
 
 SCHEMA = 1
@@ -33,22 +33,19 @@ class Result:
     manifest: dict
     skipped: Counter = field(default_factory=Counter)  # (来源, 原因) → 数量
     ignored_shapes: Counter = field(default_factory=Counter)  # 不收入的形状：原因 → 数量
-    notes: list[str] = field(default_factory=list)
 
 
 def prepare(repo: Path, root: Path, spec: dict) -> Result:
-    """类别依赖（§15.1）先于读取标注检查：模型的类别必须都在每个来源中，来源的类别必须与 sources.lock.json
-    的记录相同（记录中没有的来源在这里补记）。"""
+    """类别依赖（§15.1）先于读取标注检查：模型的类别必须都在每个来源中。"""
     task = tasks.get(spec["task"])
     backend = backends.get(spec["train"]["backend"] if isinstance(spec.get("train"), dict) else None, task.NAME)
     data = spec["data"]
     if not data["sources"]:
         raise TrainError(f"data.sources of {spec['id']} is empty: train update {spec['id']} source add <source>")
-    source_classes = lock.current(root, spec)
-    problems = lock.missing_classes(spec, source_classes)
+    source_classes = sources.model_sources(root, spec)
+    problems = sources.missing_classes(spec, source_classes)
     if problems:
         raise TrainError("\n".join(problems))
-    notes = lock.check(repo, root, spec, record_new=True, now=source_classes)
     params = data["split"]
     declared_ignore = set(data.get("ignore_classes") or [])
     samples, problems = [], []
@@ -116,7 +113,7 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
             shutil.rmtree(staging, ignore_errors=True)
             raise
     (models_root / paths.LATEST).write_text(dataset_id + "\n", encoding="utf-8")
-    return Result(dataset_id, directory, reused, manifest, skipped, ignored, notes)
+    return Result(dataset_id, directory, reused, manifest, skipped, ignored)
 
 
 def skip_reason(name: str, annotation, reviewing: dict[str, list[str]]) -> str:
@@ -166,8 +163,7 @@ def report(result: Result, spec: dict) -> list[str]:
     task = tasks.get(spec["task"])
     manifest = result.manifest
     state = "reused" if result.reused else "created"
-    lines = [f"  note: {note}" for note in result.notes]
-    lines.append(f"dataset {result.dataset_id} ({state}): {result.directory}")
+    lines = [f"dataset {result.dataset_id} ({state}): {result.directory}"]
     by_split = {name: [s for s in manifest["samples"] if s["split"] == name] for name in split.SPLITS}
     for name, items in by_split.items():
         negatives = sum(1 for s in items if not s["objects"])

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dsf_deploy.errors import DeployError
 
-from . import dataset, labeling, lock, paths, prelabel, publish, review, runs, sources, spec, update
+from . import dataset, labeling, paths, prelabel, publish, review, runs, sources, spec, update
 from .errors import TrainError
 
 
@@ -152,8 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                         "and no comparable published model); failed gates are never accepted")
     p.add_argument("--device", help="device for the gate's evaluations (defaults to TRAIN_DEVICE, then the run's device)")
 
-    p = commands.add_parser("update", help="change the sources or classes of a model, or show and confirm its "
-                            "class dependencies",
+    p = commands.add_parser("update", help="change the sources or classes of a model, or show them",
                             description="Without an operation, show the classes and the state of every source.")
     p.add_argument("model")
     p.add_argument("operation", nargs="?", choices=("source", "add", "rename", "retire"),
@@ -174,9 +173,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reason", default="",
                    help="with --skip-source, or source add: why the checked images need no review for the classes "
                         "the source gains")
-    p.add_argument("--confirm", action="store_true",
-                   help="record the current classes of every source in sources.lock.json after reviewing the "
-                        "differences")
 
     args = parser.parse_args(argv)
     repo = (args.repo or paths.repo_root()).resolve()
@@ -269,13 +265,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.dataset or args.option:
                     raise TrainError("--resume continues with the run's own dataset and options; "
                                      "drop --dataset and --option")
-                lock.check(repo, root, model)
                 run = args.resume
                 runs.resume(root, model, run)
             else:
                 options = _options(args.option)
                 if args.dataset:
-                    lock.check(repo, root, model)
                     dataset_id = args.dataset
                 else:
                     # 数据集按内容命名：标注没变时复用同一个，所以每次训练前准备只花读取标注的时间，
@@ -332,7 +326,6 @@ def main(argv: list[str] | None = None) -> int:
                     raise TrainError("name the run to publish (train publish <id> without a run only lists them)")
                 print("\n".join(publish.candidates(root, model, args.dataset, repo)))
                 return 0
-            lock.check(repo, root, model)
             result = publish.publish(repo, root, model, args.run, args.dataset, args.accept_metrics, args.device)
             print("\n".join(publish.report(result)))
         elif args.command == "update":
@@ -344,9 +337,9 @@ def main(argv: list[str] | None = None) -> int:
             adding = args.from_class or args.skip_source
             usage = ("usage: train update <id> [source add|remove <source> [--reason <text>] | add <class> "
                      "[--from <class>] [--skip-source <source> --reason <text>] | rename <old> <new> | "
-                     "retire <class> [--into <class>] | --confirm]")
+                     "retire <class> [--into <class>]]")
             if len(args.names) != arity or (args.into and args.operation != "retire") or \
-                    (adding and args.operation != "add") or (args.confirm and args.operation) or \
+                    (adding and args.operation != "add") or \
                     (args.operation == "source" and args.names[0] not in ("add", "remove")) or \
                     (args.reason and args.operation not in ("add", "source")):
                 raise TrainError(usage)
@@ -376,13 +369,8 @@ def main(argv: list[str] | None = None) -> int:
                 # 类别或来源变了：重新生成相关来源中的类别与属性文件（不再使用的随之删除）。
                 print("\n".join(result.lines + labeling.refresh(
                     repo, root, [*result.sources, *_related_sources(repo, args.model)])))
-            elif args.confirm:
-                lines = lock.confirm(repo, root, model)
-                print(f"confirmed the classes of the sources of {args.model} in {lock.path(repo, args.model)}")
-                print("\n".join(lines))
-                print(f"  commit {lock.FILE} with the model")
             else:
-                print("\n".join(lock.status(repo, root, model)))
+                print("\n".join(update.status(root, model)))
     except (TrainError, DeployError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

@@ -1,9 +1,8 @@
 """train update <id> <操作>：修改模型的类别与来源，连同来源的标注与其他模型（docs/training.md §15.3）。
 
 每次运行先完成全部检查（冲突、可写），再写入。写入顺序保证中断后重新执行同一命令即可完成：
-标注文件 → 来源记录 → sources.lock.json → 其他模型的 model.yaml → 本模型的 model.yaml（add 例外，
-见 add）。标注先改，
-来源记录还写着旧名称时 prepare 遇到新名称报“未知类别”，不会在不一致的状态下训练；重新执行时已改过的文件
+标注文件 → 来源记录 → 其他模型的 model.yaml → 本模型的 model.yaml（add 例外，见 add）。标注先改，来源记录还写着
+旧名称时 prepare 遇到新名称报“未知类别”，不会在不一致的状态下训练；重新执行时已改过的文件
 没有可改的形状，跳过；本模型的规格最后改，它改完即全部完成。
 """
 
@@ -15,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import lock, paths, sources, spec as specs, xanylabeling
+from . import paths, sources, spec as specs, xanylabeling
 from .errors import TrainError
 
 
@@ -62,18 +61,6 @@ def _users(models: dict[str, dict], names: set[str]) -> list[str]:
     return [model_id for model_id, spec in models.items() if names & set(spec["data"]["sources"])]
 
 
-def _require_confirmed(repo: Path, root: Path, spec: dict, translate) -> None:
-    """操作的起点必须是确认过的状态：否则改写后的差异里混着人还没看过的变化。记录按这次操作换算后与来源
-    相同也算：上一次执行在改写来源之后中断了。"""
-    recorded = lock.read(repo, spec["id"])
-    now = lock.current(root, spec)
-    stale = [source for source, names in now.items()
-             if source not in recorded or names not in (recorded[source], translate(recorded[source]))]
-    if stale:
-        raise TrainError(f"the classes of {', '.join(stale)} are not confirmed for {spec['id']}; review them "
-                         f"with train update {spec['id']} and confirm with --confirm first")
-
-
 def _annotations(root: Path, source: str) -> list[Path]:
     directory = paths.source_dir(root, source)
     record = sources.read_record(directory)
@@ -116,22 +103,30 @@ def _source_files(root: Path, names: list[str]) -> list[Path]:
     return [path for path in files if path.exists()]
 
 
-def _refresh_locks(repo: Path, root: Path, models: dict[str, dict], changed: dict[str, list[str]],
-                   translate) -> tuple[list[str], list[str]]:
-    """被改写的来源的锁记录：记录按 translate 换算后等于来源的新类别时自动更新（这次修改不改变它对这个模型的
-    含义），否则留给人确认。返回 (自动更新的模型, 需要确认的模型)。"""
-    updated, pending = [], []
-    for model_id in _users(models, set(changed)):
-        recorded = lock.read(repo, model_id)
-        entries = {source: recorded[source] for source in changed if source in recorded}
-        new = {source: translate(model_id, names) for source, names in entries.items()}
-        good = {source: names for source, names in new.items() if names == changed[source]}
-        if good and any(recorded[source] != names for source, names in good.items()):
-            lock.write(repo, model_id, {**recorded, **good})
-            updated.append(model_id)
-        if len(good) != len(entries):
-            pending.append(model_id)
-    return updated, pending
+def _shared_lines(models: dict[str, dict], spec_id: str, unchecked: dict[str, int]) -> list[str]:
+    """来源中被撤销 checked 的图片对共用来源的其他模型同样不进入数据集，直到重新勾选。"""
+    lines = []
+    for model_id in sorted(_users(models, {s for s, count in unchecked.items() if count})):
+        if model_id != spec_id:
+            names = [s for s in models[model_id]["data"]["sources"] if unchecked.get(s)]
+            lines.append(f"  note: {model_id} also uses {', '.join(names)}: the unchecked images leave its dataset "
+                         "too until they are checked again")
+    return lines
+
+
+def _publish_rename_note(repo: Path, spec: dict, name: str) -> list[str]:
+    """发布时同一类别号上一删一增读作改名（publish.class_changes）。上次发布以来删去了最后一个类别、现在又在
+    这个位置追加新类别时两者无法区分，提醒人。"""
+    from dsf_deploy import models as deploy_models
+    path = paths.model_dir(repo, spec["id"]) / deploy_models.RELEASE
+    if not path.is_file():
+        return []
+    published = json.loads(path.read_text(encoding="utf-8")).get("classes") or []
+    index = len(spec["classes"])
+    if index < len(published) and published[index] not in spec["classes"]:
+        return [f"  note: class {index} was {published[index]} in the current release, so publish compares {name} "
+                f"with it as if {published[index]} had been renamed to {name}"]
+    return []
 
 
 def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
@@ -147,7 +142,6 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
     def renamed(names: list[str]) -> list[str]:
         return [new if name == old else name for name in names]
 
-    _require_confirmed(repo, root, spec, renamed)
     models = _models(repo)
     scope_models, scope_sources = {spec["id"]}, set(spec["data"]["sources"])
     while True:
@@ -174,12 +168,9 @@ def rename(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
     for source in sorted(scope_sources):
         count = _rewrite_source(root, source, {old: new}, after[source])
         result.lines.append(f"  source {source}: {count} annotations rewritten")
-    updated, pending = _refresh_locks(repo, root, models, after, lambda _, names: renamed(names))
     for model_id in sorted(scope_models - {spec["id"]}) + [spec["id"]]:
-        lock.record_rename(repo, model_id, old, new)  # 中断后重新执行时再记一次，结果相同
         specs.write_classes(repo, model_id, renamed(models[model_id]["classes"]))
         result.lines.append(f"  model {model_id}: class {models[model_id]['classes'].index(old)} renamed")
-    result.lines += _lock_lines(updated, pending)
     result.lines += _rewrite_cascades(repo, models, scope_models, old, new)
     result.lines += _republish_lines(repo, sorted(scope_models), sources_changed=True)
     return result
@@ -197,10 +188,6 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
         raise TrainError(f"--into must name another class of {spec['id']}")
     remaining = [c for c in classes if c != name]
 
-    def merged(names: list[str]) -> list[str]:
-        return [c for c in names if c != name] if into is not None else names
-
-    _require_confirmed(repo, root, spec, merged)
     models = _models(repo)
     children = _children(models, {spec["id"]}, name)
     if into is None and children:
@@ -230,12 +217,11 @@ def retire(repo: Path, root: Path, spec: dict, name: str, into: str | None = Non
     for source in sorted(own):
         count = _rewrite_source(root, source, {name: into}, after[source])
         result.lines.append(f"  source {source}: {count} annotations rewritten")
-    # 合并改变了来源的标注：只有本模型的记录自动更新，其他模型的数据变了（原来忽略的框成了 into），需要人确认。
-    updated, pending = _refresh_locks(
-        repo, root, models, after, lambda model_id, names: merged(names) if model_id == spec["id"] else names)
     specs.write_classes(repo, spec["id"], remaining)
     result.lines += _renumber_lines(classes, name)
-    result.lines += _lock_lines(updated, pending)
+    # 同名类别在共用来源的模型之间含义相同：合并是说 name 就是 into，其他有 into 的模型的数据随之变多。
+    result.lines += [f"  note: {model_id} also has {into}: its {into} boxes in the shared sources now include the "
+                     f"former {name} boxes" for model_id in others if into in _labels(models[model_id])]
     result.lines += _rewrite_cascades(repo, models, {spec["id"]}, name, into)
     result.lines += _republish_lines(repo, [spec["id"]], sources_changed=True)
     return result
@@ -266,7 +252,6 @@ def add(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = 
     def added(names: list[str]) -> list[str]:
         return names if name in names else [*names, name]
 
-    _require_confirmed(repo, root, spec, added)
     models = _models(repo)
     plans = {}  # 来源 → 这次的复核名单（None：来源已有这个类别且名单已完成）
     for source in own:
@@ -303,12 +288,10 @@ def add(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = 
             which = f"with {from_class} boxes " if from_class else ""
             result.lines.append(f"  source {source}: class added, {len(plan['files'])} checked images {which}"
                                 f"unchecked for review")
-    changed = {source: names for source, names in after.items() if plans[source] is not None}
-    updated, pending = _refresh_locks(
-        repo, root, models, changed, lambda model_id, names: added(names) if model_id == spec["id"] else names)
     specs.write_classes(repo, spec["id"], [*spec["classes"], name])
-    result.lines += _lock_lines(updated, pending)
-    result.lines += _republish_lines(repo, [spec["id"]], sources_changed=bool(changed))
+    result.lines += _shared_lines(models, spec["id"], {s: len(plan["files"]) for s, plan in plans.items() if plan})
+    result.lines += _publish_rename_note(repo, spec, name)
+    result.lines += _republish_lines(repo, [spec["id"]], sources_changed=any(plans.values()))
     if any(plan and plan["files"] for plan in plans.values()):
         result.lines.append(f"  next: label {name} in a few dozen of these images and check them, train v0, then "
                             f"train prelabel {spec['id']} --source <source> --class {name} --run <v0>")
@@ -343,7 +326,7 @@ def add_source(repo: Path, root: Path, spec: dict, source: str, reason: str = ""
     - 已为其他类别标注过的来源追加缺少的类别；已勾选的图片可能有这些类别的目标，与 add 一样改为未勾选、记入
       复核名单（每个类别一份）。给出 reason 时只追加类别、不撤销，理由记入名单。
     - 二级模型不改变来源的类别：来源必须已为它的 cascade.classes 标注（先把来源加入父模型）。
-    写入顺序：来源记录与标注 → sources.lock.json → model.yaml；中断后重新执行同一命令即可完成。"""
+    写入顺序：来源记录与标注 → model.yaml；中断后重新执行同一命令即可完成。"""
     directory = paths.source_dir(root, source)
     record = sources.read_record(directory)
     if source in spec["data"]["sources"]:
@@ -380,22 +363,13 @@ def add_source(repo: Path, root: Path, spec: dict, source: str, reason: str = ""
             lines.append(f"  source {source}: added {', '.join(missing)}; {done}")
         else:
             lines.append(f"  source {source}: already labeled for the classes of {spec['id']}")
-    lock_path = lock.path(repo, spec["id"])
-    _check_writable(_source_files(root, [source]) + [specs.path(repo, spec["id"])] +
-                    ([lock_path] if lock_path.exists() else []))
+    _check_writable(_source_files(root, [source]) + [specs.path(repo, spec["id"])])
     if classes != have or plans or unfinished:
         _extend(directory, classes, plans + unfinished)
-    models = _models(repo)
-    updated, pending = [], []
-    if classes != have:  # 共用这个来源的其他模型：来源多了类别，由它们确认
-        updated, pending = _refresh_locks(repo, root, models, {source: classes}, lambda _, names: names)
-    lock.write(repo, spec["id"], {**lock.read(repo, spec["id"]), source: classes})
     names = [*spec["data"]["sources"], source]
     specs.write_sources(repo, spec["id"], names)
-    result = Result([f"added source {source} to {spec['id']} (data.sources: {', '.join(names)})", *lines,
-                     f"  recorded the classes of {source} in {lock_path} (commit it with the model)"], [source])
-    result.lines += _lock_lines(updated, pending)
-    return result
+    lines += _shared_lines(_models(repo), spec["id"], {source: len(plans[0]["files"]) if plans else 0})
+    return Result([f"added source {source} to {spec['id']} (data.sources: {', '.join(names)})", *lines], [source])
 
 
 def remove_source(repo: Path, root: Path, spec: dict, source: str) -> Result:
@@ -403,17 +377,13 @@ def remove_source(repo: Path, root: Path, spec: dict, source: str) -> Result:
     加回来。"""
     if source not in spec["data"]["sources"]:
         raise TrainError(f"{source} is not a source of {spec['id']}")
-    recorded = lock.read(repo, spec["id"])
-    if source in recorded:
-        lock.write(repo, spec["id"], {name: classes for name, classes in recorded.items() if name != source})
     names = [name for name in spec["data"]["sources"] if name != source]
     specs.write_sources(repo, spec["id"], names)
     return Result([f"removed source {source} from {spec['id']} (data.sources: {', '.join(names) or 'none'}); the "
                    "source itself is unchanged"], [source])
 
 
-# 二级模型：类别是父类别框上一个属性的取值（§12）。改动的是标注中的属性值，不是来源的类别，所以来源的类别与
-# sources.lock.json 的类别依赖不变；改名记入 renamed，发布时与当前发布的类别对应。
+# 二级模型：类别是父类别框上一个属性的取值（§12）。改动的是标注中的属性值，不是来源的类别，所以来源的类别不变。
 
 
 def _value_scope(repo: Path, root: Path, spec: dict) -> tuple[str, set[str], list[Path]]:
@@ -450,7 +420,6 @@ def rename_value(repo: Path, root: Path, spec: dict, old: str, new: str) -> Resu
         raise TrainError(f"{spec['id']} already has {new} in classes or data.ignore_classes")
     attribute, _, files = _value_scope(repo, root, spec)
     count = sum(xanylabeling.rewrite_attribute(path, attribute, {old: new}) for path in files)
-    lock.record_rename(repo, spec["id"], old, new)   # 中断后重新执行时再记一次，结果相同
     specs.write_classes(repo, spec["id"], [new if name == old else name for name in spec["classes"]])
     return Result([f"renamed {old} to {new} in {spec['id']}", f"  {count} boxes with {attribute}={old} rewritten",
                    *_value_lines(repo, spec, spec["data"]["sources"])], list(spec["data"]["sources"]))
@@ -505,6 +474,7 @@ def add_value(repo: Path, root: Path, spec: dict, name: str, from_class: str | N
         specs.write_data_list(repo, spec["id"], "ignore_classes", [v for v in ignored if v != name])
         lines.append(f"  {name} is no longer in data.ignore_classes: its boxes are samples from now on")
     specs.write_classes(repo, spec["id"], [*spec["classes"], name])
+    lines += _publish_rename_note(repo, spec, name)
     return Result([*lines, *_value_lines(repo, spec, spec["data"]["sources"])], list(spec["data"]["sources"]))
 
 
@@ -533,13 +503,6 @@ def _renumber_lines(classes: list[str], name: str) -> list[str]:
             "that identifies classes by number must follow"]
 
 
-def _lock_lines(updated: list[str], pending: list[str]) -> list[str]:
-    lines = [f"  updated {lock.FILE} of {model_id}" for model_id in updated]
-    lines += [f"  {model_id} must review the changed sources: train update {model_id} --confirm"
-              for model_id in pending]
-    return lines
-
-
 def _republish_lines(repo: Path, model_ids: list[str], sources_changed: bool = False) -> list[str]:
     from dsf_deploy import models as deploy_models
     published = [m for m in model_ids if (paths.model_dir(repo, m) / deploy_models.RELEASE).is_file()]
@@ -550,4 +513,21 @@ def _republish_lines(repo: Path, model_ids: list[str], sources_changed: bool = F
     if sources_changed:
         lines.append("  reopen the changed sources in X-AnyLabeling and load the .classes.txt and .attributes.json "
                      "again")
+    return lines
+
+
+def status(root: Path, spec: dict) -> list[str]:
+    """train update <id> 不带操作时：类别，每个来源的复核进度，以及模型的类别不在来源中的问题。"""
+    lines = [f"{spec['id']}: {len(spec['classes'])} classes"]
+    lines += [f"  {index:3d} {name}" for index, name in enumerate(spec["classes"])]
+    now = sources.model_sources(root, spec)
+    for source in now:
+        directory = paths.source_dir(root, source)
+        record = sources.read_record(directory)
+        lines.append(f"  source {source}: {len(record['images'])} images")
+        for review, checked, total in sources.review_progress(directory, record):
+            scope = f" (images with {review['from']})" if review.get("from") else ""
+            lines.append(f"    review of {review['class']}{scope} since {review['at']}: {checked} of {total} "
+                         "checked again")
+    lines += [f"  {problem}" for problem in sources.missing_classes(spec, now)]
     return lines

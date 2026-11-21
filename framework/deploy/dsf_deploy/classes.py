@@ -1,7 +1,7 @@
 """类别列表的差异（docs/training.md §15.1）。
 
 下游（模型、服务）记录确认时上游的类别列表，顺序即类别号。列表不同时按名称与位置报告差异，人据此判断
-下游是否需要修改：训练工具的 sources.lock.json 与部署工具的 models.lock.json 用同一套说法。
+下游是否需要修改：部署工具的 models.lock.json 与训练工具发布时的类别变化（改名的判断）用同一套说法。
 """
 
 from __future__ import annotations

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from dsf_deploy import layout, models, naming
 
-from . import backends, dataset, lock, onnxio, paths, runs, sources, tasks
+from . import backends, dataset, onnxio, paths, runs, sources, tasks
 from .errors import TrainError
 from .tasks import detect
 
@@ -387,7 +387,7 @@ def class_mapping(repo: Path, root: Path, spec: dict, current: dict) -> tuple[di
 
 
 def class_changes(repo: Path, spec: dict, current: dict) -> dict:
-    """相对当前发布的类别变化：改名（按 train update 的记录）、删除与新增。"""
+    """相对当前发布的类别变化：改名、删除与新增。"""
     survivors = _survivors(repo, spec, current)
     return {"renamed": {old: new for old, new in survivors.items() if old != new},
             "removed": [old for old in current["classes"] if old not in survivors],
@@ -395,14 +395,14 @@ def class_changes(repo: Path, spec: dict, current: dict) -> dict:
 
 
 def _survivors(repo: Path, spec: dict, current: dict) -> dict[str, str]:
-    """当前发布中仍在规格里的类别：旧名 → 现在的名称。改过名的按记录对应；名称被另一个类别改名占用的旧类别
-    不算留下（它已被删除，同名的是另一个类别）。"""
-    names = lock.renamed(repo, spec["id"])
-    result = {}
-    for old in current["classes"]:
-        new = names.get(old, old if old not in names.values() else None)
-        if new in spec["classes"]:
-            result[old] = new
+    """当前发布中仍在规格里的类别：旧名 → 现在的名称。名称还在的按名称对应；同一类别号上一删一增是改名
+    （train update 的 rename 原位改名、retire 让后面的类别前移、add 追加在最后，与 dsf_deploy.classes.diff 的
+    说法相同）。"""
+    old, new = current["classes"], spec["classes"]
+    result = {name: name for name in old if name in new}
+    for index, name in enumerate(old):
+        if name not in new and index < len(new) and new[index] not in old:
+            result[name] = new[index]
     return result
 
 
@@ -531,13 +531,12 @@ def _install(directory: Path, spec: dict, release: dict, export_dir: Path, confi
         for name, text in configs.items():
             (staged / name).write_text(text, encoding="utf-8")
         paths.write_json(staged / models.RELEASE, release)
-        renames_cleared = lock.clear_renamed(staged)  # 改名记录只覆盖到这次发布
         problems = models.check_model(staged, directory.parent)
         if problems:
             raise TrainError(f"the new contents of {directory} fail the model check, nothing was changed:\n  " +
                              "\n  ".join(problems))
         targets = [f"{models.ARTIFACTS}/{ONNX}", f"{models.ARTIFACTS}/{LABELS}", *configs,
-                   *([lock.FILE] if renames_cleared else []), models.RELEASE]
+                   models.RELEASE]
         changed = []
         for relative in targets:
             source, target = staged / relative, directory / relative

@@ -19,7 +19,7 @@ from unittest import mock
 
 from deploy_support import ROOT
 from dsf_deploy import classes as class_diff, models
-from dsf_train import (backends, cli, dataset, labeling, lock, media, paths, publish, runs, sources, spec,
+from dsf_train import (backends, cli, dataset, labeling, media, paths, publish, runs, sources, spec,
                        split, update, xanylabeling)
 from dsf_train.backends import ultralytics
 from dsf_train.tasks import classify, detect
@@ -399,7 +399,7 @@ class ClassDiffTest(unittest.TestCase):
 
 
 class ClassDependencyTest(TrainingTestCase):
-    """来源 → 模型的类别依赖：sources.lock.json（docs/training.md §15.1）。"""
+    """来源 → 模型的类别依赖：模型的类别必须在每个来源的 classes 中（docs/training.md §15.1）。"""
     def setUp(self):
         super().setUp()
         image(self.raw / "a/f_0.jpg", "red")
@@ -415,33 +415,6 @@ class ClassDependencyTest(TrainingTestCase):
         record = sources.read_record(self.source(source))
         record["classes"] = names
         paths.write_json(self.source(source) / paths.SOURCE_RECORD, record)
-
-    def recorded(self):
-        return json.loads(lock.path(self.repo, "m").read_text(encoding="utf-8"))
-
-    def test_prepare_records_the_sources_and_refuses_changes_until_confirmed(self):
-        self.assertEqual(sources.read_record(self.source())["classes"], CLASSES)
-        result = self.prepare()
-        self.assertIn("  note: recorded the classes of source batch-01 in "
-                      f"{lock.path(self.repo, 'm')} (commit it with the model)", dataset.report(result, self.spec()))
-        self.assertEqual(self.recorded(), {"schema": 1, "sources": {"batch-01": CLASSES}})
-        self.assertEqual(self.prepare().notes, [])  # 记录不变时不再写入
-        self.set_source_classes(CLASSES + ["新类别"])  # 另一个模型给共用的来源新增了类别
-        with self.assertRaisesRegex(TrainError, "changed since m confirmed them(.|\n)*source batch-01:\n"
-                                                "    added 新类别 \\(class 3\\)(.|\n)*train update m --confirm"):
-            self.prepare()
-        code, _, err = self.train("run", "m")
-        self.assertEqual(code, 1)
-        self.assertIn("added 新类别 (class 3)", err)
-        code, out, _ = self.train("update", "m")
-        self.assertEqual(code, 0)
-        self.assertIn("  source batch-01: changed since confirmed:\n    added 新类别 (class 3)", out)
-        code, out, _ = self.train("update", "m", "--confirm")
-        self.assertEqual(code, 0)
-        self.assertIn("  source batch-01:\n    added 新类别 (class 3)", out)
-        self.assertEqual(self.recorded()["sources"]["batch-01"], CLASSES + ["新类别"])
-        self.prepare()
-        self.assertIn("  source batch-01: confirmed", self.train("update", "m")[1])
 
     def test_classes_of_the_source_the_model_does_not_use_are_ignored(self):
         self.set_source_classes(CLASSES + ["护栏"])
@@ -459,29 +432,15 @@ class ClassDependencyTest(TrainingTestCase):
         path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))  # 手改规格
         with self.assertRaisesRegex(TrainError, "source batch-01 has no class 新类别(.|\n)*train update m add"):
             self.prepare()
-        self.assertFalse(lock.path(self.repo, "m").exists())
-        code, _, err = self.train("update", "m", "--confirm")
-        self.assertEqual(code, 1)
-        self.assertIn("source batch-01 has no class 新类别", err)
+        self.assertIn("  source batch-01 has no class 新类别", self.train("update", "m")[1])
         image(self.tmp / "more/x.jpg", "white")
         sources.Importer(self.root, "batch-01").run([self.tmp / "more"])
         self.assertEqual(sources.read_record(self.source())["classes"], CLASSES)  # 导入不改来源的类别
 
-    def test_sources_added_to_or_removed_from_the_model(self):
+    def test_classes_another_model_adds_to_a_shared_source_are_ignored(self):
         first = self.prepare().dataset_id
-        image(self.tmp / "more/x.jpg", "white")
-        annotation(self.tmp / "more/x.json", NEGATIVE, checked=True)
-        self.import_(self.tmp / "more", source="batch-02")
-        self.set_data(sources=["batch-01", "batch-02"])
-        code, _, err = self.train("run", "m", "--dataset", first)   # 不经 prepare 的 run 不补记
-        self.assertIn("does not record the classes of batch-02: run train prepare m first", err)
-        self.assertEqual(self.prepare().notes, [f"recorded the classes of source batch-02 in "
-                                                f"{lock.path(self.repo, 'm')} (commit it with the model)"])
-        self.set_data(sources=["batch-02"])
-        self.assertEqual(self.prepare().notes,
-                         [f"dropped source batch-01 from {lock.path(self.repo, 'm')}: it is no longer in data.sources"])
-        self.assertEqual(sorted(self.recorded()["sources"]), ["batch-02"])
-
+        self.set_source_classes(CLASSES + ["新类别"])  # 另一个模型给共用的来源新增了类别
+        self.assertEqual(self.prepare().dataset_id, first)
 
 class WriteClassesTest(TrainingTestCase):
     def test_classes_are_rewritten_in_place(self):
@@ -528,9 +487,6 @@ class UpdateTest(TrainingTestCase):
     def source_classes(self):
         return sources.read_record(self.source())["classes"]
 
-    def locked(self, model_id):
-        return lock.read(self.repo, model_id)["batch-01"]
-
     def test_rename_rewrites_the_sources_and_follows_the_models_sharing_them(self):
         code, out, err = self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")
         self.assertEqual(code, 0, err)
@@ -542,7 +498,6 @@ class UpdateTest(TrainingTestCase):
         self.assertEqual(self.spec()["classes"], renamed)
         self.assertEqual(read_lines(self.source() / "m.classes.txt"), renamed)
         self.assertEqual(spec.load(self.repo, "m2")["classes"], ["龙门架A", "防撞桶"])  # 不用它的模型不变
-        self.assertEqual((self.locked("m"), self.locked("m2")), (renamed, renamed))  # 两边的记录都自动更新
         for model_id in ("m", "m2"):
             dataset.prepare(self.repo, self.root, spec.load(self.repo, model_id))
         # 共用的类别：m2 一起改名
@@ -559,9 +514,6 @@ class UpdateTest(TrainingTestCase):
         record = sources.read_record(self.source())
         record["classes"] = CLASSES + ["圆牌"]
         paths.write_json(self.source() / paths.SOURCE_RECORD, record)
-        code, _, err = self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")
-        self.assertIn("not confirmed for m", err)  # 起点必须是确认过的状态
-        self.train("update", "m", "--confirm")
         code, _, err = self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")
         self.assertIn("source batch-01 already has a class 圆牌", err)
         self.assertEqual(self.labels("f_0.json"), ["标志牌(圆牌)"])
@@ -586,11 +538,12 @@ class UpdateTest(TrainingTestCase):
         self.assertEqual(self.labels("f_0.json"), ["防撞桶"])
         self.assertEqual(self.source_classes(), ["龙门架A", "防撞桶"])
         self.assertEqual(self.spec()["classes"], ["龙门架A", "防撞桶"])
-        self.assertEqual(self.locked("m"), ["龙门架A", "防撞桶"])
-        self.assertIn("m2 must review the changed sources: train update m2 --confirm", out)
+        self.assertIn("  note: m2 also has 防撞桶: its 防撞桶 boxes in the shared sources now include the former "
+                      "标志牌(圆牌) boxes", out)
         dataset.prepare(self.repo, self.root, self.spec())
-        with self.assertRaisesRegex(TrainError, "removed 标志牌\\(圆牌\\) \\(was class 0\\)"):
-            dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2"))
+        sample = next(s for s in dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2")).manifest["samples"]
+                      if s["image"] == "f_0.jpg")
+        self.assertEqual([o["class"] for o in sample["objects"]], [1])  # m2 的 防撞桶
 
     def checked(self, name):
         return xanylabeling.read(self.source() / f"{name}.json").checked
@@ -603,7 +556,8 @@ class UpdateTest(TrainingTestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("added 防撞墩 to m as class 3", out)
         self.assertIn("  source batch-01: class added, 2 checked images unchecked for review", out)
-        self.assertIn("m2 must review the changed sources: train update m2 --confirm", out)
+        self.assertIn("  note: m2 also uses batch-01: the unchecked images leave its dataset too until they are "
+                      "checked again", out)
         self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, False))
         self.assertEqual(self.labels("f_0.json"), ["标志牌(圆牌)"])  # 只改 checked
         [review] = self.reviews()
@@ -611,7 +565,6 @@ class UpdateTest(TrainingTestCase):
                          ("防撞墩", None, ["f_0.jpg", "f_2.jpg"], True))
         self.assertEqual(self.source_classes(), CLASSES + ["防撞墩"])
         self.assertEqual(self.spec()["classes"], CLASSES + ["防撞墩"])
-        self.assertEqual(self.locked("m"), CLASSES + ["防撞墩"])
         with self.assertRaisesRegex(TrainError, "no checked images"):
             dataset.prepare(self.repo, self.root, self.spec())
         xanylabeling.update(self.source() / "f_0.json", checked=True)  # 人补框后重新勾选
@@ -627,6 +580,15 @@ class UpdateTest(TrainingTestCase):
         self.assertEqual(code, 0, err)
         [accepted] = self.reviews()[0]["accepted"]
         self.assertEqual((accepted["reason"], accepted["images"]), ("夜间画面，没有防撞墩", ["f_2.jpg"]))
+
+    def test_adding_where_a_retired_last_class_was_is_pointed_out(self):
+        paths.write_json(self.repo / "models/m/release.json", {"classes": CLASSES})
+        self.assertEqual(self.train("update", "m", "retire", "防撞桶")[0], 0)
+        code, out, err = self.train("update", "m", "add", "防撞墩")
+        self.assertEqual(code, 0, err)
+        self.assertIn("  note: class 2 was 防撞桶 in the current release, so publish compares 防撞墩 with it as if "
+                      "防撞桶 had been renamed to 防撞墩", out)
+        self.assertNotIn("note: class", self.train("update", "m", "add", "护栏")[1])
 
     def test_add_from_a_class_unchecks_only_the_images_with_it(self):
         code, out, err = self.train("update", "m", "add", "标志牌(方牌)", "--from", "标志牌(圆牌)")
@@ -649,7 +611,6 @@ class UpdateTest(TrainingTestCase):
     def test_a_source_that_has_the_class_already_is_not_reviewed_again(self):
         self.assertEqual(self.train("update", "m2", "add", "防撞墩")[0], 0)
         xanylabeling.update(self.source() / "f_0.json", checked=True)
-        # 来源的变化正是 m 要做的这次修改，不必先 --confirm
         code, out, err = self.train("update", "m", "add", "防撞墩")
         self.assertEqual(code, 0, err)
         self.assertIn("  source batch-01: already has 防撞墩, unchanged", out)
@@ -667,8 +628,6 @@ class UpdateTest(TrainingTestCase):
                 update.add(self.repo, self.root, self.spec(), "防撞墩")
         self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, True))
         self.assertFalse(self.reviews()[0]["revoked"])
-        with self.assertRaisesRegex(TrainError, "changed since m2 confirmed"):
-            dataset.prepare(self.repo, self.root, spec.load(self.repo, "m2"))  # 其他模型不会用撤销了一半的来源
         update.add(self.repo, self.root, self.spec(), "防撞墩")
         self.assertEqual((self.checked("f_0"), self.checked("f_2")), (False, False))
         [review] = self.reviews()
@@ -909,7 +868,6 @@ class RunTest(RunTestCase):
         self.set_data(sources=["batch-01", "batch-02"])
         path = spec.path(self.repo, "m")
         path.write_text(path.read_text().replace("evaluate:\n", "evaluate:\n  slices: [source]\n"))
-        lock.check(self.repo, self.root, self.spec(), record_new=True)
         self.assertEqual(self.train("prepare", "m")[0], 0)
         code, out, err = self.train("run", "m")
         self.assertEqual(code, 0, err)
@@ -1246,15 +1204,12 @@ class ChangedClassesGateTest(RunTestCase):
         self.assertEqual(publish.class_changes(self.repo, self.spec(), self.current),
                          {"renamed": {}, "removed": [], "added": ["防撞墩"]})
 
-    def test_renamed_classes_are_matched_by_the_recorded_rename(self):
+    def test_renamed_classes_are_matched_by_their_class_id(self):
         second, evaluation = self.retrain("rename", "标志牌(圆牌)", "圆牌")
-        self.assertEqual(lock.renamed(self.repo, "m"), {"标志牌(圆牌)": "圆牌"})
         regression = self.gate(evaluation)["regression"]
         self.assertEqual((regression["classes"], regression["renamed"]), (["圆牌"], {"标志牌(圆牌)": "圆牌"}))
         self.assertEqual(publish.class_changes(self.repo, self.spec(), self.current),
                          {"renamed": {"标志牌(圆牌)": "圆牌"}, "removed": [], "added": []})
-        self.assertTrue(lock.clear_renamed(self.repo / "models/m"))  # 发布后清空
-        self.assertEqual(lock.renamed(self.repo, "m"), {})
 
     def test_the_class_a_new_class_was_split_from_is_not_compared(self):
         second, evaluation = self.retrain("add", "标志牌(方牌)", "--from", "标志牌(圆牌)")
@@ -1279,16 +1234,19 @@ class ChangedClassesGateTest(RunTestCase):
                          [("防撞墩", count - 1, count)])
 
 
-class RenameRecordTest(TrainingTestCase):
-    def test_renames_are_composed(self):
-        lock.record_rename(self.repo, "m", "A", "B")
-        lock.record_rename(self.repo, "m", "B", "C")
-        self.assertEqual(lock.renamed(self.repo, "m"), {"A": "C"})
-        lock.write(self.repo, "m", {"batch-01": ["x"]})  # 写来源记录时保留改名记录
-        self.assertEqual(lock.renamed(self.repo, "m"), {"A": "C"})
-        lock.record_rename(self.repo, "m", "C", "A")  # 改回原名
-        self.assertEqual(lock.renamed(self.repo, "m"), {})
-        self.assertEqual(lock.read(self.repo, "m"), {"batch-01": ["x"]})
+class ClassChangesTest(unittest.TestCase):
+    """相对当前发布的类别变化：名称还在的按名称对应，同一类别号上一删一增是改名。"""
+    def changes(self, old, new):
+        return publish.class_changes(None, {"classes": new}, {"classes": old})
+
+    def test_changes_are_read_from_names_and_class_ids(self):
+        self.assertEqual(self.changes(["a", "b", "c"], ["a", "x", "c"]),
+                         {"renamed": {"b": "x"}, "removed": [], "added": []})
+        self.assertEqual(self.changes(["a", "b", "c"], ["b", "c", "d"]),   # retire a，add d：后面的类别前移
+                         {"renamed": {}, "removed": ["a"], "added": ["d"]})
+        self.assertEqual(self.changes(["a", "b", "c"], ["y", "c"]),        # retire b，再把 a 改名为 y
+                         {"renamed": {"a": "y"}, "removed": ["b"], "added": []})
+        self.assertEqual(self.changes(["a", "b"], ["b", "a"]), {"renamed": {}, "removed": [], "added": []})
 
 
 class UltralyticsPredictTest(unittest.TestCase):
@@ -1425,7 +1383,7 @@ class PublishTest(RunTestCase):
         self.assertIn(f"identical to the published release {release['release']}", err)   # 不为同一模型换 engine 路径
         self.assertEqual(self.snapshot(), before)
 
-    def test_publishing_after_a_rename_records_the_change_and_clears_the_rename(self):
+    def test_publishing_after_a_rename_records_the_change(self):
         self.assertEqual(self.train("publish", "m", self.run_id, "--accept-metrics")[0], 0)
         self.assertEqual(self.train("update", "m", "rename", "标志牌(圆牌)", "圆牌")[0], 0)
         self.assertEqual(self.train("prepare", "m")[0], 0)
@@ -1434,11 +1392,9 @@ class PublishTest(RunTestCase):
         code, out, err = self.train("publish", "m", second)
         self.assertEqual(code, 0, err)
         self.assertIn("compared on the shared classes: 圆牌", out)
-        self.assertIn("sources.lock.json", out)  # 改名记录随发布清空
         release = json.loads((self.model_dir / "release.json").read_text(encoding="utf-8"))
         self.assertEqual(release["class_changes"], {"renamed": {"标志牌(圆牌)": "圆牌"}, "removed": [], "added": []})
         self.assertEqual(release["gate"]["regression"]["classes"], ["圆牌"])
-        self.assertEqual(lock.renamed(self.repo, "m"), {})
         self.assertEqual(models.check_model(self.model_dir), [])
 
     def test_the_minimum_gate_is_never_overridden(self):
@@ -1779,13 +1735,12 @@ class SecondStageValuesTest(SecondStageTestCase):
     def values(self):
         return [shape.attributes.get("遮挡") for shape in xanylabeling.read(self.source() / "a.json").shapes]
 
-    def test_rename_rewrites_the_values_and_is_recorded_for_publish(self):
+    def test_rename_rewrites_the_values(self):
         code, out, err = self.train("update", "occ", "rename", "是", "遮挡了")
         self.assertEqual(code, 0, err)
         self.assertIn("2 boxes with 遮挡=是 rewritten", out)
         self.assertEqual(self.values(), ["遮挡了", "否", "遮挡了"])   # 同一来源中同名属性含义相同
         self.assertEqual(self.child()["classes"], ["否", "遮挡了"])
-        self.assertEqual(lock.renamed(self.repo, "occ"), {"是": "遮挡了"})
         self.assertTrue(xanylabeling.read(self.source() / "a.json").checked)
         document = json.loads((self.source() / "m.attributes.json").read_text(encoding="utf-8"))
         self.assertEqual(document[self.PARENT_CLASS]["遮挡"], ["否", "遮挡了", "未知"])
@@ -1880,12 +1835,12 @@ class SecondStagePrepareTest(SecondStageTestCase):
     def test_the_sources_must_label_the_parent_classes(self):
         self.labeled_groups()
         self.edit_child(f"    - {self.PARENT_CLASS}\n", "    - 龙门架A\n")
-        source_labels = lock.current(self.root, self.child())
-        self.assertEqual(lock.missing_classes(self.child(), source_labels), [])
+        source_labels = sources.model_sources(self.root, self.child())
+        self.assertEqual(sources.missing_classes(self.child(), source_labels), [])
         record = sources.read_record(self.source())
         record["classes"] = ["防撞桶"]
         paths.write_json(self.source() / paths.SOURCE_RECORD, record)
-        [problem] = lock.missing_classes(self.child(), lock.current(self.root, self.child()))
+        [problem] = sources.missing_classes(self.child(), sources.model_sources(self.root, self.child()))
         self.assertIn("has no class 龙门架A (cascade.classes of occ)", problem)
 
     def test_renaming_a_parent_class_rewrites_the_second_stage_model(self):
@@ -1971,7 +1926,6 @@ class LabelingFilesTest(SecondStageTestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue((self.source() / "m.attributes.json").is_file())
         # 父类别改名同时改写二级模型的 cascade.classes：文件中新名称的类别带着它的属性。
-        lock.check(self.repo, self.root, self.spec(), record_new=True)  # rename 要求确认过的类别依赖
         code, out, err = self.train("update", "m", "rename", self.PARENT_CLASS, "圆牌")
         self.assertEqual(code, 0, err)
         self.assertEqual(read_lines(self.source() / "m.classes.txt")[0], "圆牌")
@@ -2023,7 +1977,6 @@ class SourceUpdateTest(SecondStageTestCase):
         self.assertIn("source new: labeled for the 3 classes of m from now on", out)
         self.assertIn("note: 1 checked annotations came with the import", out)
         self.assertEqual(sources.read_record(self.source("new"))["classes"], CLASSES)
-        self.assertEqual(lock.read(self.repo, "m")["new"], CLASSES)
         self.assertEqual(self.spec()["data"]["sources"], ["batch-01", "new"])
         # 只改了 data.sources 那一行
         changed = [(a, b) for a, b in zip(text.splitlines(), spec.path(self.repo, "m").read_text().splitlines())
@@ -2035,14 +1988,12 @@ class SourceUpdateTest(SecondStageTestCase):
         code, out, err = self.train("update", "occ", "source", "add", "new")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.child()["data"]["sources"], ["batch-01", "new"])
-        self.assertEqual(lock.read(self.repo, "occ")["new"], CLASSES)
         document = json.loads((self.source("new") / "m.attributes.json").read_text(encoding="utf-8"))
         self.assertEqual(document[self.PARENT_CLASS], {"遮挡": ["否", "是", "未知"]})   # 标注前就有全部取值
         self.assertIn("already a source of occ", self.train("update", "occ", "source", "add", "new")[2])
 
         code, out, err = self.train("update", "m", "source", "remove", "new")
         self.assertEqual(code, 0, err)
-        self.assertNotIn("new", lock.read(self.repo, "m"))
         self.assertEqual(sources.read_record(self.source("new"))["classes"], CLASSES)   # 来源不变
         self.assertTrue((self.source("new") / "m.classes.txt").is_file())   # occ 还在用：父模型的文件保留
         self.assertEqual(self.train("update", "occ", "source", "remove", "new")[0], 0)
