@@ -109,7 +109,8 @@ def missing_classes(spec: dict, source_classes: dict[str, list[str]]) -> list[st
             continue
         if task.source_labels(spec) is spec["classes"]:
             problems.append(f"source {source} has no class {', '.join(missing)}: its images cannot show them. "
-                            f"Add classes with train update {spec['id']} add <class>, not by editing model.yaml")
+                            f"Add sources with train update {spec['id']} source add <source> and classes with "
+                            f"train update {spec['id']} add <class>, not by editing model.yaml")
         else:
             problems.append(f"source {source} has no class {', '.join(missing)} (cascade.classes of {spec['id']}): "
                             "list only parent classes that the source labels")

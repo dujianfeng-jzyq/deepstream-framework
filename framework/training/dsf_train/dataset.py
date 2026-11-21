@@ -43,7 +43,7 @@ def prepare(repo: Path, root: Path, spec: dict) -> Result:
     backend = backends.get(spec["train"]["backend"] if isinstance(spec.get("train"), dict) else None, task.NAME)
     data = spec["data"]
     if not data["sources"]:
-        raise TrainError(f"data.sources of {spec['id']} is empty: add the sources you imported to model.yaml")
+        raise TrainError(f"data.sources of {spec['id']} is empty: train update {spec['id']} source add <source>")
     source_classes = lock.current(root, spec)
     problems = lock.missing_classes(spec, source_classes)
     if problems:

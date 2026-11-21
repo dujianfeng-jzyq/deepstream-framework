@@ -110,6 +110,29 @@ def relabel(path: Path, mapping: dict[str, str]) -> bool:
 VERSION = "4.0.6"
 
 
+def rewrite_attribute(path: Path, attribute: str, mapping: dict[str, str | None],
+                      labels: set[str] | None = None) -> int:
+    """按 mapping 改写形状属性 attribute 的取值（映射到 None 时删去这个属性，框成为没有取值），labels 给出时只改
+    这些类别的框；其余内容（包括 checked）原样保留。没有要改的框时不写，返回改写的框数。"""
+    document = _load(path)
+    count = 0
+    for shape in document.get("shapes") or []:
+        values = shape.get("attributes") if isinstance(shape, dict) else None
+        if not isinstance(values, dict) or str(values.get(attribute, "")) not in mapping:
+            continue
+        if labels is not None and shape.get("label") not in labels:
+            continue
+        new = mapping[str(values[attribute])]
+        if new is None:
+            del values[attribute]
+        else:
+            values[attribute] = new
+        count += 1
+    if count:
+        paths.write_json(path, document)
+    return count
+
+
 def new_shape(label: str, shape_type: str, points: list[list[float]]) -> dict:
     return {"label": label, "points": points, "group_id": None, "description": "", "difficult": False,
             "shape_type": shape_type, "flags": {}, "attributes": {}, "kie_linking": []}

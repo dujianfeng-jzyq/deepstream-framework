@@ -31,7 +31,7 @@ classes:
 input: {{width: 640, height: 640}}
 output_layout: xyxy-confidence-class_id
 
-# 数据集：训练根目录 sources/ 下的来源（train import 的 --source），按需追加。
+# 数据集：训练根目录 sources/ 下的来源，用 train update <id> source add|remove 增减。
 data:
   sources: []
   ignore_classes: []
@@ -447,6 +447,47 @@ def write_cascade_classes(repo: Path, model_id: str, mapping: dict[str, str]) ->
         stream.write(new_text)
     os.replace(name, spec_path)
     return expected
+
+
+def write_sources(repo: Path, model_id: str, names: list[str]) -> None:
+    """train update <id> source add|remove。"""
+    write_data_list(repo, model_id, "sources", names)
+
+
+def write_data_list(repo: Path, model_id: str, key: str, names: list[str]) -> None:
+    """改写 model.yaml 的 data.<key>（sources 或 ignore_classes），写成一行流式列表；data 段中的其他内容与
+    文件的其余部分不变。改写后重新读取，除 data.<key> 外与原来完全相同才写入，否则请人手改。"""
+    from dsf import yamlio
+    spec_path = path(repo, model_id)
+    text = spec_path.read_text(encoding="utf-8")
+    document = yamlio.load(text)
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if re.match(r"data\s*:\s*(#.*)?$", line)), None)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() and lines[i][0] not in " \t#"),
+               len(lines)) if start is not None else None
+    at = next((i for i in range(start + 1, end) if re.match(rf"\s+{key}\s*:", lines[i])), None) \
+        if start is not None else None
+    if at is None:
+        raise TrainError(f"{spec_path}: no data.{key} to rewrite; edit it by hand")
+    indent = re.match(r"(\s+)", lines[at]).group(1)
+    comment = re.search(r"\s+#.*$", lines[at].rstrip("\n"))   # 名称不含 #：行尾注释保留
+    comment = comment.group(0) if comment else ""
+    stop = at + 1
+    if not lines[at].split("#", 1)[0].split(":", 1)[1].strip():   # 块列表：后面缩进更深的项一起换掉
+        while stop < end and re.match(rf"{indent}\s*-\s", lines[stop]):
+            stop += 1
+    flow = "[" + ", ".join(_scalar(name) for name in names) + "]"
+    new_text = "".join(lines[:at]) + f"{indent}{key}: {flow}{comment}\n" + "".join(lines[stop:])
+    try:
+        written = yamlio.load(new_text)
+    except Exception:
+        written = None
+    if written != {**document, "data": {**document["data"], key: list(names)}}:
+        raise TrainError(f"{spec_path}: rewriting data.{key} did not give {names}; edit it by hand")
+    fd, name = paths.temporary_file(spec_path)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(new_text)
+    os.replace(name, spec_path)
 
 
 def skeleton(model_id: str, task: str, classes: list[str], display_name: str = "", parent: str = "",

@@ -2,7 +2,7 @@
 
 本文说明从数据到现场运行的模型生命周期：导入图片或视频 → 标注 → 准备数据集 → 训练与评估 → 导出与发布 → 打包安装 → 在服务器或 Jetson 上运行。
 
-已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train accept`、`train prepare`（§5、§6），`train run`、`train eval`（§7），`train prelabel`（§5.4），`train publish`（§8），一级检测与二级分类（§12）均可。其余按 §14 的顺序实现；整图分类与分割按 §11 留出扩展点。
+已经实现：模型目录格式与打包前的模型校验（§3、§10），训练镜像与 `train init`、`train import`、`train update`、`train accept`、`train prepare`（§5、§6、§15），`train run`、`train eval`（§7），`train prelabel`（§5.4），`train publish`（§8），一级检测与二级分类（§12）均可。其余按 §14 的顺序实现；整图分类与分割按 §11 留出扩展点。
 
 ## 1. 原则
 
@@ -20,17 +20,33 @@
 
 ## 2. 典型流程
 
-命令在训练机上通过 `scripts/train.sh <命令>` 运行（训练镜像中执行，见 §9）。
+命令在训练机上通过 `scripts/train.sh <命令>` 运行（训练镜像中执行，见 §9）。来源只是素材（图像与标注），一个来源
+用于哪些模型、为哪些类别标注，都由模型上的命令决定：
+
+| 步骤 | 命令 | 作用 |
+|---|---|---|
+| 1 | `train init <模型> --task …` | 生成 `model.yaml`：任务、后端、类别等（二级模型另给父模型、父类别与属性） |
+| 2 | `train import <来源> <路径…>` | 图片去重、视频抽帧，随同名标注写入 `sources/<来源>/`；不涉及模型 |
+| 3 | `train update <模型> source add\|remove <来源>`，`add\|rename\|retire …` | 改模型的来源与类别（二级模型的类别是属性值），连同来源中的标注；重新生成标注工具文件 `<模型>.classes.txt`、`<模型>.attributes.json` |
+| 4 | `train prelabel <模型> --source <来源>`（可选） | 用已有模型（发布的或某次 run）给未标注的图片写未勾选的标注；二级模型在父模型之后运行，在这些框上填它的属性 |
+| 5 | X-AnyLabeling | 标注或修正预标注（框与属性），标完一张勾选一张 |
+| 6 | `train prepare <模型>` | 只收已勾选的图片，生成数据集 |
+| 7 | `train run <模型>` | 训练，测试集上评估 |
+| 8 | `train publish <模型> <run>` | 门槛 → 导出 → 验证 → 写入 `models/<模型>/` |
+
+有新数据时做 2–8（向模型已有的来源继续导入时没有 3）；修改类别或属性时做 3–8。二级模型在父模型之后训练与发布。
+`train accept`（批量勾选旧标注）、`train eval --errors` 与 `train review`（找出并改正标错的样本）是辅助命令。
 
 **从零开始训练第一版：**
 
 ```text
 train init road-assets --task detect          生成 models/road-assets/model.yaml，填写类别
-train import road-assets ~/raw/2026-11/ --source batch-01
-                                              图片去重、视频抽帧，写入 sources/batch-01/
+train import batch-01 ~/raw/2026-11/          图片去重、视频抽帧，写入 sources/batch-01/
+train update road-assets source add batch-01  来源从此为 road-assets 的类别标注，生成 road-assets.classes.txt
 （在 X-AnyLabeling 中打开 sources/batch-01/ 手工标注，可用工具内置的通用模型辅助，标完一张勾选一张）
 train prepare road-assets                     只收已检查的图片，生成数据集
 train run road-assets                         训练 v0，测试集上评估
+train import batch-02 … && train update road-assets source add batch-02
 train prelabel road-assets --source batch-02 --run <v0 的 run>
                                               用尚未发布的 v0 预标注下一批，人只需修正并勾选
 （修正 batch-02 → prepare → run，迭代到指标满意）
@@ -38,14 +54,19 @@ train publish road-assets <run>               门槛 → 导出 → 验证 → �
 git commit && scripts/build-release.sh        提交、打包（模型校验），现场 ./install.sh
 ```
 
-**已有发布模型，加一批新数据更新：**
+**已有发布的检测模型与二级模型，加一批新数据更新两者：**
 
 ```text
-train import road-assets <新图片或视频> --source batch-07
-train prelabel road-assets --source batch-07   默认用当前发布的模型
-（在 X-AnyLabeling 中修正并勾选）
+train import batch-07 <新图片或视频>
+train update road-assets source add batch-07
+train update sign-occlusion source add batch-07   二级模型也在这批素材上训练：属性文件中有它的属性
+train prelabel road-assets --source batch-07   默认用当前发布的模型，写出未勾选的框
+train prelabel sign-occlusion --source batch-07
+                                              在这些框上填“遮挡”（也可以用 --run 指定未发布的 run）
+（在 X-AnyLabeling 中载入 road-assets.classes.txt 与 road-assets.attributes.json，一次修正框与属性并勾选）
 train prepare road-assets && train run road-assets
 train publish road-assets <run>                与当前模型在同一测试集上比较，退化则拒绝
+train prepare sign-occlusion && train run sign-occlusion && train publish sign-occlusion <run>
 ```
 
 ## 3. 模型目录（仓库内）
@@ -76,7 +97,8 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
   sources/<来源>/                     一批导入的素材，X-AnyLabeling 直接打开这个目录
     *.jpg + *.json                    图像与同名的 X-AnyLabeling 标注（工具默认把标注存在图像旁边）
     source.json                       导入记录：每张图来自哪个文件/视频的哪个时刻、所属采集组、sha256；类别与复核名单（§15）
-    labels.txt                        给 X-AnyLabeling 导入的类别清单（来源的类别，避免手输类别名）
+    <模型>.classes.txt                给 X-AnyLabeling 的预设类别：每个检测模型一份（§5.2）
+    <模型>.attributes.json            给 X-AnyLabeling 的形状属性文件：检测模型与它的二级模型的属性（§5.2）
     prelabel.json                     预标注记录：哪些标注文件由哪个模型写入（追溯与统计人工修正量，不决定收录）
   datasets/<id>/<数据集标识>/          准备好的数据集，不可变
     manifest.json                     每个样本的图像 sha256、解读后的标注、所属划分；数据集标识 = 它的摘要
@@ -90,21 +112,22 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
   pretrained/                         下载的预训练权重（后端的其他下载物也在这里），下载一次，所有模型复用
 ```
 
-一个来源只属于一次导入；来源可以被多个模型的 `data.sources` 引用（例如一级检测与基于它的二级分类共用同一批标注）。
+来源可以分多次导入；来源可以被多个模型的 `data.sources` 引用（例如一级检测与基于它的二级分类共用同一批标注），用 `train update <模型> source add|remove` 增减。
 
 ## 5. 素材进入与标注
 
-### 5.1 导入：`train import <id> <路径…> --source <来源>`
+### 5.1 导入：`train import <来源> <路径…>`
 
 - **图片**：复制（同一文件系统时硬链接）到 `sources/<来源>/`；按 sha256 去掉完全相同的图片，与已有来源重复的图片报告并跳过，避免同一张图同时出现在训练与测试中。
 - **视频**：按 `--every`（默认 1 秒）抽帧；用 64 位差值哈希去掉与上一张保留帧几乎相同的帧（`--dedupe`，默认相差不超过 4 位即视为相同，`-1` 保留全部帧），静止画面不会产生几百张一样的图；`--max-frames` 限制每个视频的帧数。帧命名为 `<视频名>_<毫秒>.jpg`。
 - **采集组**：同一视频的帧属于同一组；图片默认以所在子目录为组（`--group-by filename_prefix` 改用文件名前缀，适合按序号命名的连拍）。组决定划分（§6），近似帧不会被拆到训练与测试两边。
-- 写出 `source.json` 与 `labels.txt`。导入不改动原始文件，`source.json` 记录来源路径，便于追溯。
-- **来源的类别**：新来源取 `<id>` 的类别，记入 `source.json` 的 `classes`，`labels.txt` 是它的副本。向已有来源继续导入时来源的类别不变（其他模型可能也在用它），`<id>` 的类别必须都在其中，否则拒绝导入；给来源增加类别用 `train update`（§15）。
+- **标注**：图像旁的同名 JSON 随图像导入，`imagePath` 改为来源中的文件名，其余（包括 `checked`）原样保留。
+- 写出 `source.json`。导入不改动原始文件，`source.json` 记录来源路径，便于追溯。
+- **导入不涉及模型。** 新来源的类别（`source.json` 的 `classes`：来源为哪些类别标注过）为空，`train update <模型> source add <来源>` 把它加入模型的 `data.sources`，同时记下模型的类别、生成标注工具文件（§15.3）。向已有来源继续导入时来源的类别不变，已经使用它的模型的标注工具文件随之刷新。
 
 ### 5.2 标注：X-AnyLabeling
 
-在 X-AnyLabeling 中打开 `sources/<来源>/`，先导入 `labels.txt` 作为预设类别。要标形状属性（二级模型的标签，§12）时载入 `sources/<来源>/attributes.json`：Image Classifier（Ctrl+3）的 MultiTask 中对象选择框旁的上传按钮。它和 `labels.txt` 一样由工具生成、不手写，也没有单独的命令：`train import`、`train prepare`（在读取标注之前，所以 prepare 因标注问题失败时它已是最新）与改写来源的 `train update` 顺带重新生成，输出中给出它的位置。内容：二级模型声明的属性（`data.from_parent.attribute`）出现在它的 `cascade.classes` 上，取值为 `classes` 加 `ignore_classes`；来源标注中已有的属性全部保留（文件中缺少的属性在工具中看不到）；同一来源中同名属性的取值取各类别上的并集，模型没有声明的取值按字符排序，重新生成时顺序不变。标注中有模型不接受的取值时给出警告（`prepare` 会拒绝它们）。暂时不成立的二级模型规格（例如父类别改名后 `cascade.classes` 还没改写）不使命令失败，只是这次不计入它的属性，并说明原因。修改二级模型的属性或取值后运行一次 `train prepare <模型>` 即可刷新。标注保存为图像旁的同名 JSON（LabelMe 兼容格式），以 4.0.6 实际保存的文件为准（样例见 `framework/tests/python/data/x-anylabeling-4.0.6/`）：
+在 X-AnyLabeling 中打开 `sources/<来源>/`，先导入 `<模型>.classes.txt` 作为预设类别；要标形状属性（二级模型的标签，§12）时载入 `<模型>.attributes.json`：Image Classifier（Ctrl+3）的 MultiTask 中对象选择框旁的上传按钮。两个文件按**检测模型**生成，每个检测模型一对：`data.sources` 中有这个来源的检测模型，以及 `data.sources` 中有它的二级模型的父模型。二级模型没有自己的文件：它的类别是父模型框上的属性值，它声明的属性合在父模型的属性文件中。X-AnyLabeling 同一时间只载入一个属性文件，文件中没有的属性在工具中看不到、可能在保存时被覆盖，所以不按二级模型分文件：载入父模型的一对文件，一次看全全部属性。文件由工具生成、不手写，也没有单独的命令：`train update`、`train import`、`train prelabel` 与 `train prepare`（在读取标注之前，所以 prepare 因标注问题失败时它已是最新）顺带重新生成，输出中给出位置；不再有模型使用的文件随之删除，旧版按来源生成的 `labels.txt` 与 `attributes.json` 也在这时删除（`labels.txt` 的类别先记入 `source.json`）。属性文件的内容：二级模型声明的属性（`data.from_parent.attribute`）出现在它的 `cascade.classes` 上，取值为 `classes` 加 `ignore_classes`，只计入 `data.sources` 中有这个来源的二级模型——所以把来源加入二级模型之后，标注之前就有全部取值；标注中已有的、父模型类别框上的属性全部保留；同一来源中同名属性的取值取各类别上的并集，模型没有声明的取值按字符排序，重新生成时顺序不变。标注中有模型不接受的取值时给出警告（`prepare` 会拒绝它们）。暂时不成立的规格（例如父类别改名后 `cascade.classes` 还没改写）不使命令失败，只是这次不计入它，并说明原因。标注保存为图像旁的同名 JSON（LabelMe 兼容格式），以 4.0.6 实际保存的文件为准（样例见 `framework/tests/python/data/x-anylabeling-4.0.6/`）：
 
 - 顶层：`imagePath`、`imageWidth`、`imageHeight`、`shapes`、图像级 `flags`、`checked`（工具中的“已检查”状态）；`imageData` 为空（图像不嵌入 JSON，非空时忽略）。
 - 每个形状：`label`、`points`、`shape_type`、`difficult`、`attributes`（形状属性，例如 `{"遮挡": "否", "破损": "否"}`），以及读取时忽略的 `group_id`、`description`、`flags`、`kie_linking`。
@@ -146,7 +169,10 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 - 写入的标注一律 `checked: false`：人在工具中修正（预测正确时直接）勾选后才进入数据集，与人工标注同一条规则（§5.2），不需要另外的确认机制。
 - 写入的文件与所用模型（发布或 run、权重 sha256、阈值）记入 `prelabel.json`，用于追溯；它不影响收录。中断后再次运行只处理剩下没有 JSON 的图片。
 - `train prepare` 对引用的来源报告每批预标注的修正量：已检查的图片中，预测框保留（同类别且 IoU ≥ 0.5，允许微调位置）、删除（或改了类别）与人补充的框各有多少，衡量模型在新数据上的表现。
-- **二级模型**（`cascade`）的标签是父类别框上的属性，图片早已标注并勾选，没有空白标注可写，所以它的预标注不改来源，而是建立复核集 `reviews/<id>-prelabel-<来源>/`（§7）：来源中已勾选图片上没有该属性取值（缺少或为空）的父类别框，不小于 `data.from_parent.min_size` 的，按部署方式裁剪推理，最高类别的概率不低于 `--conf` 时把它填进副本，否则留空。人给过的取值（包括 `data.ignore_classes` 中的“未知”）不动，没勾选的图片不处理。`checklist.txt` 列出每个框的提议与置信度；在 X-AnyLabeling 中逐张核对、修正并保存，然后 `train review apply <名称>`。提议本身就是对来源的修改，所以 apply 写回复核集中的**全部**副本，而不只是改过的：没来得及核对的图片，删掉它在复核集中的 `.json` 就不会写回。写回之前 `train prepare` 提醒有未应用的复核，同名复核集不会被重新预标注替换。`--class` 不适用于二级模型。
+- **二级模型**（`cascade`）的标签是父类别框上的属性，它的预标注只填框上**没有取值**（缺少或为空）的属性：父类别框不小于 `data.from_parent.min_size` 的，按部署方式裁剪推理，最高类别的概率不低于 `--conf` 时填上，否则留空由人填；框与人给过的取值（包括 `data.ignore_classes` 中的“未知”）不动。每个模型的预标注只做自己的事：检测模型写框，二级模型填属性，各自可以用 `--run` 选择版本、重新运行。按图片是否勾选分两种写法：
+  - **未勾选的图片直接写入来源。** 还没有人确认，与检测模型的预标注同一条规则。新素材的流程是先 `train prelabel <父模型>` 写出框，再 `train prelabel <二级模型>` 填属性，然后在 X-AnyLabeling 中一遍核对框与属性；父模型的预标注在输出中提示这一步。还没有标注的图片不处理（先预标注或标注父模型的框）。选中时记下标注的 sha256，写入前比对，人在工具中保存过的图片跳过；写入的图片数与所用模型记入 `prelabel.json` 的 `attribute_batches`。
+  - **已勾选的图片不写来源，建立复核集** `reviews/<id>-prelabel-<来源>/`（§7）：例如二级模型新加入一个早已标注的来源，或 `train update <二级模型> add --from` 清空了一些取值（§15.3）。`checklist.txt` 列出每个框的提议与置信度；在 X-AnyLabeling 中逐张核对、修正并保存，然后 `train review apply <名称>`。提议本身就是对来源的修改，所以 apply 写回复核集中的**全部**副本，而不只是改过的：没来得及核对的图片，删掉它在复核集中的 `.json` 就不会写回。写回之前 `train prepare` 提醒有未应用的复核，同名复核集不会被重新预标注替换。
+  - `--conf` 的默认值 0.25 低于二分类最高类别的下限 0.5，即全部填上；提高它（例如 0.8）让没把握的框留空。`--class` 不适用于二级模型。
 
 ## 6. 准备数据集：`train prepare <id>`
 
@@ -250,16 +276,17 @@ data:
     min_size: 16                        # 短边小于它的框不收入（现场同样太小，无法可靠分类）
 ```
 
-- **数据**：二级模型复用父模型的来源。X-AnyLabeling 的形状属性让一次标注同时得到一级框与二级标签；`prepare` 从父类别框裁剪出样本，划分沿用这些框所在图片的采集组，两级模型的测试集来自同一批图片。没有该属性的框、属性值在 `ignore_classes` 中的框、小于 `min_size` 的框不收入，在报告中按原因计数；其他属性值是错误。类别依赖（§15.1）检查的是来源中有 `cascade.classes`。训练划分中没有样本的类别报错：它无法学习。
+- **数据**：二级模型复用父模型的来源，用 `train update <二级模型> source add <来源>` 加入（来源必须已为它的 `cascade.classes` 标注，即先加入父模型）；它的属性随之出现在父模型的属性文件中（§5.2）。X-AnyLabeling 的形状属性让一次标注同时得到一级框与二级标签；`prepare` 从父类别框裁剪出样本，划分沿用这些框所在图片的采集组，两级模型的测试集来自同一批图片。没有该属性的框、属性值在 `ignore_classes` 中的框、小于 `min_size` 的框不收入，在报告中按原因计数；其他属性值是错误。类别依赖（§15.1）检查的是来源中有 `cascade.classes`。训练划分中没有样本的类别报错：它无法学习。
 - **裁剪与现场一致**：二级 nvinfer（`process-mode=2`）把检测框原样缩放到网络输入，不保持宽高比、不外扩。训练样本按同样的方式生成（拉伸到 `input`，写成 PNG），所以不提供外扩（`padding`）；nvinfer 配置用 `maintain-aspect-ratio=0`，`input-object-min-width/height` 与 `min_size` 一致。后端评估时的“缩放 + 中心裁剪”对正方形样本不起作用。
 - **评估**：在真实框的裁剪上评估二级模型本身。类别常常极不均衡（“遮挡=是”只占百分之几），全猜多数类也有很高的 accuracy，所以指标是 accuracy、各类 recall 的平均（`recall`）与各类 precision 的平均（`precision`），每类给出 recall 与 precision，骨架的退化门槛比较 `recall`。训练时也按验证划分上的 `recall` 选择 `best.pt` 并判断早停（Ultralytics 默认按 top-1/top-5 的平均，二分类时就是 accuracy，会保留少数类召回差的检查点、过早停止），`results.csv` 中为 `metrics/recall_mean`。端到端评估（一级检测框 → 二级分类）以后按需要增加。
 - **阈值**：nvinfer 只在最高类别的 softmax 概率不低于 `classifier-threshold` 时给目标分类结果，低于时目标没有结果，而后端的评估只看最高类别。所以评估另在测试划分的每个裁剪上做原生推理，从 1/类别数（二分类为 0.5）到 0.95 每隔 0.05 扫描阈值：每行给出得到类别的裁剪比例（labeled）、宏平均 recall 与 precision、每类 recall/precision（没有得到类别的裁剪对 recall 算未召回，不计入 precision；该类一个也没有得到时 precision 为 `-`）。扫描写入 `metrics.json` 的 `thresholds` 并打印；最低一行与不设阈值等效，和总体指标一致。发布把扫描记入 `release.json`，并对每个 nvinfer 配置报告其 `classifier-threshold` 那一行（不在扫描的步长上时提示查看 `release.json`）。阈值由人按这张表在 nvinfer 配置中调整：提高阈值换来少数类更高的 precision、更低的 recall 与更多没有结果的目标。早于扫描的评估结果在发布时重新评估一次。
 - **导出**：Ultralytics 的分类头输出 logits（softmax 只在它的 Python 预测器中做），而 nvinfer 内置的分类解析把输出当作概率与 `classifier-threshold` 比较，所以导出时追加 Softmax，输出为 `[batch, 类别数]`。一致性验证在测试划分的裁剪上比较概率。
 - **部署契约**：二级模型的 nvinfer 配置使用 `network-type=1`、`process-mode=2`，`operate-on-gie-id` 等于父模型配置的 `gie-unique-id`，`operate-on-class-ids` 由 `cascade.classes` 按父模型发布的 `classes` 换算出类别号。打包与发布时校验：父模型重新发布并改变了类别号时，二级模型的配置在打包前失败，而不是在现场作用于错误的类别。
 - 应用配置的 `inference` 链按顺序串接一级与二级模型（已支持），二级结果在检测消息对象的 `classes[]` 中。
-- **预标注**：`train prelabel` 对二级模型建立复核集，由模型填上框上缺少的属性取值，人核对后写回（§5.4）。
+- **预标注**：`train prelabel <二级模型>` 填框上缺少的属性取值：未勾选的图片（通常是父模型刚预标注的）直接写入，人一次核对框与属性；已勾选的图片建立复核集，人核对后写回（§5.4）。
 - **父类别改名与合并**：`train update <父模型> rename` 与 `retire --into` 同时改写触发它的二级模型的 `cascade.classes`（只改那一项，注释与其他字段不变）；只 `retire` 时拒绝，先由人调整二级模型。父模型重新发布后类别号可能变化，二级模型 nvinfer 配置中的 `operate-on-class-ids` 由人对照，打包时的级联校验发现不符。
-- **尚未实现**：整图分类。`train import` 与 `train update add|rename|retire` 对二级模型拒绝：它的样本来自父模型的来源，类别是属性值而不是标签。
+- **修改二级模型的类别**：`train update <二级模型> add|rename|retire` 改的是属性值，改写来源中框上的取值，来源的类别不变（§15.3）。
+- **尚未实现**：整图分类。
 
 ## 13. 只更新模型
 
@@ -289,7 +316,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 模型的类别会变：现场要求新增一种目标，两类分不清要合并，一类要细分，名称要改。目前只能手改 `model.yaml`，有两个问题：
 
 - **新类别在旧标注里是背景。** 改之前已检查的图片里没有新类别的框，`prepare` 照常收入，训练与测试都把画面中的新类别目标当作背景：模型学着不去检测它，测试集也奖励这种行为。
-- **改动的影响看不见。** 类别名写在每份标注、每个来源的 `labels.txt` 里，类别号被二级模型与下游服务使用；改了一处，其余的是否跟着改、是否还匹配，没有任何检查。
+- **改动的影响看不见。** 类别名写在每份标注、每个来源的类别列表里，类别号被二级模型与下游服务使用；改了一处，其余的是否跟着改、是否还匹配，没有任何检查。
 
 设计用两件事解决：下游记录确认时上游的类别列表，让影响可推导、可检查；撤销 `checked` 让需要重新看的图片回到“未确认”，沿用“只收人确认过的标注”这条已有规则。
 
@@ -299,7 +326,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 
 | 依赖 | 上游的类别列表 | 下游的记录（工具写入，随下游提交） | 不一致时 | 确认 |
 |---|---|---|---|---|
-| 来源 → 模型 | `source.json` 的 `classes`，即 `labels.txt` | `models/<id>/sources.lock.json`：每个来源的类别列表 | `prepare`、`run`、`publish` 拒绝 | `train update <id> --confirm` |
+| 来源 → 模型 | `source.json` 的 `classes`（来源为哪些类别标注过） | `models/<id>/sources.lock.json`：每个来源的类别列表 | `prepare`、`run`、`publish` 拒绝 | `train update <id> --confirm` |
 | 模型 → 服务 | `release.json` 的类别 | `services/<服务>/models.lock.json`：每个模型的类别列表 | 打包校验失败 | `framework/deploy/dsf-deploy.py lock-models <服务> [<模型>…]` |
 
 - **谁解释类别，谁锁定。** 模型 → 服务的依赖是语义上的，不看服务在哪里加载模型：后处理、告警、按类别过滤或按类别号写规则的服务，即使只从消息中拿到检测结果，也锁定它依赖的模型；新增类别时打包失败，提醒它补上对新类别的处理。只加载模型推理、把类别原样透传的服务不锁定：它与模型的兼容由模型校验保证（`labels.txt`、`num-detected-classes`，§10），类别变化时它不需要修改，锁定它只会让确认落在不需要看差异的地方。
@@ -308,7 +335,8 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 - **上游变了，下游即使不需要任何修改也要显式确认一次。** 确认就是在看过差异之后重写锁文件并提交。
 - **模型的类别是来源类别的子集。** 模型的每个类别必须在它依赖的每个来源的类别中，否则这些来源的图片无法为它作证，`prepare` 拒绝。来源中有、模型不用的类别在读取时忽略（不再需要逐个写进 `data.ignore_classes`）；两者都没有的标签照常报错，拼写错误不会悄悄变成新类别。手改 `model.yaml` 新增或改名类别时因此无法 `prepare`，必须经 `train update`；手工删除一个类别等同于 `retire`（§15.3）。
 - **二级模型** 的 `cascade.classes` 按名称引用父类别（§12），打包时按父模型的类别换算编号，不另设锁文件；父模型改名或删除了被引用的类别时打包失败。
-- **迁移。** `source.json` 还没有 `classes` 的来源以 `labels.txt` 为类别（导入一向按模型的类别写出它），下一次导入或改写来源时记入 `source.json`。模型还没有 `sources.lock.json` 时，`prepare` 按来源当前的类别写出并提示，相当于首次确认；没有 `models.lock.json` 的服务不检查。仓库现有的数据因此不需要任何操作。
+- **来源的类别从哪里来。** 导入不涉及模型，新来源的类别为空；`train update <模型> source add` 记下模型的类别，同时写入本模型的锁记录，之后只有 `train update` 改写来源的类别。
+- **迁移。** `source.json` 还没有 `classes` 的来源以旧版导入写出的 `labels.txt` 为类别，重新生成标注工具文件时记入 `source.json`、删除 `labels.txt`（§5.2）。手工加进 `data.sources`、锁文件中还没有记录的来源，`prepare` 按来源当前的类别补记并提示，相当于首次确认；没有 `models.lock.json` 的服务不检查。仓库现有的数据因此不需要任何操作。
 
 ### 15.2 撤销与复核名单
 
@@ -321,16 +349,21 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 
 ### 15.3 操作：`train update <id> <操作>`
 
-每次运行先完成全部检查（冲突、可写；起点必须是确认过的状态，其他模型带来的、恰好就是这次修改的来源变化也算确认过），再写入（`add` 的顺序见 §15.2）：标注文件 → 来源记录与 `labels.txt` → `sources.lock.json` → 其他模型的 `model.yaml` → 本模型的 `model.yaml`。标注先改：中断时来源记录还是旧名称，`prepare` 遇到新名称报未知类别，不会在不一致的状态下训练；重新执行同一命令即可完成，已改过的文件跳过。`model.yaml` 只改写类别列表中受影响的行，注释与其他内容不变。打印每个来源与模型的类别变化、撤销的图片数、自动修复的内容与需要人处理的依赖。改写来源期间不要在 X-AnyLabeling 中保存这个来源的图片；完成后在工具中重新打开目录并重新导入 `labels.txt`。
+每次运行先完成全部检查（冲突、可写；起点必须是确认过的状态，其他模型带来的、恰好就是这次修改的来源变化也算确认过），再写入（`add` 的顺序见 §15.2）：标注文件 → 来源记录 → `sources.lock.json` → 其他模型的 `model.yaml` → 本模型的 `model.yaml`。标注先改：中断时来源记录还是旧名称，`prepare` 遇到新名称报未知类别，不会在不一致的状态下训练；重新执行同一命令即可完成，已改过的文件跳过。`model.yaml` 只改写类别列表中受影响的行，注释与其他内容不变。打印每个来源与模型的类别变化、撤销的图片数、自动修复的内容与需要人处理的依赖。改写来源期间不要在 X-AnyLabeling 中保存这个来源的图片。完成后重新生成相关来源（本模型、父模型与二级模型的来源）中的标注工具文件（§5.2），在工具中重新打开目录并重新载入它们。
 
 | 操作 | 本模型 | 来源 | 其他模型与服务 |
 |---|---|---|---|
-| `add <名称>` | 追加在 `classes` 末尾 | 已有这个类别的来源不变（之前已为它标注过）；其余来源追加类别、刷新 `labels.txt`，撤销已检查的图片并记入名单（§15.2） | 依赖这些来源的其他模型锁文件不一致，不可用，复核后 `--confirm`；本模型的服务需要确认 |
+| `source add <来源>` | `data.sources` 追加来源（只改那一行，写成流式列表），锁文件记下来源的类别 | 还没有类别的来源（刚导入）记下本模型的类别，随导入带来的已勾选标注视为按这些类别标注过（输出中给出数量）；已为其他类别标注过的来源追加缺少的类别，撤销已检查的图片并按类别记入名单（§15.2），给出 `--reason` 时只追加、不撤销。二级模型不改变来源的类别：来源必须已为它的 `cascade.classes` 标注 | 依赖这个来源的其他模型：来源多了类别时锁文件不一致，复核后 `--confirm` |
+| `source remove <来源>` | `data.sources` 删除来源，锁文件删除它的记录 | 不变（素材、标注与类别都保留，以后可以再加回） | — |
+| `add <名称>` | 追加在 `classes` 末尾 | 已有这个类别的来源不变（之前已为它标注过）；其余来源追加类别，撤销已检查的图片并记入名单（§15.2） | 依赖这些来源的其他模型锁文件不一致，不可用，复核后 `--confirm`；本模型的服务需要确认 |
 | `add <名称> --from <类别A>` | 同上 | 同上，但只撤销含 A 框的图片：新类别的目标以前被标成 A（细分 A） | 同上 |
 | `add … --skip-source <来源> --reason <文本>` | — | 该来源追加类别但不撤销，理由记入名单：确定这批素材不含新类别 | — |
 | `rename <旧> <新>` | 原位改名 | 改写标注中的名称（`checked` 不变），来源类别改名 | **自动修复**：依赖这些来源且含旧名称的模型同样改名；不含的模型类别不受影响，自动更新锁文件；以本模型为父的二级模型改写 `cascade.classes`；所有改了名的模型的服务需要确认 |
 | `retire <名称>` | 从 `classes` 删除；后面的类别号前移 | 不变：其他模型可能还在用这个类别，本模型读取时忽略它 | 二级模型引用了它时**拒绝**，提示先调整二级模型；服务需要确认 |
 | `retire <A> --into <B>` | 删除 A（合并进 B） | 改写标注中的 A 为 B（`checked` 不变），来源类别删除 A | 依赖这些来源的其他模型仍把 A 当作独立类别时**拒绝**，提示对那个模型先做同样的合并，或改为只 `retire`；二级模型的 `cascade.classes` 中的 A 改为 B（已有 B 时只留一个） |
+| 二级模型 `add <值> [--from <值A>]` | 追加在 `classes` 末尾；值在 `ignore_classes` 中时移出（那些框从此收入） | `--from`：触发类别框上的 A 被删去，这些框成为没有取值、不进入它的数据集；`train prelabel <二级模型>` 用当前模型提议取值，人在复核集中把该改的改成新值（§5.4）。图片的 `checked` 不变，父模型照常使用它们 | 服务需要确认 |
+| 二级模型 `rename <旧> <新>` | 原位改名，记入 `renamed` | 改写全部框上的属性取值（同一来源中同名属性含义相同） | 另一个二级模型在这些来源上也读这个属性时**拒绝**（两边的取值要一起改）；服务需要确认 |
+| 二级模型 `retire <值> [--into <值B>]` | 删除，后面的类别号前移（至少留两个类别） | 只 `retire`：取值留在标注中，值记入 `data.ignore_classes`；`--into`：取值改为 B | 同上 |
 | `--confirm` | 按来源当前的类别重写 `sources.lock.json` | — | — |
 | （不带操作） | 列出类别、与各来源锁文件的差异与复核进度 | — | — |
 
@@ -378,6 +411,7 @@ train prepare road-assets && train run road-assets && train publish road-assets 
 3. `add`：撤销与复核名单、`--from`、`--skip-source`；`prepare` 的复核进度；`accept` 的限制。**已实现**
 4. `prelabel --class` 与放宽的类别检查。**已实现**
 5. `lock-models` 与服务的打包校验；共有类别上的退化比较；`release.json` 中的类别变化。**已实现**
+6. `source add|remove`（导入不再涉及模型）、按检测模型生成的标注工具文件、二级模型的预标注直接填未勾选图片的属性、二级模型的 `add`、`rename`、`retire`（改属性值）。**已实现**
 
 除训练与预标注推理外都是纯 Python，可以在 builder 中测试。
 

@@ -6,11 +6,15 @@
   batches        每次预标注所用的模型（发布或 run）、权重 sha256、置信度阈值、时间，按类别时还有 class
   images         图像名 → 所属批次与写入的形状；人确认后与之对比，统计修正量
   class_images   图像名 → 类别 → 所属批次与追加的形状（按类别预标注）
+  attribute_batches  二级模型的预标注：模型、权重、阈值、属性、时间、直接写入的图片数
 它不影响收录。
 
-二级模型（cascade）没有可写的空白标注：它的标签是父类别框上的属性，图片早已标注并勾选。所以它的预标注
-（prelabel_attribute）不写来源，而是建立复核集（review.propose）：副本中没有取值的框由模型填上，人在
-复核集中核对后 train review apply 写回。
+二级模型（cascade）的标签是父类别框上的属性，它的预标注（prelabel_attribute）只填框上没有取值的属性，
+框与人给过的取值不动：
+- 未勾选的图片直接写入来源：还没有人确认，与检测模型的预标注同一条规则。通常紧接在父模型的预标注之后运行，
+  人在一遍中核对框与属性。
+- 已勾选的图片不写来源：人已经确认过，建立复核集（review.propose），副本中没有取值的框由模型填上，人在
+  复核集中核对后 train review apply 写回。
 """
 
 from __future__ import annotations
@@ -37,8 +41,10 @@ class Result:
     written: int = 0
     boxes: int = 0
     skipped: Counter = field(default_factory=Counter)
-    proposals: list = field(default_factory=list)  # 二级模型：review.propose 的提议
+    proposals: list = field(default_factory=list)  # 二级模型：已勾选图片的提议（review.propose）
     unsure: int = 0                               # 二级模型：低于 --conf、留空的框
+    direct: int = 0                               # 二级模型：直接写入来源的未勾选图片数
+    unlabeled: int = 0                            # 二级模型：还没有标注的图片（先预标注父模型）
 
 
 def _usable(classes: list[str], spec: dict, label: str | None) -> str:
@@ -142,12 +148,13 @@ def prelabel(repo: Path, root: Path, spec: dict, source: str, run: str | None, c
 
 def prelabel_attribute(repo: Path, root: Path, spec: dict, source: str, run: str | None, conf: float,
                        device: str | None = None) -> Result:
-    """二级模型：对来源中已勾选图片上没有 attribute 取值的父类别框（不小于 min_size）裁剪推理，最高类别的
-    概率不低于 conf 时把它作为取值，返回给 review.propose 的提议；来源不变。written 为涉及的图片数，
-    boxes 为填上取值的框数。"""
+    """二级模型：来源中没有 attribute 取值的父类别框（不小于 min_size）裁剪推理，最高类别的概率不低于 conf 时
+    填上取值，否则留空。未勾选的图片直接写入来源（选中时记下标注的 sha256，写入前比对：人在工具中保存过的
+    图片跳过）；已勾选的图片作为提议返回给 review.propose，来源不变。boxes 为填上取值的框数，written 为提议
+    涉及的图片数，direct 为直接写入的图片数。"""
     task = tasks.get(spec["task"])
     if source not in spec["data"]["sources"]:
-        raise TrainError(f"{source} is not a source of {spec['id']} (data.sources)")
+        raise TrainError(f"{source} is not a source of {spec['id']}: train update {spec['id']} source add {source}")
     if not 0.0 <= conf <= 1.0:
         raise TrainError(f"--conf must be between 0 and 1, not {conf}")
     directory = paths.source_dir(root, source)
@@ -159,13 +166,15 @@ def prelabel_attribute(repo: Path, root: Path, spec: dict, source: str, run: str
     parents = set(task.source_labels(spec))
     result = Result(model)
     candidates = []  # (图片, 形状序号, 框, 父类别)
+    states = {}      # 图片 → (已勾选, 选中时标注的 sha256)
     for name in sorted(images):
         path = xanylabeling.annotation_path(directory / name)
-        if not path.is_file() or not (directory / name).is_file():
+        if not (directory / name).is_file():
+            continue
+        if not path.is_file():
+            result.unlabeled += 1
             continue
         annotation = xanylabeling.read(path)
-        if not annotation.checked:  # 没勾选的图片整张待人检查，不进入数据集，也不在这里提议
-            continue
         for index, shape in enumerate(annotation.shapes):
             if shape.shape_type != task.SHAPE or shape.label not in parents:
                 continue
@@ -178,6 +187,7 @@ def prelabel_attribute(repo: Path, root: Path, spec: dict, source: str, run: str
                 result.skipped[f"boxes smaller than {min_size} px (data.from_parent.min_size)"] += 1
             else:
                 candidates.append((name, index, box, shape.label))
+                states.setdefault(name, (annotation.checked, paths.sha256(path)))
     if not candidates:
         return result
     width, height = spec["input"]["width"], spec["input"]["height"]
@@ -192,17 +202,33 @@ def prelabel_attribute(repo: Path, root: Path, spec: dict, source: str, run: str
     for (name, index, box, parent), [prediction] in zip(candidates, predictions):
         if name not in by_image:
             document = json.loads(xanylabeling.annotation_path(directory / name).read_text(encoding="utf-8"))
-            by_image[name] = {"source": source, "image": name, "document": document, "boxes": []}
+            by_image[name] = {"source": source, "image": name, "document": document, "boxes": [], "filled": 0}
         value = record["classes"][prediction["class"]] if prediction["score"] >= conf else None
         if value is not None:
             shape = by_image[name]["document"]["shapes"][index]
             shape["attributes"] = {**(shape.get("attributes") or {}), attribute: value}
-            result.boxes += 1
-        else:
-            result.unsure += 1
+            by_image[name]["filled"] += 1
         by_image[name]["boxes"].append({"box": box, "parent": parent, "proposed": value,
                                         "confidence": prediction["score"]})
-    result.proposals = list(by_image.values())
+    for name, entry in by_image.items():
+        checked, digest = states[name]
+        if checked:
+            result.proposals.append({key: entry[key] for key in ("source", "image", "document", "boxes")})
+        elif not entry["filled"]:
+            pass                                       # 都没把握：来源不变
+        elif paths.sha256(xanylabeling.annotation_path(directory / name)) != digest:
+            result.skipped["images saved meanwhile (not written)"] += 1
+            continue
+        else:
+            paths.write_json(xanylabeling.annotation_path(directory / name), entry["document"])
+            result.direct += 1
+        result.boxes += entry["filled"]
+        result.unsure += len(entry["boxes"]) - entry["filled"]
+    if result.direct:
+        log_path, log = _log(directory, source)
+        log.setdefault("attribute_batches", []).append({"at": _now(), "model": spec["id"], **model, "conf": conf,
+                                                        "attribute": attribute, "images": result.direct})
+        paths.write_json(log_path, log)
     result.written = len(result.proposals)
     return result
 

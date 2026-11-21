@@ -5,8 +5,9 @@ sources/<来源>/source.json 记录每张图：
   origin   原始文件；视频帧另有 time_ms
   group    采集组，决定划分：video:<视频摘要>、prefix:<文件名前缀>、dir:<来源>/<子目录>
   width/height
-以及 classes：来源的类别列表，labels.txt 是它给 X-AnyLabeling 的副本（§15.1）；accepted：用 train accept
-批量确认的记录；reviews：新增类别时撤销 checked 的复核名单（§15.2），每项
+以及 classes：来源为哪些类别标注过（§15.1）。导入不涉及模型，新来源的 classes 为空；train update <模型>
+source add 把模型的类别记入，之后只由 train update 改写。给 X-AnyLabeling 的类别与属性文件按检测模型生成
+（labeling.py）。accepted：用 train accept 批量确认的记录；reviews：新增类别时撤销 checked 的复核名单（§15.2），每项
   class/from/at  新类别、只撤销含哪个类别框的图片（--from，没有时为 null）、时间
   files          被撤销的图片；revoked 在全部撤销完成后才为 true（中断后重新执行 train update 按名单继续）
   skipped        不撤销的理由（--skip-source），files 为空
@@ -47,7 +48,8 @@ def read_record(directory: Path) -> dict:
 
 
 def class_list(directory: Path, record: dict) -> list[str]:
-    """来源的类别列表。记录还没有 classes 时取 labels.txt：导入一向按模型的类别写出它（迁移，§15.1）。"""
+    """来源的类别列表。记录还没有 classes 时取旧版导入写出的 labels.txt（迁移：labeling.refresh 把它记入
+    source.json 后删除）。"""
     value = record.get("classes")
     if value is None:
         labels = directory / paths.SOURCE_LABELS
@@ -85,11 +87,6 @@ def review_progress(directory: Path, record: dict) -> list[tuple[dict, int, int]
     return progress
 
 
-def write_labels(directory: Path, names: list[str]) -> None:
-    """标注工具的预设类别：导入 labels.txt，避免手输类别名。"""
-    (directory / paths.SOURCE_LABELS).write_text("".join(f"{c}\n" for c in names), encoding="utf-8")
-
-
 def known_images(root: Path) -> dict[str, str]:
     """全部来源中图像的 sha256 → "来源/文件名"：同一张图不能进入两个来源（可能一边训练一边测试）。"""
     known = {}
@@ -105,7 +102,7 @@ def prefix_group(stem: str) -> str:
 
 
 class Importer:
-    def __init__(self, root: Path, source: str, classes: list[str], group_by: str = "directory",
+    def __init__(self, root: Path, source: str, group_by: str = "directory",
                  every_s: float = 1.0, dedupe: int = 4, max_frames: int = 0):
         if group_by not in GROUP_BY:
             raise TrainError(f"--group-by must be one of {', '.join(GROUP_BY)}")
@@ -115,15 +112,10 @@ class Importer:
         self.every_s, self.dedupe, self.max_frames = every_s, dedupe, max_frames
         self.record_path = self.directory / paths.SOURCE_RECORD
         if self.record_path.is_file():
-            # 已有的来源保留自己的类别：其他模型可能也在用它，模型的类别只需都在其中（§15.1）。
-            self.record = read_record(self.directory)
-            self.record["classes"] = existing = class_list(self.directory, self.record)
-            missing = [name for name in classes if name not in existing]
-            if missing:
-                raise TrainError(f"source {source} has no class {', '.join(missing)}; add the classes to the model "
-                                 f"with train update first, which also adds them to the source")
+            self.record = read_record(self.directory)   # 已有的来源：类别不变（只由 train update 改写）
         else:
-            self.record = {"schema": SCHEMA, "source": source, "created": _now(), "classes": list(classes),
+            # 导入只带来素材：来源为哪些类别标注由 train update <模型> source add 决定。
+            self.record = {"schema": SCHEMA, "source": source, "created": _now(), "classes": [],
                            "images": {}, "accepted": []}
         self.known = known_images(root)
         self.report: Counter = Counter()
@@ -144,7 +136,6 @@ class Importer:
                     self._video(path)
                 elif suffix != ".json":  # 标注随同名图像导入
                     self.report["other files skipped"] += 1
-        write_labels(self.directory, self.record["classes"])
         paths.write_json(self.record_path, self.record)
 
     def _name(self, stem: str, suffix: str, digest: str) -> str:

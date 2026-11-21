@@ -1,7 +1,7 @@
-"""train update <id> <操作>：修改模型的类别，连同来源与其他模型（docs/training.md §15.3）。
+"""train update <id> <操作>：修改模型的类别与来源，连同来源的标注与其他模型（docs/training.md §15.3）。
 
 每次运行先完成全部检查（冲突、可写），再写入。写入顺序保证中断后重新执行同一命令即可完成：
-标注文件 → 来源记录与 labels.txt → sources.lock.json → 其他模型的 model.yaml → 本模型的 model.yaml（add 例外，
+标注文件 → 来源记录 → sources.lock.json → 其他模型的 model.yaml → 本模型的 model.yaml（add 例外，
 见 add）。标注先改，
 来源记录还写着旧名称时 prepare 遇到新名称报“未知类别”，不会在不一致的状态下训练；重新执行时已改过的文件
 没有可改的形状，跳过；本模型的规格最后改，它改完即全部完成。
@@ -22,7 +22,7 @@ from .errors import TrainError
 @dataclass
 class Result:
     lines: list[str] = field(default_factory=list)
-    sources: list[str] = field(default_factory=list)  # 标注与 labels.txt 被改写的来源
+    sources: list[str] = field(default_factory=list)  # 要重新生成标注工具文件的来源
 
 
 def _models(repo: Path) -> dict[str, dict]:
@@ -88,7 +88,7 @@ def _check_writable(files: list[Path]) -> None:
 
 
 def _rewrite_source(root: Path, source: str, mapping: dict[str, str], classes: list[str]) -> int:
-    """改写来源的标注与预标注记录中的类别名，再写来源的类别与 labels.txt。返回改写的标注数。"""
+    """改写来源的标注与预标注记录中的类别名，再写来源的类别。返回改写的标注数。"""
     directory = paths.source_dir(root, source)
     count = sum(xanylabeling.relabel(path, mapping) for path in _annotations(root, source))
     log_path = directory / paths.PRELABEL_RECORD
@@ -103,7 +103,6 @@ def _rewrite_source(root: Path, source: str, mapping: dict[str, str], classes: l
     if record.get("classes") != classes:
         record["classes"] = classes
         paths.write_json(directory / paths.SOURCE_RECORD, record)
-    sources.write_labels(directory, classes)
     return count
 
 
@@ -112,7 +111,7 @@ def _source_files(root: Path, names: list[str]) -> list[Path]:
     files = []
     for source in names:
         directory = paths.source_dir(root, source)
-        files += [directory / paths.SOURCE_RECORD, directory / paths.SOURCE_LABELS,
+        files += [directory / paths.SOURCE_RECORD,
                   directory / paths.PRELABEL_RECORD, *_annotations(root, source)]
     return [path for path in files if path.exists()]
 
@@ -297,19 +296,7 @@ def add(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = 
         if plan is None:
             result.lines.append(f"  source {source}: already has {name}, unchanged")
             continue
-        reviews = record.setdefault("reviews", [])
-        if plan not in reviews:
-            reviews.append(plan)
-        record["classes"] = after[source]
-        paths.write_json(directory / paths.SOURCE_RECORD, record)
-        sources.write_labels(directory, after[source])
-        for image in plan["files"]:
-            path = xanylabeling.annotation_path(directory / image)
-            if path.is_file():
-                xanylabeling.update(path, checked=False)
-        record = sources.read_record(directory)
-        next(r for r in record["reviews"] if r == plan)["revoked"] = True
-        paths.write_json(directory / paths.SOURCE_RECORD, record)
+        _extend(directory, after[source], [plan])
         if plan.get("skipped"):
             result.lines.append(f"  source {source}: class added, nothing unchecked ({plan['skipped']})")
         else:
@@ -326,6 +313,199 @@ def add(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = 
         result.lines.append(f"  next: label {name} in a few dozen of these images and check them, train v0, then "
                             f"train prelabel {spec['id']} --source <source> --class {name} --run <v0>")
     return result
+
+
+def _extend(directory: Path, classes: list[str], plans: list[dict]) -> None:
+    """来源记下新的类别与复核名单（一次原子写入，revoked: false），再撤销名单中图片的 checked，最后标记
+    revoked：中断后来源已有这些类别，名单未完成，重新执行时按名单继续撤销。"""
+    record = sources.read_record(directory)
+    reviews = record.setdefault("reviews", [])
+    for plan in plans:
+        if plan not in reviews:
+            reviews.append(plan)
+    record["classes"] = classes
+    paths.write_json(directory / paths.SOURCE_RECORD, record)
+    for plan in plans:
+        for image in plan["files"]:
+            path = xanylabeling.annotation_path(directory / image)
+            if path.is_file():
+                xanylabeling.update(path, checked=False)
+    record = sources.read_record(directory)
+    for plan in plans:
+        next(r for r in record["reviews"] if r == plan)["revoked"] = True
+    paths.write_json(directory / paths.SOURCE_RECORD, record)
+
+
+def add_source(repo: Path, root: Path, spec: dict, source: str, reason: str = "") -> Result:
+    """把来源加入模型的 data.sources。来源从此为模型的类别标注：
+    - 还没有类别的来源（刚导入）记下模型的类别。随导入带来的已勾选标注视为按这些类别标注过（与 train accept
+      一样，确认的责任在执行它的人），输出中给出数量。
+    - 已为其他类别标注过的来源追加缺少的类别；已勾选的图片可能有这些类别的目标，与 add 一样改为未勾选、记入
+      复核名单（每个类别一份）。给出 reason 时只追加类别、不撤销，理由记入名单。
+    - 二级模型不改变来源的类别：来源必须已为它的 cascade.classes 标注（先把来源加入父模型）。
+    写入顺序：来源记录与标注 → sources.lock.json → model.yaml；中断后重新执行同一命令即可完成。"""
+    directory = paths.source_dir(root, source)
+    record = sources.read_record(directory)
+    if source in spec["data"]["sources"]:
+        raise TrainError(f"{source} is already a source of {spec['id']}")
+    have = sources.class_list(directory, record)
+    unfinished = [r for r in record.get("reviews") or [] if not r.get("revoked")]
+    lines = []
+    if spec.get("cascade"):
+        if reason:
+            raise TrainError("--reason goes with adding a source to a detection model")
+        missing = [name for name in spec["cascade"]["classes"] if name not in have]
+        if missing:
+            parent = spec["cascade"]["parent"]
+            raise TrainError(f"source {source} is not labeled for {', '.join(missing)} (cascade.classes of "
+                             f"{spec['id']}): add it to the parent first: train update {parent} source add {source}")
+        classes, plans = have, []
+        lines.append(f"  source {source}: {spec['id']} reads {spec['data']['from_parent']['attribute']} on its "
+                     f"{', '.join(spec['cascade']['classes'])} boxes")
+    else:
+        missing = [name for name in spec["classes"] if name not in have]
+        classes, plans = [*have, *missing], []
+        if not have:
+            checked = len(_checked(directory, record, None))
+            lines.append(f"  source {source}: labeled for the {len(classes)} classes of {spec['id']} from now on")
+            if checked:
+                lines.append(f"  note: {checked} checked annotations came with the import; they count as labeled for "
+                             "these classes (uncheck the ones that are not)")
+        elif missing:
+            files = _checked(directory, record, None)
+            now = _now()
+            plans = [{"class": name, "from": None, "at": now, "files": [] if reason else files,
+                      **({"skipped": reason} if reason else {}), "revoked": False} for name in missing]
+            done = "nothing unchecked" if reason else f"{len(files)} checked images unchecked for review"
+            lines.append(f"  source {source}: added {', '.join(missing)}; {done}")
+        else:
+            lines.append(f"  source {source}: already labeled for the classes of {spec['id']}")
+    lock_path = lock.path(repo, spec["id"])
+    _check_writable(_source_files(root, [source]) + [specs.path(repo, spec["id"])] +
+                    ([lock_path] if lock_path.exists() else []))
+    if classes != have or plans or unfinished:
+        _extend(directory, classes, plans + unfinished)
+    models = _models(repo)
+    updated, pending = [], []
+    if classes != have:  # 共用这个来源的其他模型：来源多了类别，由它们确认
+        updated, pending = _refresh_locks(repo, root, models, {source: classes}, lambda _, names: names)
+    lock.write(repo, spec["id"], {**lock.read(repo, spec["id"]), source: classes})
+    names = [*spec["data"]["sources"], source]
+    specs.write_sources(repo, spec["id"], names)
+    result = Result([f"added source {source} to {spec['id']} (data.sources: {', '.join(names)})", *lines,
+                     f"  recorded the classes of {source} in {lock_path} (commit it with the model)"], [source])
+    result.lines += _lock_lines(updated, pending)
+    return result
+
+
+def remove_source(repo: Path, root: Path, spec: dict, source: str) -> Result:
+    """把来源移出模型的 data.sources。来源本身（素材、标注、类别）不变：其他模型可能还在用它，以后也可以再
+    加回来。"""
+    if source not in spec["data"]["sources"]:
+        raise TrainError(f"{source} is not a source of {spec['id']}")
+    recorded = lock.read(repo, spec["id"])
+    if source in recorded:
+        lock.write(repo, spec["id"], {name: classes for name, classes in recorded.items() if name != source})
+    names = [name for name in spec["data"]["sources"] if name != source]
+    specs.write_sources(repo, spec["id"], names)
+    return Result([f"removed source {source} from {spec['id']} (data.sources: {', '.join(names) or 'none'}); the "
+                   "source itself is unchanged"], [source])
+
+
+# 二级模型：类别是父类别框上一个属性的取值（§12）。改动的是标注中的属性值，不是来源的类别，所以来源的类别与
+# sources.lock.json 的类别依赖不变；改名记入 renamed，发布时与当前发布的类别对应。
+
+
+def _value_scope(repo: Path, root: Path, spec: dict) -> tuple[str, set[str], list[Path]]:
+    """(属性, 触发类别, 来源中的标注文件)。同一来源中同名属性是同一个属性：另一个二级模型也在这些来源上
+    声明它时拒绝，两边的取值必须一起改（暂不支持）。"""
+    attribute = spec["data"]["from_parent"]["attribute"]
+    own = set(spec["data"]["sources"])
+    others = [model_id for model_id, other in sorted(_models(repo).items())
+              if model_id != spec["id"] and other.get("cascade")
+              and other["data"]["from_parent"]["attribute"] == attribute and own & set(other["data"]["sources"])]
+    if others:
+        raise TrainError(f"{', '.join(others)} also read attribute {attribute} in the sources of {spec['id']}: one "
+                         "attribute has one set of values in a source, so change them together by hand")
+    files = [path for source in sorted(own) for path in _annotations(root, source)]
+    _check_writable(files + [specs.path(repo, spec["id"])])
+    return attribute, set(spec["cascade"]["classes"]), files
+
+
+def _value_lines(repo: Path, spec: dict, sources_names: list[str]) -> list[str]:
+    return _republish_lines(repo, [spec["id"]]) + [
+        f"  reopen {', '.join(sources_names)} in X-AnyLabeling and load the .attributes.json of "
+        f"{spec['cascade']['parent']} again"]
+
+
+def rename_value(repo: Path, root: Path, spec: dict, old: str, new: str) -> Result:
+    """二级模型的类别改名：来源中属性取值 old 改为 new（所有框：同一来源中同名属性含义相同），再改规格。"""
+    ignored = spec["data"].get("ignore_classes") or []
+    if old not in spec["classes"]:
+        raise TrainError(f"{old} is not a class of {spec['id']} (a value of "
+                         f"{spec['data']['from_parent']['attribute']})")
+    if not new.strip() or new != new.strip():
+        raise TrainError(f"invalid class name {new!r}")
+    if new in spec["classes"] or new in ignored:
+        raise TrainError(f"{spec['id']} already has {new} in classes or data.ignore_classes")
+    attribute, _, files = _value_scope(repo, root, spec)
+    count = sum(xanylabeling.rewrite_attribute(path, attribute, {old: new}) for path in files)
+    lock.record_rename(repo, spec["id"], old, new)   # 中断后重新执行时再记一次，结果相同
+    specs.write_classes(repo, spec["id"], [new if name == old else name for name in spec["classes"]])
+    return Result([f"renamed {old} to {new} in {spec['id']}", f"  {count} boxes with {attribute}={old} rewritten",
+                   *_value_lines(repo, spec, spec["data"]["sources"])], list(spec["data"]["sources"]))
+
+
+def retire_value(repo: Path, root: Path, spec: dict, name: str, into: str | None = None) -> Result:
+    """二级模型删除一个类别，后面的类别号前移。--into 把来源中的这个取值改为另一个类别；否则取值留在标注中，
+    记入 data.ignore_classes（这样的框不收入，与“未知”一样）。"""
+    classes = spec["classes"]
+    if name not in classes:
+        raise TrainError(f"{name} is not a class of {spec['id']}")
+    if len(classes) <= 2:
+        raise TrainError(f"{spec['id']} would have one class left: a classifier needs two")
+    if into is not None and (into == name or into not in classes):
+        raise TrainError(f"--into must name another class of {spec['id']}")
+    attribute, _, files = _value_scope(repo, root, spec)
+    remaining = [c for c in classes if c != name]
+    if into is None:
+        ignored = spec["data"].get("ignore_classes") or []
+        if name not in ignored:
+            specs.write_data_list(repo, spec["id"], "ignore_classes", [*ignored, name])
+        specs.write_classes(repo, spec["id"], remaining)
+        lines = [f"retired {name} from {spec['id']}: boxes with {attribute}={name} stay as they are and are left out "
+                 "(data.ignore_classes)"]
+    else:
+        count = sum(xanylabeling.rewrite_attribute(path, attribute, {name: into}) for path in files)
+        specs.write_classes(repo, spec["id"], remaining)
+        lines = [f"merged {name} into {into} in {spec['id']}", f"  {count} boxes with {attribute}={name} rewritten"]
+    return Result([*lines, *_renumber_lines(classes, name), *_value_lines(repo, spec, spec["data"]["sources"])],
+                  list(spec["data"]["sources"]))
+
+
+def add_value(repo: Path, root: Path, spec: dict, name: str, from_class: str | None = None) -> Result:
+    """二级模型追加一个类别（类别号在最后）。--from 给出新类别以前被标成的取值：触发类别框上的这个取值被删去，
+    这些框成为没有取值、不进入数据集，由 train prelabel <id> 提议、人在复核集中核对后写回；图片的 checked 不变，
+    父模型照常使用它们。没有 --from 时标注不变。值在 data.ignore_classes 中时移出，那些框从此收入。"""
+    ignored = spec["data"].get("ignore_classes") or []
+    if not name.strip() or name != name.strip():
+        raise TrainError(f"invalid class name {name!r}")
+    if name in spec["classes"]:
+        raise TrainError(f"{spec['id']} already has a class {name}")
+    if from_class is not None and from_class not in spec["classes"] and from_class not in ignored:
+        raise TrainError(f"--from must name a class of {spec['id']} or a value in data.ignore_classes")
+    attribute, parents, files = _value_scope(repo, root, spec)
+    lines = [f"added {name} to {spec['id']} as class {len(spec['classes'])}"]
+    if from_class is not None:
+        count = sum(xanylabeling.rewrite_attribute(path, attribute, {from_class: None}, parents) for path in files)
+        lines.append(f"  {count} boxes with {attribute}={from_class} lost the value; next: train prelabel {spec['id']} "
+                     f"--source <source> proposes values for them with the current model, and you correct them to "
+                     f"{name} where it applies in the review")
+    if name in ignored:
+        specs.write_data_list(repo, spec["id"], "ignore_classes", [v for v in ignored if v != name])
+        lines.append(f"  {name} is no longer in data.ignore_classes: its boxes are samples from now on")
+    specs.write_classes(repo, spec["id"], [*spec["classes"], name])
+    return Result([*lines, *_value_lines(repo, spec, spec["data"]["sources"])], list(spec["data"]["sources"]))
 
 
 def _checked(directory: Path, record: dict, from_class: str | None) -> list[str]:
@@ -368,5 +548,6 @@ def _republish_lines(repo: Path, model_ids: list[str], sources_changed: bool = F
         lines.append(f"  {', '.join(published)}: the published classes no longer match model.yaml, so packaging "
                      "fails until a run on the new classes is published; services using them must review the change")
     if sources_changed:
-        lines.append("  reopen the changed sources in X-AnyLabeling and load labels.txt again")
+        lines.append("  reopen the changed sources in X-AnyLabeling and load the .classes.txt and .attributes.json "
+                     "again")
     return lines

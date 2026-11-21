@@ -19,8 +19,8 @@ from unittest import mock
 
 from deploy_support import ROOT
 from dsf_deploy import classes as class_diff, models
-from dsf_train import (attributes, backends, cli, dataset, lock, media, paths, publish, runs, sources, spec, split, update,
-                       xanylabeling)
+from dsf_train import (backends, cli, dataset, labeling, lock, media, paths, publish, runs, sources, spec,
+                       split, update, xanylabeling)
 from dsf_train.backends import ultralytics
 from dsf_train.tasks import classify, detect
 from dsf_train.errors import TrainError
@@ -50,6 +50,10 @@ def annotation(path: Path, template: Path, checked: bool, **changes) -> Path:
     document.update({"imagePath": path.with_suffix(".jpg").name, "checked": checked, **changes})
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def read_lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines()
 
 
 def new_file_mode() -> int:
@@ -94,8 +98,13 @@ class TrainingTestCase(unittest.TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def import_(self, *paths_, source="batch-01", **options):
-        importer = sources.Importer(self.root, source, CLASSES, **options)
+        """导入，新来源记下 CLASSES（相当于 train update m source add 对来源的作用）。"""
+        importer = sources.Importer(self.root, source, **options)
         importer.run([Path(p) for p in paths_])
+        record = sources.read_record(self.source(source))
+        if not record["classes"]:
+            record["classes"] = list(CLASSES)
+            paths.write_json(self.source(source) / paths.SOURCE_RECORD, record)
         return importer
 
     def source(self, name="batch-01"):
@@ -181,7 +190,7 @@ class ImportTest(TrainingTestCase):
         self.assertEqual(info["origin"], str(self.raw / "cam1/20260808_102827_00000001.jpg"))
         imported = xanylabeling.read(self.source() / "20260808_102827_00000001.json")
         self.assertEqual((imported.image, imported.checked), ("20260808_102827_00000001.jpg", True))
-        self.assertEqual((self.source() / paths.SOURCE_LABELS).read_text(encoding="utf-8").splitlines(), CLASSES)
+        self.assertFalse((self.source() / "labels.txt").exists())   # 导入不涉及模型，不写类别文件
         # 同一张图不能进入另一个来源（可能一边训练一边测试）
         again = self.import_(self.raw / "cam1", source="batch-02")
         self.assertEqual((again.report["images imported"], again.report["duplicates skipped"]), (0, 2))
@@ -454,22 +463,25 @@ class ClassDependencyTest(TrainingTestCase):
         code, _, err = self.train("update", "m", "--confirm")
         self.assertEqual(code, 1)
         self.assertIn("source batch-01 has no class 新类别", err)
-        with self.assertRaisesRegex(TrainError, "source batch-01 has no class 新类别"):
-            sources.Importer(self.root, "batch-01", CLASSES + ["新类别"])  # 导入也不能绕过
+        image(self.tmp / "more/x.jpg", "white")
+        sources.Importer(self.root, "batch-01").run([self.tmp / "more"])
+        self.assertEqual(sources.read_record(self.source())["classes"], CLASSES)  # 导入不改来源的类别
 
     def test_sources_without_recorded_classes_use_labels_txt(self):
         record = sources.read_record(self.source())
         del record["classes"]  # 实现类别依赖之前导入的来源
         (self.source() / paths.SOURCE_LABELS).write_text("\n".join(CLASSES + ["护栏"]) + "\n", encoding="utf-8")
+        (self.source() / "attributes.json").write_text("{}", encoding="utf-8")   # 旧版按来源生成的属性文件
         paths.write_json(self.source() / paths.SOURCE_RECORD, record)
         self.assertEqual(sources.class_list(self.source(), record), CLASSES + ["护栏"])
         self.prepare()
         self.assertEqual(self.recorded()["sources"]["batch-01"], CLASSES + ["护栏"])
-        image(self.tmp / "more/x.jpg", "white")
-        sources.Importer(self.root, "batch-01", CLASSES[:2]).run([self.tmp / "more"])  # 另一个模型继续导入
+        # 重新生成标注工具文件时迁移：类别记入 source.json，旧文件删除，换成按模型的一对。
+        labeling.refresh(self.repo, self.root, ["batch-01"])
         self.assertEqual(sources.read_record(self.source())["classes"], CLASSES + ["护栏"])
-        self.assertEqual((self.source() / paths.SOURCE_LABELS).read_text(encoding="utf-8").splitlines(),
-                         CLASSES + ["护栏"])
+        self.assertEqual(sorted(p.name for p in self.source().glob("*.txt")), ["m.classes.txt"])
+        self.assertFalse((self.source() / "attributes.json").exists())
+        self.assertTrue((self.source() / "m.attributes.json").is_file())
 
     def test_sources_added_to_or_removed_from_the_model(self):
         self.prepare()
@@ -543,8 +555,8 @@ class UpdateTest(TrainingTestCase):
         self.assertTrue(xanylabeling.read(self.source() / "f_0.json").checked)  # checked 不变
         renamed = ["圆牌", "龙门架A", "防撞桶"]
         self.assertEqual(self.source_classes(), renamed)
-        self.assertEqual((self.source() / paths.SOURCE_LABELS).read_text(encoding="utf-8").splitlines(), renamed)
         self.assertEqual(self.spec()["classes"], renamed)
+        self.assertEqual(read_lines(self.source() / "m.classes.txt"), renamed)
         self.assertEqual(spec.load(self.repo, "m2")["classes"], ["龙门架A", "防撞桶"])  # 不用它的模型不变
         self.assertEqual((self.locked("m"), self.locked("m2")), (renamed, renamed))  # 两边的记录都自动更新
         for model_id in ("m", "m2"):
@@ -1056,6 +1068,56 @@ class PrelabelTest(RunTestCase):
         self.assertTrue(xanylabeling.read(self.directory / "n_1.json").checked)
         log = json.loads((self.directory / paths.PRELABEL_RECORD).read_text(encoding="utf-8"))
         self.assertEqual(sorted(log["images"]), ["n_0.jpg"])
+
+    def test_the_second_stage_model_fills_its_attribute_on_the_new_boxes_in_the_source(self):
+        code, _, err = self.train("init", "occ", "--task", "classify", "--class", "否", "--class", "是",
+                                  "--parent", "m", "--parent-class", CLASSES[0], "--attribute", "遮挡")
+        self.assertEqual(code, 0, err)
+        path = spec.path(self.repo, "occ")
+        path.write_text(path.read_text().replace("backend: ultralytics", "backend: fake"))
+        self.assertEqual(self.train("update", "m", "source", "add", "batch-02")[0], 0)
+        self.assertEqual(self.train("update", "occ", "source", "add", "batch-02")[0], 0)
+        # occ 的一次完成的 run（假后端总是以 0.9 预测“否”）。
+        run_dir = self.root / "runs/occ/r"
+        (run_dir / "train" / ultralytics.BEST).parent.mkdir(parents=True)
+        (run_dir / "train" / ultralytics.BEST).write_bytes(b"occ")
+        (run_dir / "run.json").write_text(json.dumps({"status": "completed", "classes": ["否", "是"],
+                                                      "backend": {"name": "fake"}, "task": "classify",
+                                                      "options": {}}), encoding="utf-8")
+        code, out, err = self.train("prelabel", "occ", "--source", "batch-02", "--run", "r")
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 images of batch-02 have no annotation yet: prelabel or label the m boxes first", out)
+
+        code, out, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id)
+        self.assertEqual(code, 0, err)
+        self.assertIn("train prelabel occ --source batch-02", out)       # 检测模型只写框，提示下一步
+        self.assertEqual(xanylabeling.read(self.directory / "n_0.json").shapes[0].attributes, {})
+        code, out, err = self.train("prelabel", "occ", "--source", "batch-02", "--run", "r", "--conf", "0.95")
+        self.assertIn("0 boxes filled, 2 left empty (below --conf 0.95)", out)
+        self.assertNotIn("wrote", out)                                  # 都没把握：来源不变
+        before = (self.directory / "n_1.json").read_bytes()
+
+        original = self.backend.predict
+
+        def predict(task, weights, images, *args, **kwargs):              # 推理期间人在工具中保存了 n_1
+            yield from original(task, weights, images, *args, **kwargs)
+            (self.directory / "n_1.json").write_text(before.decode().replace('"description": ""',
+                                                                              '"description": "x"', 1))
+        with mock.patch.object(self.backend, "predict", predict):
+            code, out, err = self.train("prelabel", "occ", "--source", "batch-02", "--run", "r")
+        self.assertEqual(code, 0, err)
+        self.assertIn("prelabeled 遮挡 with run r: 1 boxes filled, 0 left empty", out)
+        self.assertIn("wrote 1 unchecked images of batch-02", out)
+        self.assertIn("skipped 1 images saved meanwhile (not written)", out)
+        found = xanylabeling.read(self.directory / "n_0.json")
+        self.assertEqual([(s.label, s.attributes) for s in found.shapes],
+                         [(CLASSES[0], {"遮挡": "否"}), ("龙门架A", {})])   # 只填触发类别的框
+        self.assertFalse(found.checked)
+        self.assertEqual(xanylabeling.read(self.directory / "n_1.json").shapes[0].attributes, {})
+        self.assertFalse((self.root / "reviews").exists())             # 未勾选的图片不需要复核集
+        log = json.loads((self.directory / paths.PRELABEL_RECORD).read_text(encoding="utf-8"))
+        self.assertEqual([(b["model"], b["images"]) for b in log["attribute_batches"]], [("occ", 1)])
+        self.assertIn("遮挡", json.loads((self.directory / "m.attributes.json").read_text())[CLASSES[0]])
 
     def test_runs_that_cannot_prelabel(self):
         code, _, err = self.train("prelabel", "m", "--source", "batch-02", "--run", self.run_id, "--conf", "1.5")
@@ -1692,12 +1754,68 @@ class SecondStageSpecTest(SecondStageTestCase):
             spec.load(self.repo, "occ2")
 
     def test_commands_that_treat_classes_as_labels_are_refused(self):
-        code, _, err = self.train("import", "occ", str(self.raw), "--source", "batch-01")
-        self.assertIn("occ is a second-stage model: its samples are boxes of m", err)
-        code, _, err = self.train("update", "occ", "rename", "否", "无遮挡")
-        self.assertIn("values of the box attribute 遮挡, not source labels", err)
+        code, _, err = self.train("update", "occ", "add", "部分", "--skip-source", "batch-01", "--reason", "x")
+        self.assertIn("--skip-source is for detection models", err)
         code, _, err = self.train("prelabel", "occ", "--source", "batch-01", "--class", "是")
         self.assertIn("--class prelabels a new class of a detection model", err)
+
+
+class SecondStageValuesTest(SecondStageTestCase):
+    """train update <二级模型> add|rename|retire：类别是属性值，改写的是来源中框上的取值。"""
+    def setUp(self):
+        super().setUp()
+        image(self.raw / "g/a.jpg", "red", size=(640, 480))
+        boxes(self.raw / "g/a.json", [
+            (self.PARENT_CLASS, [10, 10, 110, 90], {"遮挡": "是", "破损": "否"}),
+            (self.PARENT_CLASS, [200, 50, 260, 130], {"遮挡": "否"}),
+            ("龙门架A", [300, 50, 360, 130], {"遮挡": "是"})])
+        self.import_(self.raw)
+
+    def values(self):
+        return [shape.attributes.get("遮挡") for shape in xanylabeling.read(self.source() / "a.json").shapes]
+
+    def test_rename_rewrites_the_values_and_is_recorded_for_publish(self):
+        code, out, err = self.train("update", "occ", "rename", "是", "遮挡了")
+        self.assertEqual(code, 0, err)
+        self.assertIn("2 boxes with 遮挡=是 rewritten", out)
+        self.assertEqual(self.values(), ["遮挡了", "否", "遮挡了"])   # 同一来源中同名属性含义相同
+        self.assertEqual(self.child()["classes"], ["否", "遮挡了"])
+        self.assertEqual(lock.renamed(self.repo, "occ"), {"是": "遮挡了"})
+        self.assertTrue(xanylabeling.read(self.source() / "a.json").checked)
+        document = json.loads((self.source() / "m.attributes.json").read_text(encoding="utf-8"))
+        self.assertEqual(document[self.PARENT_CLASS]["遮挡"], ["否", "遮挡了", "未知"])
+        self.assertIn("already has 未知", self.train("update", "occ", "rename", "否", "未知")[2])
+
+    def test_add_with_from_empties_those_values_for_review(self):
+        code, out, err = self.train("update", "occ", "add", "部分", "--from", "是")
+        self.assertEqual(code, 0, err)
+        self.assertIn("1 boxes with 遮挡=是 lost the value", out)
+        self.assertEqual(self.values(), [None, "否", "是"])          # 只改触发类别的框
+        self.assertTrue(xanylabeling.read(self.source() / "a.json").checked)   # 父模型照常使用这张图
+        self.assertEqual(self.child()["classes"], ["否", "是", "部分"])
+        code, out, err = self.train("update", "occ", "add", "未知")   # 从 ignore_classes 移入类别
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.child()["classes"][-1], self.child()["data"]["ignore_classes"]), ("未知", []))
+
+    def test_retire_ignores_the_value_or_merges_it(self):
+        self.assertIn("a classifier needs two", self.train("update", "occ", "retire", "是")[2])
+        self.assertEqual(self.train("update", "occ", "add", "部分")[0], 0)
+        code, out, err = self.train("update", "occ", "retire", "部分")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.child()["classes"], self.child()["data"]["ignore_classes"]), (["否", "是"], ["未知", "部分"]))
+        self.assertEqual(self.train("update", "occ", "add", "全部")[0], 0)
+        code, out, err = self.train("update", "occ", "retire", "是", "--into", "全部")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.values(), ["全部", "否", "全部"])
+        self.assertEqual(self.child()["classes"], ["否", "全部"])
+
+    def test_another_model_reading_the_same_attribute_is_refused(self):
+        (self.repo / "models/occ2").mkdir()
+        spec.path(self.repo, "occ2").write_text(spec.path(self.repo, "occ").read_text(encoding="utf-8").replace(
+            "id: occ", "id: occ2"), encoding="utf-8")
+        code, _, err = self.train("update", "occ", "rename", "是", "遮挡了")
+        self.assertIn("occ2 also read attribute 遮挡 in the sources of occ", err)
+        self.assertEqual(self.values(), ["是", "否", "是"])
 
 
 class SecondStagePrepareTest(SecondStageTestCase):
@@ -1802,7 +1920,7 @@ class SecondStagePrepareTest(SecondStageTestCase):
         self.assertEqual(self.child()["cascade"], {"parent": "m", "classes": [CLASSES[1]]})
 
 
-class AttributesTest(SecondStageTestCase):
+class LabelingFilesTest(SecondStageTestCase):
     def setUp(self):
         super().setUp()
         [group] = groups_in("train", 1)
@@ -1814,52 +1932,150 @@ class AttributesTest(SecondStageTestCase):
         ], checked=False)  # 未检查的标注中的属性同样保留：它们也会在工具中被编辑
         self.import_(self.raw)
 
-    def test_the_file_joins_the_model_attribute_with_the_attributes_in_the_source(self):
+    def attributes(self, model="m"):
+        return json.loads((self.source() / f"{model}.attributes.json").read_text(encoding="utf-8"))
+
+    def test_one_pair_per_detection_model_joins_its_second_stage_attributes(self):
         code, out, err = self.train("prepare", "occ")   # 标注都没有勾选：prepare 失败
         self.assertEqual((code, "no checked images in batch-01" in err), (1, True))
         self.assertIn("warning: 1 boxes of batch-01 have 遮挡=也许, which occ does not accept", out)
-        # 失败之前已经写好属性文件：改正标注所需的取值已经在里面。
-        document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))
-        # 模型声明的属性在触发类别上，取值为 classes + ignore_classes；同名属性的取值是各类别上的并集。
+        # 失败之前已经写好文件：改正标注所需的取值已经在里面。二级模型没有自己的文件。
+        self.assertEqual(sorted(p.name for p in labeling.files(self.source())), ["m.attributes.json", "m.classes.txt"])
+        self.assertEqual(read_lines(self.source() / "m.classes.txt"), CLASSES)
+        document = self.attributes()
+        # 二级模型声明的属性在触发类别上，取值为 classes + ignore_classes；同名属性的取值是各类别上的并集。
         self.assertEqual(document[self.PARENT_CLASS], {"破损": ["否", "是"], "遮挡": ["否", "是", "未知", "也许"]})
         self.assertEqual(document["防撞桶"], {"数量": ["一个"], "破损": ["否", "是"]})
         self.assertEqual(document["龙门架A"], {"遮挡": ["否", "是", "未知", "也许"]})
-        self.assertEqual(list(document)[:3], [self.PARENT_CLASS, "龙门架A", "防撞桶"])   # labels.txt 的顺序
+        self.assertEqual(list(document)[:3], [self.PARENT_CLASS, "龙门架A", "防撞桶"])   # 模型类别的顺序
         self.assertEqual(document["__widget_types__"]["防撞桶"], {"数量": "radiobutton", "破损": "radiobutton"})
-        self.assertIn("attributes: " + str(self.source() / "attributes.json"), out)
+        self.assertIn(f"labeling batch-01 for m: {self.source() / 'm.classes.txt'} and m.attributes.json", out)
 
-    def test_import_writes_the_file_and_update_rewrites_it(self):
-        self.assertFalse((self.source() / "attributes.json").exists())  # setUp 直接导入，没有经过命令
+    def test_the_parent_has_files_for_the_sources_of_its_second_stage_models(self):
+        self.set_data(sources=["other"])          # 父模型不在这个来源上训练，二级模型在
+        labeling.refresh(self.repo, self.root, ["batch-01"])
+        self.assertEqual(self.attributes()[self.PARENT_CLASS]["遮挡"], ["否", "是", "未知", "也许"])
+        self.set_child(sources=["other"])          # 都不再使用这个来源：文件删除
+        lines = labeling.refresh(self.repo, self.root, ["batch-01"])
+        self.assertEqual(labeling.files(self.source()), [])
+        self.assertIn("  note: no model uses source batch-01 yet: train update <model> source add batch-01", lines)
+
+    def test_import_and_update_regenerate_the_files(self):
         image(self.raw / "more/b.jpg", "blue", size=(640, 480))
-        code, out, err = self.train("import", "m", str(self.raw / "more"), "--source", "batch-01")
+        code, out, err = self.train("import", "batch-01", str(self.raw / "more"))
         self.assertEqual(code, 0, err)
-        self.assertTrue((self.source() / "attributes.json").is_file())
-        # 父类别改名同时改写二级模型的 cascade.classes：属性文件中新名称的类别带着它的属性。
+        self.assertTrue((self.source() / "m.attributes.json").is_file())
+        # 父类别改名同时改写二级模型的 cascade.classes：文件中新名称的类别带着它的属性。
         lock.check(self.repo, self.root, self.spec(), record_new=True)  # rename 要求确认过的类别依赖
         code, out, err = self.train("update", "m", "rename", self.PARENT_CLASS, "圆牌")
         self.assertEqual(code, 0, err)
-        document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))
-        self.assertEqual(document["圆牌"], {"破损": ["否", "是"], "遮挡": ["否", "是", "未知", "也许"]})
-        # 二级模型的规格暂时不成立时：import 照常完成，属性文件暂不计入它并说明原因。
+        self.assertEqual(read_lines(self.source() / "m.classes.txt")[0], "圆牌")
+        self.assertEqual(self.attributes()["圆牌"], {"破损": ["否", "是"], "遮挡": ["否", "是", "未知", "也许"]})
+        # 二级模型的规格暂时不成立时：import 照常完成，文件暂不计入它并说明原因。
         self.edit_child("  - 圆牌\n", "  - 不存在\n")
         image(self.raw / "more2/c.jpg", "green", size=(640, 480))
-        code, out, err = self.train("import", "m", str(self.raw / "more2"), "--source", "batch-01")
+        code, out, err = self.train("import", "batch-01", str(self.raw / "more2"))
         self.assertEqual(code, 0, err)
-        self.assertIn("note: the attributes of occ are not in attributes.json until its model.yaml is valid again", out)
-        document = json.loads((self.source() / "attributes.json").read_text(encoding="utf-8"))
-        self.assertEqual(document["圆牌"], {"破损": ["否", "是"], "遮挡": ["也许", "是"]})  # 只剩标注中已有的
+        self.assertIn("note: occ is left out of the labeling files of batch-01 until its model.yaml is valid again",
+                      out)
+        self.assertEqual(self.attributes()["圆牌"], {"破损": ["否", "是"], "遮挡": ["也许", "是"]})  # 只剩标注中已有的
 
     def test_many_values_use_a_combobox(self):
         boxes(self.source() / "a.json", [("防撞桶", [1, 1, 50, 50], {"编号": str(n)}) for n in range(7)])
-        result = attributes.generate(self.repo, self.root, "batch-01")
-        self.assertEqual(result.document["__widget_types__"]["防撞桶"]["编号"], "combobox")
+        [pair] = labeling.generate(self.repo, self.root, "batch-01").pairs
+        self.assertEqual(pair.document["__widget_types__"]["防撞桶"]["编号"], "combobox")
 
     def test_models_must_agree_on_the_values_of_an_attribute(self):
         (self.repo / "models/occ2").mkdir()
         spec.path(self.repo, "occ2").write_text(spec.path(self.repo, "occ").read_text(encoding="utf-8").replace(
             "id: occ", "id: occ2").replace("ignore_classes: [\"未知\"]", "ignore_classes: []"), encoding="utf-8")
         with self.assertRaisesRegex(TrainError, "models occ and occ2 give different values for attribute 遮挡"):
-            attributes.generate(self.repo, self.root, "batch-01")
+            labeling.generate(self.repo, self.root, "batch-01")
+
+
+class SourceUpdateTest(SecondStageTestCase):
+    """train import <来源> 与 train update <模型> source add|remove（docs/training.md §5.1、§15.3）。"""
+    def setUp(self):
+        super().setUp()
+        image(self.raw / "g/n_0.jpg", "red", size=(640, 480))
+        image(self.raw / "g/n_1.jpg", "blue", size=(640, 480))
+        boxes(self.raw / "g/n_1.json", [(self.PARENT_CLASS, [10, 10, 110, 90], {})])   # 随导入带来的已勾选标注
+
+    def test_import_then_add_the_source_to_the_parent_and_the_second_stage_model(self):
+        code, out, err = self.train("import", "new", str(self.raw))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sources.read_record(self.source("new"))["classes"], [])   # 导入不涉及模型
+        self.assertIn("note: no model uses source new yet: train update <model> source add new", out)
+        code, _, err = self.train("update", "occ", "source", "add", "new")
+        self.assertEqual(code, 1)
+        self.assertIn("source new is not labeled for 标志牌(圆牌) (cascade.classes of occ): add it to the parent first: "
+                      "train update m source add new", err)
+
+        text = spec.path(self.repo, "m").read_text(encoding="utf-8")
+        code, out, err = self.train("update", "m", "source", "add", "new")
+        self.assertEqual(code, 0, err)
+        self.assertIn("added source new to m (data.sources: batch-01, new)", out)
+        self.assertIn("source new: labeled for the 3 classes of m from now on", out)
+        self.assertIn("note: 1 checked annotations came with the import", out)
+        self.assertEqual(sources.read_record(self.source("new"))["classes"], CLASSES)
+        self.assertEqual(lock.read(self.repo, "m")["new"], CLASSES)
+        self.assertEqual(self.spec()["data"]["sources"], ["batch-01", "new"])
+        # 只改了 data.sources 那一行
+        changed = [(a, b) for a, b in zip(text.splitlines(), spec.path(self.repo, "m").read_text().splitlines())
+                   if a != b]
+        self.assertEqual(changed, [('  sources: ["batch-01"]', "  sources: [batch-01, new]")])
+        self.assertEqual(read_lines(self.source("new") / "m.classes.txt"), CLASSES)
+        self.assertNotIn(self.PARENT_CLASS, json.loads((self.source("new") / "m.attributes.json").read_text()))
+
+        code, out, err = self.train("update", "occ", "source", "add", "new")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.child()["data"]["sources"], ["batch-01", "new"])
+        self.assertEqual(lock.read(self.repo, "occ")["new"], CLASSES)
+        document = json.loads((self.source("new") / "m.attributes.json").read_text(encoding="utf-8"))
+        self.assertEqual(document[self.PARENT_CLASS], {"遮挡": ["否", "是", "未知"]})   # 标注前就有全部取值
+        self.assertIn("already a source of occ", self.train("update", "occ", "source", "add", "new")[2])
+
+        code, out, err = self.train("update", "m", "source", "remove", "new")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("new", lock.read(self.repo, "m"))
+        self.assertEqual(sources.read_record(self.source("new"))["classes"], CLASSES)   # 来源不变
+        self.assertTrue((self.source("new") / "m.classes.txt").is_file())   # occ 还在用：父模型的文件保留
+        self.assertEqual(self.train("update", "occ", "source", "remove", "new")[0], 0)
+        self.assertEqual(labeling.files(self.source("new")), [])
+
+    def test_a_source_labeled_for_other_classes_gets_the_missing_ones_reviewed(self):
+        self.import_(self.raw, source="other")     # 来源已为 CLASSES 标注
+        record = sources.read_record(self.source("other"))
+        record["classes"] = CLASSES[:2]
+        paths.write_json(self.source("other") / paths.SOURCE_RECORD, record)
+        result = update.add_source(self.repo, self.root, self.spec(), "other")
+        self.assertIn("  source other: added 防撞桶; 1 checked images unchecked for review", result.lines)
+        self.assertFalse(xanylabeling.read(self.source("other") / "n_1.json").checked)
+        [review] = sources.read_record(self.source("other"))["reviews"]
+        self.assertEqual((review["class"], review["files"], review["revoked"]), ("防撞桶", ["n_1.jpg"], True))
+        self.assertEqual(sources.read_record(self.source("other"))["classes"], CLASSES)
+
+    def test_with_a_reason_nothing_is_unchecked(self):
+        self.import_(self.raw, source="other")
+        record = sources.read_record(self.source("other"))
+        record["classes"] = CLASSES[:2]
+        paths.write_json(self.source("other") / paths.SOURCE_RECORD, record)
+        code, out, err = self.train("update", "m", "source", "add", "other", "--reason", "no barrels on this road")
+        self.assertEqual(code, 0, err)
+        self.assertIn("added 防撞桶; nothing unchecked", out)
+        self.assertTrue(xanylabeling.read(self.source("other") / "n_1.json").checked)
+        [review] = sources.read_record(self.source("other"))["reviews"]
+        self.assertEqual((review["skipped"], review["files"]), ("no barrels on this road", []))
+        self.assertIn("usage", self.train("update", "m", "source", "remove", "other", "--reason", "x")[2])
+        self.assertIn("usage", self.train("update", "m", "source", "drop", "other")[2])
+
+    def test_block_style_sources_are_rewritten_on_one_line(self):
+        path = spec.path(self.repo, "m")
+        path.write_text(path.read_text().replace('  sources: ["batch-01"]', "  sources:  # 来源\n    - batch-01\n"
+                                                 "    - batch-02"), encoding="utf-8")
+        spec.write_sources(self.repo, "m", ["batch-02"])
+        self.assertIn("  sources: [batch-02]  # 来源\n  ignore_classes", path.read_text())
+        self.assertEqual(self.spec()["data"]["sources"], ["batch-02"])
 
 
 class ClassifyTaskTest(unittest.TestCase):
@@ -2040,7 +2256,8 @@ class SecondStagePublishTest(SecondStageTestCase):
         self.assertIn(f"[ ] {image_name}  [10, 10, 110, 90] 标志牌(圆牌)  labeled 是, model says 否 (0.90)  train",
                       (folder / "checklist.txt").read_text(encoding="utf-8"))
         self.assertIn(f"{name}: 3 images, 0 edited and not applied", self.train("review")[1])
-        self.assertTrue((folder / "attributes.json").is_file())   # prepare 生成的属性文件随复核集带上
+        self.assertTrue((folder / "m.attributes.json").is_file())   # prepare 生成的文件随复核集带上
+        self.assertTrue((folder / "m.classes.txt").is_file())
         # 人在复核集中改了一个框的属性（X-AnyLabeling 写临时文件再替换：副本换成新文件）。
         document = json.loads(copy.read_text(encoding="utf-8"))
         document["shapes"][0]["attributes"]["遮挡"] = "否"
@@ -2096,18 +2313,20 @@ class SecondStagePublishTest(SecondStageTestCase):
 
         code, out, err = self.train("prelabel", "occ", "--source", "batch-01", "--run", run, "--conf", "0.95")
         self.assertEqual(code, 0, err)
-        self.assertIn("0 boxes filled, 1 left empty (below --conf 0.95), on 1 images", out)
+        self.assertIn("0 boxes filled, 2 left empty (below --conf 0.95)", out)   # 已勾选的 extra 与未勾选的 u
         self.assertIn("遮挡 left empty (model unsure) (0.90)", (folder / "checklist.txt").read_text(encoding="utf-8"))
         shutil.rmtree(folder)
 
         code, out, err = self.train("prelabel", "occ", "--source", "batch-01", "--run", run)
         self.assertEqual(code, 0, err)
-        self.assertIn(f"prelabeled 遮挡 with run {run}: 1 boxes filled, 0 left empty", out)
+        self.assertIn(f"prelabeled 遮挡 with run {run}: 2 boxes filled, 0 left empty", out)
         self.assertIn("skipped 1 boxes smaller than 16 px", out)
-        self.assertEqual(source_json.read_bytes(), before)                        # 来源不变
+        self.assertEqual(source_json.read_bytes(), before)                        # 已勾选的图片：来源不变
+        self.assertIn("wrote 1 unchecked images of batch-01", out)                # 未勾选的 u 直接写入
+        self.assertEqual(xanylabeling.read(self.source() / "u.json").shapes[0].attributes, {"遮挡": "否"})
         self.assertEqual(sorted(p.name for p in folder.iterdir()),
-                         ["attributes.json", "batch-01__extra.jpg", "batch-01__extra.json", "checklist.txt",
-                          "review.json"])
+                         ["batch-01__extra.jpg", "batch-01__extra.json", "checklist.txt", "m.attributes.json",
+                          "m.classes.txt", "review.json"])
         copy = json.loads((folder / "batch-01__extra.json").read_text(encoding="utf-8"))
         self.assertEqual([shape["attributes"].get("遮挡") for shape in copy["shapes"]], ["否", None, "未知", None])
         self.assertIn("[ ] batch-01__extra.jpg  [300, 300, 400, 400] 标志牌(圆牌)  遮挡=否 proposed (0.90)",
@@ -2124,7 +2343,7 @@ class SecondStagePublishTest(SecondStageTestCase):
         self.assertIn("wrote 0 annotations back, 1 unchanged", self.train("review", "apply", name)[1])
         shutil.rmtree(folder)
         code, out, _ = self.train("prelabel", "occ", "--source", "batch-01", "--run", run)
-        self.assertIn("no checked boxes without 遮挡: nothing to prelabel", out)
+        self.assertIn("no boxes without 遮挡: nothing to prelabel", out)
         self.assertIn("is not a source of occ", self.train("prelabel", "occ", "--source", "nope", "--run", run)[2])
 
     def test_a_config_that_acts_on_other_parent_classes_is_not_published(self):

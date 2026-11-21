@@ -5,7 +5,7 @@ reviews/<名称>/
   <来源>__<图片>          来源图像的硬链接（工具不改图像）
   <来源>__<图片名>.json   标注的副本，imagePath 改为上面的文件名
   checklist.txt          每张图要核对的框
-  attributes.json        来源的属性文件（图片都来自一个来源时）
+  <模型>.classes.txt、<模型>.attributes.json  来源中给标注工具的文件（图片都来自一个来源时）
   review.json            每项的来源、图片、复制时来源标注与副本的 sha256
 
 标注只能复制，不能链接：X-AnyLabeling 4.0.6 保存时写临时文件再 os.replace 到标注路径，链接会被替换成复核目录中
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import attributes, paths, xanylabeling
+from . import labeling, paths, xanylabeling
 from .errors import TrainError
 
 REVIEWS = "reviews"
@@ -99,11 +99,10 @@ def _write(root: Path, name: str, model: str, run: str, entries: list[dict], hea
                       "source_sha256": paths.sha256(annotation), "copy_sha256": paths.sha256(copy),
                       **({"proposed": True} if entry["proposed"] else {}), "boxes": entry["boxes"]})
         checklist += [f"[ ] {name_in_review}  {line}" for line in entry["lines"]]
-    # 属性文件按来源生成；图片都来自一个来源时带上它，在复核目录中就能直接载入。
+    # 类别与属性文件在来源中生成；图片都来自一个来源时带上它们，在复核目录中就能直接载入。
     if len({entry["source"] for entry in entries}) == 1:
-        attributes_file = paths.source_dir(root, entries[0]["source"]) / attributes.FILE
-        if attributes_file.is_file():
-            shutil.copy2(attributes_file, target / attributes.FILE)
+        for path in labeling.files(paths.source_dir(root, entries[0]["source"])):
+            shutil.copy2(path, target / path.name)
     paths.write_json(target / RECORD, {"schema": SCHEMA, "model": model, "run": run, "created_at": _now(),
                                        "items": items})
     (target / CHECKLIST).write_text(header + "\n\n" + "\n".join(checklist) + "\n", encoding="utf-8")
