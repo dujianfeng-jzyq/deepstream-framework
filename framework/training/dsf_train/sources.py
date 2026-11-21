@@ -238,9 +238,12 @@ class Importer:
         self.report["videos"] += 1
 
 
-def accept(root: Path, source: str, files: list[str], everything: bool = False, reason: str = "") -> int:
-    """把指定图像的标注标为已检查（checked: true），并记录这次批量确认（docs/training.md §5.2）。
-    复核名单中还没有重新勾选的图片要有人为新类别看过，批量确认它们必须给出理由，理由记入名单（§15.2）。"""
+def accept(root: Path, source: str, files: list[str], everything: bool = False,
+           reason: str = "") -> tuple[int, list[str]]:
+    """把指定图像的标注标为已检查（checked: true），并记录这次批量确认（docs/training.md §5.2）。返回
+    (确认的数量, 检查不通过而跳过的图片)。
+    复核名单中还没有重新勾选的图片要有人为新类别看过，批量确认它们必须给出理由，理由记入名单（§15.2）。
+    检查不通过（checked: "failed"）的图片是人看过、认为要修正的，批量确认不能推翻它：点名时拒绝，--all 时跳过。"""
     directory = paths.source_dir(root, source)
     record = read_record(directory)
     if everything == bool(files):
@@ -255,7 +258,14 @@ def accept(root: Path, source: str, files: list[str], everything: bool = False, 
     missing = [name for name, path in targets if not path.is_file()]
     if missing and not everything:
         raise TrainError(f"these images have no annotation yet, label them first: {', '.join(missing[:10])}")
-    pending = [(name, path) for name, path in targets if path.is_file() and not xanylabeling.read(path).checked]
+    states = {name: xanylabeling.read(path) for name, path in targets if path.is_file()}
+    failed = [name for name, annotation in states.items() if annotation.failed]
+    if failed and not everything:
+        raise TrainError(f"{len(failed)} of these images failed the check in X-AnyLabeling "
+                         f"({', '.join(failed[:5])}{' …' if len(failed) > 5 else ''}): fix them and mark them passed "
+                         "there")
+    pending = [(name, path) for name, path in targets
+               if name in states and not states[name].checked and not states[name].failed]
     reviewing = review_classes(record)
     waiting = [name for name, _ in pending if name in reviewing]
     if waiting and not reason:
@@ -275,4 +285,4 @@ def accept(root: Path, source: str, files: list[str], everything: bool = False, 
             if skipped:
                 review.setdefault("accepted", []).append({"at": now, "reason": reason, "images": skipped})
         paths.write_json(directory / paths.SOURCE_RECORD, record)
-    return len(accepted)
+    return len(accepted), failed

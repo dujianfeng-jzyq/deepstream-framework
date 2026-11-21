@@ -311,7 +311,8 @@ def _extend(directory: Path, classes: list[str], plans: list[dict]) -> None:
     for plan in plans:
         for image in plan["files"]:
             path = xanylabeling.annotation_path(directory / image)
-            if path.is_file():
+            # 检查不通过的保留原状态：它本来就不进入数据集，人修正时也要为新类别看一遍（它在名单中）。
+            if path.is_file() and xanylabeling.read(path).checked:
                 xanylabeling.update(path, checked=False)
     record = sources.read_record(directory)
     for plan in plans:
@@ -479,14 +480,14 @@ def add_value(repo: Path, root: Path, spec: dict, name: str, from_class: str | N
 
 
 def _checked(directory: Path, record: dict, from_class: str | None) -> list[str]:
-    """来源中已检查的图片；from_class 时只取含这个类别形状的。"""
+    """来源中人看过的图片（检查通过或不通过）；from_class 时只取含这个类别形状的。"""
     found = []
     for image in sorted(record["images"]):
         path = xanylabeling.annotation_path(directory / image)
         if not path.is_file():
             continue
         annotation = xanylabeling.read(path)
-        if annotation.checked and (from_class is None or any(s.label == from_class for s in annotation.shapes)):
+        if (annotation.checked or annotation.failed) and (from_class is None or any(s.label == from_class for s in annotation.shapes)):
             found.append(image)
     return found
 

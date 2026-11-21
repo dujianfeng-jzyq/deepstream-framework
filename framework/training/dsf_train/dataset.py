@@ -120,6 +120,8 @@ def skip_reason(name: str, annotation, reviewing: dict[str, list[str]]) -> str:
     """图片不进入数据集的原因；收入时为空。新增类别时撤销的图片单独报告：它们以前检查过，只差新类别（§15.2）。"""
     if annotation is None:
         return "not labeled"
+    if annotation.failed:
+        return "check failed"
     if not annotation.checked:
         return f"waiting for review of {', '.join(reviewing[name])}" if name in reviewing else "not checked"
     return ""

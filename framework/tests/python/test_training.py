@@ -257,10 +257,26 @@ class AcceptTest(TrainingTestCase):
         self.assertIn("have no annotation yet, label them first: f_2.jpg", err)
 
     def test_accept_all_skips_unlabeled_images(self):
-        self.assertEqual(sources.accept(self.root, "batch-01", [], everything=True), 2)
-        self.assertEqual(sources.accept(self.root, "batch-01", [], everything=True), 0)
+        self.assertEqual(sources.accept(self.root, "batch-01", [], everything=True), (2, []))
+        self.assertEqual(sources.accept(self.root, "batch-01", [], everything=True), (0, []))
         with self.assertRaisesRegex(TrainError, "name the images to accept, or pass --all"):
             sources.accept(self.root, "batch-01", [])
+
+    def test_images_that_failed_the_check_stay_out_and_are_not_accepted(self):
+        # X-AnyLabeling 4.3 的第三种状态：检查不通过（checked: "failed"）
+        xanylabeling.update(self.source() / "f_1.json", checked="failed")
+        failed = xanylabeling.read(self.source() / "f_1.json")
+        self.assertEqual((failed.checked, failed.failed), (False, True))
+        self.assertEqual(dataset.skip_reason("f_1.jpg", failed, {"f_1.jpg": ["x"]}), "check failed")
+        code, _, err = self.train("accept", "batch-01", "f_1")
+        self.assertEqual(code, 1)
+        self.assertIn("1 of these images failed the check in X-AnyLabeling (f_1.jpg): fix them and mark them passed "
+                      "there", err)
+        code, out, err = self.train("accept", "batch-01", "--all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("marked 1 annotations of batch-01 as checked", out)
+        self.assertIn("left 1 images that failed the check in X-AnyLabeling as they are", out)
+        self.assertEqual(json.loads((self.source() / "f_1.json").read_text(encoding="utf-8"))["checked"], "failed")
 
 
 class SplitTest(unittest.TestCase):
@@ -589,6 +605,12 @@ class UpdateTest(TrainingTestCase):
         self.assertIn("  note: class 2 was 防撞桶 in the current release, so publish compares 防撞墩 with it as if "
                       "防撞桶 had been renamed to 防撞墩", out)
         self.assertNotIn("note: class", self.train("update", "m", "add", "护栏")[1])
+
+    def test_add_lists_the_images_that_failed_the_check_and_keeps_their_state(self):
+        xanylabeling.update(self.source() / "f_1.json", checked="failed")
+        self.assertEqual(self.train("update", "m", "add", "防撞墩")[0], 0)
+        self.assertEqual(self.reviews()[0]["files"], ["f_0.jpg", "f_1.jpg", "f_2.jpg"])  # 修正时也要看新类别
+        self.assertEqual(json.loads((self.source() / "f_1.json").read_text(encoding="utf-8"))["checked"], "failed")
 
     def test_add_from_a_class_unchecks_only_the_images_with_it(self):
         code, out, err = self.train("update", "m", "add", "标志牌(方牌)", "--from", "标志牌(圆牌)")

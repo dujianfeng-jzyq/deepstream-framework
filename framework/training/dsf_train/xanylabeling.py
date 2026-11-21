@@ -2,6 +2,7 @@
 
 按 4.0.6 实际保存的文件读取（样例见 framework/tests/python/data/x-anylabeling-*/）：
 顶层 imagePath、imageWidth、imageHeight、shapes、flags、checked；imageData 为空（非空时忽略）。
+checked 在 4.3 起有三种状态：true（检查通过）、false 或没有（未检查）、"failed"（检查不通过，等人修正）。
 每个形状 label、points、shape_type、difficult、attributes；其余字段读取时忽略，改写时原样保留。
 预标注写出的文件与 4.0.6 保存的字段相同（create），打开即可修正。
 """
@@ -32,9 +33,10 @@ class Annotation:
     image: str
     width: int
     height: int
-    checked: bool
+    checked: bool                # 检查通过（checked: true）：只有它进入数据集
     flags: dict
     shapes: list[Shape]
+    failed: bool = False         # 检查不通过（checked: "failed"）：人看过，认为还要修正
 
 
 def annotation_path(image: Path) -> Path:
@@ -72,7 +74,8 @@ def read(path: Path) -> Annotation:
         shapes.append(Shape(raw["label"], str(raw.get("shape_type") or ""), points,
                             bool(raw.get("difficult")), attributes if isinstance(attributes, dict) else {}))
     return Annotation(path, str(document.get("imagePath") or ""), width, height,
-                      document.get("checked") is True, document.get("flags") or {}, shapes)
+                      document.get("checked") is True, document.get("flags") or {}, shapes,
+                      document.get("checked") == "failed")
 
 
 def update(path: Path, **fields) -> None:

@@ -207,8 +207,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"source {args.source}: {importer.directory} ({len(importer.record['images'])} images)")
             _print(labeling.refresh(repo, root, [args.source]))
         elif args.command == "accept":
-            count = sources.accept(root, args.source, args.images, args.all, args.reason)
+            count, failed = sources.accept(root, args.source, args.images, args.all, args.reason)
             print(f"marked {count} annotations of {args.source} as checked")
+            if failed:
+                print(f"  left {len(failed)} images that failed the check in X-AnyLabeling as they are: fix them and "
+                      "mark them passed there")
         elif args.command == "prepare":
             _prepare(repo, root, spec.load(repo, args.model))
         elif args.command == "prelabel" and spec.load(repo, args.model).get("cascade"):
