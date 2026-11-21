@@ -41,6 +41,21 @@ def _print(lines: list[str]) -> None:
         print("\n".join(lines))
 
 
+def _prepare(repo: Path, root: Path, model: dict) -> str:
+    """train prepare，以及 train run 训练之前：返回数据集标识。"""
+    # 先于读取标注：prepare 因标注问题失败时，改正它们所需的属性文件已经是最新的。
+    _print(labeling.refresh(repo, root, model["data"]["sources"]))
+    for name, count in review.pending(root, model["data"]["sources"]):
+        print(f"  warning: review {name} has {count} edited annotations that are not applied: "
+              f"train review apply {name}")
+    result = dataset.prepare(repo, root, model)
+    print("\n".join(dataset.report(result, model)))
+    for source in model["data"]["sources"]:
+        for line in prelabel.review(root, model, source):
+            print(line)
+    return result.dataset_id
+
+
 def _related_sources(repo: Path, model_id: str) -> list[str]:
     """模型、它的父模型与二级模型的来源：模型的类别或来源变化后，这些来源中的标注工具文件要重新生成。"""
     models, _ = labeling._specs(repo)
@@ -106,9 +121,9 @@ def main(argv: list[str] | None = None) -> int:
     p = commands.add_parser("prepare", help="build the dataset of a model from its checked annotations")
     p.add_argument("model")
 
-    p = commands.add_parser("run", help="train a model on a prepared dataset, then evaluate it on the test split")
+    p = commands.add_parser("run", help="prepare the dataset, train a model on it, then evaluate it on the test split")
     p.add_argument("model")
-    p.add_argument("--dataset", help="dataset id (defaults to the latest train prepare)")
+    p.add_argument("--dataset", help="train on this prepared dataset instead of preparing one")
     p.add_argument("--option", action="append", default=[], metavar="KEY=VALUE",
                    help="override a train.options value for this run, e.g. epochs=3 or device=1 (recorded in run.json)")
     p.add_argument("--resume", metavar="RUN", help="continue an interrupted or failed run from its last checkpoint")
@@ -116,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     p = commands.add_parser("eval", help="evaluate a completed run on the test split of a dataset")
     p.add_argument("model")
     p.add_argument("run")
-    p.add_argument("--dataset", help="dataset id (defaults to the latest train prepare)")
+    p.add_argument("--dataset", help="dataset id (defaults to the latest prepared, by train prepare or run)")
     p.add_argument("--errors", action="store_true",
                    help="classify: list the misclassified crops instead (most confident first)")
     p.add_argument("--split", choices=("test", "val", "train"), action="append",
@@ -130,7 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     p = commands.add_parser("publish", help="gate, export and verify a run, then write it to models/<id>/")
     p.add_argument("model")
     p.add_argument("run", nargs="?", help="the run to publish; without it, list the completed runs")
-    p.add_argument("--dataset", help="dataset whose test split the gate uses (defaults to the latest train prepare)")
+    p.add_argument("--dataset", help="dataset whose test split the gate uses "
+                                     "(defaults to the latest prepared, by train prepare or run)")
     p.add_argument("--accept-metrics", action="store_true",
                    help="publish although there is nothing to compare the metrics with (no evaluate.gate.min "
                         "and no comparable published model); failed gates are never accepted")
@@ -198,17 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             count = sources.accept(root, args.source, args.images, args.all, args.reason)
             print(f"marked {count} annotations of {args.source} as checked")
         elif args.command == "prepare":
-            model = spec.load(repo, args.model)
-            # 先于读取标注：prepare 因标注问题失败时，改正它们所需的属性文件已经是最新的。
-            _print(labeling.refresh(repo, root, model["data"]["sources"]))
-            for name, count in review.pending(root, model["data"]["sources"]):
-                print(f"  warning: review {name} has {count} edited annotations that are not applied: "
-                      f"train review apply {name}")
-            result = dataset.prepare(repo, root, model)
-            print("\n".join(dataset.report(result, model)))
-            for source in model["data"]["sources"]:
-                for line in prelabel.review(root, model, source):
-                    print(line)
+            _prepare(repo, root, spec.load(repo, args.model))
         elif args.command == "prelabel" and spec.load(repo, args.model).get("cascade"):
             model = spec.load(repo, args.model)
             if args.class_:
@@ -259,15 +265,23 @@ def main(argv: list[str] | None = None) -> int:
                           f"train prelabel {child} --source {args.source}")
         elif args.command == "run":
             model = spec.load(repo, args.model)
-            lock.check(repo, root, model)
             if args.resume:
                 if args.dataset or args.option:
                     raise TrainError("--resume continues with the run's own dataset and options; "
                                      "drop --dataset and --option")
+                lock.check(repo, root, model)
                 run = args.resume
                 runs.resume(root, model, run)
             else:
-                run = runs.start(repo, root, model, args.dataset, _options(args.option), sys.argv[1:])
+                options = _options(args.option)
+                if args.dataset:
+                    lock.check(repo, root, model)
+                    dataset_id = args.dataset
+                else:
+                    # 数据集按内容命名：标注没变时复用同一个，所以每次训练前准备只花读取标注的时间，
+                    # 又不会在勾选了新图片后悄悄用旧的数据集训练。
+                    dataset_id = _prepare(repo, root, model)
+                run = runs.start(repo, root, model, dataset_id, options, sys.argv[1:])
             print(f"run {run} completed: {paths.run_dir(root, model['id'], run)}")
             if runs.test_split_empty(root, model, run):
                 print("  warning: the test split is empty, so the run is not evaluated "

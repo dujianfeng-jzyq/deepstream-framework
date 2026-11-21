@@ -29,8 +29,6 @@ from .errors import TrainError
 
 CLASSES_SUFFIX = ".classes.txt"
 ATTRIBUTES_SUFFIX = ".attributes.json"
-# 旧版按来源生成的文件：刷新时删除（labels.txt 的类别先记入 source.json）。
-LEGACY = ("labels.txt", "attributes.json")
 WIDGETS = "__widget_types__"
 # 取值不多时用单选按钮（一眼看全、一次点击），多了用下拉框（X-AnyLabeling 的默认控件）。
 MAX_RADIO = 6
@@ -87,19 +85,8 @@ def owners(models: dict[str, dict], source: str) -> list[str]:
     return sorted(found)
 
 
-def _migrate(directory: Path) -> None:
-    """旧版来源：类别只在 labels.txt 中时先记入 source.json，再删除按来源生成的旧文件。"""
-    record = sources.read_record(directory)
-    if record.get("classes") is None:
-        record["classes"] = sources.class_list(directory, record)
-        paths.write_json(directory / paths.SOURCE_RECORD, record)
-    for name in LEGACY:
-        (directory / name).unlink(missing_ok=True)
-
-
 def generate(repo: Path, root: Path, source: str) -> Result:
     directory = paths.source_dir(root, source)
-    _migrate(directory)
     record = sources.read_record(directory)
     models, skipped = _specs(repo)
     result = Result(source, skipped=skipped)

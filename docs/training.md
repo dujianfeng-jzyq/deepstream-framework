@@ -30,11 +30,10 @@
 | 3 | `train update <模型> source add\|remove <来源>`，`add\|rename\|retire …` | 改模型的来源与类别（二级模型的类别是属性值），连同来源中的标注；重新生成标注工具文件 `<模型>.classes.txt`、`<模型>.attributes.json` |
 | 4 | `train prelabel <模型> --source <来源>`（可选） | 用已有模型（发布的或某次 run）给未标注的图片写未勾选的标注；二级模型在父模型之后运行，在这些框上填它的属性 |
 | 5 | X-AnyLabeling | 标注或修正预标注（框与属性），标完一张勾选一张 |
-| 6 | `train prepare <模型>` | 只收已勾选的图片，生成数据集 |
-| 7 | `train run <模型>` | 训练，测试集上评估 |
-| 8 | `train publish <模型> <run>` | 门槛 → 导出 → 验证 → 写入 `models/<模型>/` |
+| 6 | `train run <模型>` | 先准备数据集（只收已勾选的图片），再训练，测试集上评估 |
+| 7 | `train publish <模型> <run>` | 门槛 → 导出 → 验证 → 写入 `models/<模型>/` |
 
-有新数据时做 2–8（向模型已有的来源继续导入时没有 3）；修改类别或属性时做 3–8。二级模型在父模型之后训练与发布。
+有新数据时做 2–7（向模型已有的来源继续导入时没有 3）；修改类别或属性时做 3–7。`train prepare <模型>` 单独准备数据集、不训练：不需要 GPU，用来在长时间训练之前看清哪些图片会进入、改正标注问题。二级模型在父模型之后训练与发布。
 `train accept`（批量勾选旧标注）、`train eval --errors` 与 `train review`（找出并改正标错的样本）是辅助命令。
 
 **从零开始训练第一版：**
@@ -44,12 +43,11 @@ train init road-assets --task detect          生成 models/road-assets/model.ya
 train import batch-01 ~/raw/2026-11/          图片去重、视频抽帧，写入 sources/batch-01/
 train update road-assets source add batch-01  来源从此为 road-assets 的类别标注，生成 road-assets.classes.txt
 （在 X-AnyLabeling 中打开 sources/batch-01/ 手工标注，可用工具内置的通用模型辅助，标完一张勾选一张）
-train prepare road-assets                     只收已检查的图片，生成数据集
-train run road-assets                         训练 v0，测试集上评估
+train run road-assets                         只收已检查的图片生成数据集，训练 v0，测试集上评估
 train import batch-02 … && train update road-assets source add batch-02
 train prelabel road-assets --source batch-02 --run <v0 的 run>
                                               用尚未发布的 v0 预标注下一批，人只需修正并勾选
-（修正 batch-02 → prepare → run，迭代到指标满意）
+（修正 batch-02 → run，迭代到指标满意）
 train publish road-assets <run>               门槛 → 导出 → 验证 → 写入 models/road-assets/
 git commit && scripts/build-release.sh        提交、打包（模型校验），现场 ./install.sh
 ```
@@ -64,9 +62,9 @@ train prelabel road-assets --source batch-07   默认用当前发布的模型，
 train prelabel sign-occlusion --source batch-07
                                               在这些框上填“遮挡”（也可以用 --run 指定未发布的 run）
 （在 X-AnyLabeling 中载入 road-assets.classes.txt 与 road-assets.attributes.json，一次修正框与属性并勾选）
-train prepare road-assets && train run road-assets
+train run road-assets
 train publish road-assets <run>                与当前模型在同一测试集上比较，退化则拒绝
-train prepare sign-occlusion && train run sign-occlusion && train publish sign-occlusion <run>
+train run sign-occlusion && train publish sign-occlusion <run>
 ```
 
 ## 3. 模型目录（仓库内）
@@ -127,7 +125,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ### 5.2 标注：X-AnyLabeling
 
-在 X-AnyLabeling 中打开 `sources/<来源>/`，先导入 `<模型>.classes.txt` 作为预设类别；要标形状属性（二级模型的标签，§12）时载入 `<模型>.attributes.json`：Image Classifier（Ctrl+3）的 MultiTask 中对象选择框旁的上传按钮。两个文件按**检测模型**生成，每个检测模型一对：`data.sources` 中有这个来源的检测模型，以及 `data.sources` 中有它的二级模型的父模型。二级模型没有自己的文件：它的类别是父模型框上的属性值，它声明的属性合在父模型的属性文件中。X-AnyLabeling 同一时间只载入一个属性文件，文件中没有的属性在工具中看不到、可能在保存时被覆盖，所以不按二级模型分文件：载入父模型的一对文件，一次看全全部属性。文件由工具生成、不手写，也没有单独的命令：`train update`、`train import`、`train prelabel` 与 `train prepare`（在读取标注之前，所以 prepare 因标注问题失败时它已是最新）顺带重新生成，输出中给出位置；不再有模型使用的文件随之删除，旧版按来源生成的 `labels.txt` 与 `attributes.json` 也在这时删除（`labels.txt` 的类别先记入 `source.json`）。属性文件的内容：二级模型声明的属性（`data.from_parent.attribute`）出现在它的 `cascade.classes` 上，取值为 `classes` 加 `ignore_classes`，只计入 `data.sources` 中有这个来源的二级模型——所以把来源加入二级模型之后，标注之前就有全部取值；标注中已有的、父模型类别框上的属性全部保留；同一来源中同名属性的取值取各类别上的并集，模型没有声明的取值按字符排序，重新生成时顺序不变。标注中有模型不接受的取值时给出警告（`prepare` 会拒绝它们）。暂时不成立的规格（例如父类别改名后 `cascade.classes` 还没改写）不使命令失败，只是这次不计入它，并说明原因。标注保存为图像旁的同名 JSON（LabelMe 兼容格式），以 4.0.6 实际保存的文件为准（样例见 `framework/tests/python/data/x-anylabeling-4.0.6/`）：
+在 X-AnyLabeling 中打开 `sources/<来源>/`，先导入 `<模型>.classes.txt` 作为预设类别；要标形状属性（二级模型的标签，§12）时载入 `<模型>.attributes.json`：Image Classifier（Ctrl+3）的 MultiTask 中对象选择框旁的上传按钮。两个文件按**检测模型**生成，每个检测模型一对：`data.sources` 中有这个来源的检测模型，以及 `data.sources` 中有它的二级模型的父模型。二级模型没有自己的文件：它的类别是父模型框上的属性值，它声明的属性合在父模型的属性文件中。X-AnyLabeling 同一时间只载入一个属性文件，文件中没有的属性在工具中看不到、可能在保存时被覆盖，所以不按二级模型分文件：载入父模型的一对文件，一次看全全部属性。文件由工具生成、不手写，也没有单独的命令：`train update`、`train import`、`train prelabel` 与 `train prepare`（在读取标注之前，所以 prepare 因标注问题失败时它已是最新）顺带重新生成，输出中给出位置；不再有模型使用的文件随之删除。属性文件的内容：二级模型声明的属性（`data.from_parent.attribute`）出现在它的 `cascade.classes` 上，取值为 `classes` 加 `ignore_classes`，只计入 `data.sources` 中有这个来源的二级模型——所以把来源加入二级模型之后，标注之前就有全部取值；标注中已有的、父模型类别框上的属性全部保留；同一来源中同名属性的取值取各类别上的并集，模型没有声明的取值按字符排序，重新生成时顺序不变。标注中有模型不接受的取值时给出警告（`prepare` 会拒绝它们）。暂时不成立的规格（例如父类别改名后 `cascade.classes` 还没改写）不使命令失败，只是这次不计入它，并说明原因。标注保存为图像旁的同名 JSON（LabelMe 兼容格式），以 4.0.6 实际保存的文件为准（样例见 `framework/tests/python/data/x-anylabeling-4.0.6/`）：
 
 - 顶层：`imagePath`、`imageWidth`、`imageHeight`、`shapes`、图像级 `flags`、`checked`（工具中的“已检查”状态）；`imageData` 为空（图像不嵌入 JSON，非空时忽略）。
 - 每个形状：`label`、`points`、`shape_type`、`difficult`、`attributes`（形状属性，例如 `{"遮挡": "否", "破损": "否"}`），以及读取时忽略的 `group_id`、`description`、`flags`、`kie_linking`。
@@ -157,7 +155,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 没有可用于预标注的自有模型时：
 
 1. 先手工标注一小批，覆盖各类别与主要场景（经验上每类至少几十个实例）。X-AnyLabeling 内置的通用模型可以在工具里直接辅助：按类别名做文字提示的开放词汇检测（如 YOLO-World、Grounding DINO），用 SAM 点选生成框或多边形。它们在工具内运行，不经过本框架。
-2. `train run` 不要求模型已经发布：训练出 v0 后，用 `train prelabel --run <run>` 预标注下一批，修正、`prepare`、再训练。这样每一轮人只修正而不重画，直到指标满意才发布。
+2. `train run` 不要求模型已经发布：训练出 v0 后，用 `train prelabel --run <run>` 预标注下一批，修正、再训练。这样每一轮人只修正而不重画，直到指标满意才发布。
 3. 首次 `publish` 没有可对照的旧模型：只检查 `evaluate.gate.min`。`min` 为空时 `publish` 要求显式的 `--accept-metrics`，避免第一版在没有任何门槛的情况下发布。
 
 `train init <id> --task <任务>` 生成该任务的 `model.yaml` 骨架（含后端默认的训练配方），填好类别后即可导入素材。
@@ -176,7 +174,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ## 6. 准备数据集：`train prepare <id>`
 
-1. 检查类别依赖（§15.1）：模型的类别必须都在每个来源的类别中；来源的类别必须与 `sources.lock.json` 的记录相同，不同时打印差异并拒绝，记录中没有的来源按当前类别补记并提示。`run` 与 `publish` 做同样的检查（不补记）。
+1. 检查类别依赖（§15.1）：模型的类别必须都在每个来源的类别中；来源的类别必须与 `sources.lock.json` 的记录相同，不同时打印差异并拒绝，记录中没有的来源按当前类别补记并提示。`train run` 训练之前就是做这一步；`run --dataset`、`--resume` 与 `publish` 只做类别依赖的检查（不补记）。
 2. 读取 `model.yaml` 的 `data.sources`，按任务解读每个来源中已检查的标注（§5.2），检查框是否越界、多边形是否有效、图像能否解码。
 3. **划分按采集组的哈希决定**：组标识与 `data.split.seed` 的摘要落在哪个区间，就进入训练、验证或测试，与其他样本无关。加入新来源时，已有的组划分不变；测试集只会增加新的组，旧模型从未训练过的测试样本一直留在测试集中，`publish` 的退化比较才有意义。代价是各类别在划分间的比例只能近似，`prepare` 报告每个划分的各类别实例数，测试集中缺少的类别给出警告（它的指标无法评估）。
 4. 写出 `manifest.json` 与后端视图，以 manifest 的摘要作为数据集标识。素材、标注与划分参数都不变时标识不变，直接复用已有数据集。
@@ -184,7 +182,9 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ## 7. 训练与评估
 
-`train run <id> [--dataset <标识>] [--option 键=值 …]`（默认用最近一次 prepare 的结果）：
+`train run <id> [--dataset <标识>] [--option 键=值 …]`：
+
+- 先做 `train prepare`（§6）并打印它的报告，准备失败时不训练。数据集按内容命名，标注没变时复用同一个，所以每次训练前准备只花读取标注的时间；勾选了新图片之后也不会忘了重新准备、悄悄用旧的数据集训练。`--dataset` 指定一个已准备的数据集，不再准备（例如在旧数据集上对比参数）。
 
 - 在训练镜像中调用 `train.backend` 指定的后端，`train.options` 原样透传；没有给出 `imgsz` 时按 `input` 的尺寸训练。数据集、输出位置与续训由工具决定，写在 `options` 中（`data`、`project`、`name`、`resume` 等）是规格错误。
 - `train.weights` 是起点：预训练权重的文件名（在 `pretrained/` 中查找，没有时由后端下载），`run:<run>`（某次完成的 run 的最佳权重，在已有模型上用新数据继续训练），或绝对路径。起点的 sha256 记入 `run.json`。
@@ -192,7 +192,7 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 - 类别不均衡（分类）：`train.class_weights` 给交叉熵损失按类别加权，少数类的错分代价更高。取 `balanced` 时按训练划分的样本数取反比（总数 / (类别数 × 该类样本数)），或写成 `{类别: 权重}`（没写的类别为 1）。生效的权重按类别号记入 `run.json` 的 `class_weights`，训练开始时打印。加权提高少数类的 recall、通常降低它的 precision；最佳检查点按宏平均 recall 选择。检测模型不接受这一项。不做过采样：训练时的随机增强下，加权与重复样本的效果相当，而加权不改变数据集与视图。
 - 设备属于训练机而不是模型或 run：`model.yaml` 不写 `device`，在训练机上设置环境变量 `TRAIN_DEVICE`（例如 `export TRAIN_DEVICE=1`，多卡 `0,1`，由 `scripts/train.sh` 传入容器）。训练时 `--option device=…`、`model.yaml`、`TRAIN_DEVICE` 依次取第一个，生效的值记入 `run.json`；`--resume` 沿用 run 原来的设备。评估、`--errors`、预标注与发布门槛的评估按 `--device`、`TRAIN_DEVICE`、run 训练时的设备依次取第一个（多卡取第一张）：训练时用的卡之后可能被别的任务占用，不必每条命令都写 `--device`。
 - run 标识为 `<UTC 时间>-<短摘要>`（摘要来自规格、数据集与覆盖参数）；`run.json` 记录 `model.yaml` 的摘要与副本、数据集标识、类别、源码版本（与打包相同的 `-dirty` 规则）、后端与依赖版本、生效参数、命令与状态（`running`、`completed`、`failed`、`interrupted`）。
-- 数据集必须按当前规格的类别准备：类别改动后先重新 `prepare`。验证划分为空时拒绝训练。
+- `--dataset` 指定的数据集必须按当前规格的类别准备。验证划分为空时拒绝训练。
 - 中断（Ctrl-C）或失败的 run 保留记录与最近检查点，`train run <id> --resume <run>` 沿用原来的数据集与参数继续。
 - 训练结束后在测试划分上评估（测试划分为空时只给出警告），写入 `eval/<数据集标识>/metrics.json`：指标由任务决定（检测：`map50_95`、`map50`、`precision`、`recall` 及每类的同名指标与测试实例数；分类：top-1、每类精确率与召回率；分割：框与掩码的 mAP）。测试划分中没有实例的类别不给指标，单独列出。`evaluate.gate` 只能引用任务定义的指标名，写错时在训练前报告。
 
@@ -204,11 +204,11 @@ ONNX 用 Git LFS 存放（`.gitattributes` 中的 `models/*/artifacts/*.onnx`）
 
 ## 8. 导出与发布：`train publish <id> <run> [--dataset <标识>] [--accept-metrics] [--device <设备>]`
 
-不给 `<run>` 时只列出可以发布的 run，不发布任何东西：完成的 run 按完成时间从新到旧，带各自在数据集（默认最近一次 prepare）测试划分上的指标与训练条件中和现在不同的部分（`--option` 覆盖参数；run 保存的 `model.yaml` 副本中 `input`、`train` 段与现在不同的键，给出 run 当时的取值；训练用的数据集不是所列数据集时给出它的标识），并标出当前发布所用的 run；还没有在该数据集上评估的 run 指标为 `-`（`train eval` 补上），中断或失败的 run 单独列出。不默认发布最近的 run：最近的往往是 `--option epochs=3` 之类的试跑，而首次发布时门槛可能只有 `--accept-metrics`，选哪个 run 是人的判断。
+不给 `<run>` 时只列出可以发布的 run，不发布任何东西：完成的 run 按完成时间从新到旧，带各自在数据集（默认最近一次准备的，`prepare` 或 `run`）测试划分上的指标与训练条件中和现在不同的部分（`--option` 覆盖参数；run 保存的 `model.yaml` 副本中 `input`、`train` 段与现在不同的键，给出 run 当时的取值；训练用的数据集不是所列数据集时给出它的标识），并标出当前发布所用的 run；还没有在该数据集上评估的 run 指标为 `-`（`train eval` 补上），中断或失败的 run 单独列出。不默认发布最近的 run：最近的往往是 `--option epochs=3` 之类的试跑，而首次发布时门槛可能只有 `--accept-metrics`，选哪个 run 是人的判断。
 
 顺序不可调换：
 
-1. **门槛**（在数据集的测试划分上，默认最近一次 prepare）：`evaluate.gate.min` 中的每项指标达到下限（按任务定义的比较方向）；`regression` 把 `release.json` 中的当前模型在同一测试划分上评估，新模型的指定指标下降不超过 `max_drop`。run 在该数据集上已有评估结果时直接使用（权重与数据集都不可变），`--device` 只用于需要新做的评估。
+1. **门槛**（在数据集的测试划分上，默认最近一次准备的，`prepare` 或 `run`）：`evaluate.gate.min` 中的每项指标达到下限（按任务定义的比较方向）；`regression` 把 `release.json` 中的当前模型在同一测试划分上评估，新模型的指定指标下降不超过 `max_drop`。run 在该数据集上已有评估结果时直接使用（权重与数据集都不可变），`--device` 只用于需要新做的评估。
    - 没有当前模型（首次发布，§5.3）时跳过退化比较；此时 `min` 为空就没有任何门槛，要求显式的 `--accept-metrics`。
    - **测试实例少时按一个实例的影响放宽。** 一个测试实例能使指标变化多少由任务给出：各类平均的指标（检测的全部指标、二级分类的 `recall` 与 `precision`）是 1/(有测试实例的类别数 × 最稀有类别的实例数)，二级分类的 `accuracy` 是 1/裁剪总数。小于它的下降不是退化的证据（只是这一个实例），门槛允许 max(`max_drop`, 它)，在输出与 `release.json` 的 `resolution`、`allowed` 中写明是哪个类别、多少实例。例如测试划分中“遮挡=是”只有 22 个时，一个裁剪使宏平均 recall 变化 0.0227，0.01 的 `max_drop` 无从判断；要更严的门槛，就给测试划分增加这个类别的实例。
    - 当前模型无法重新评估（它的 run 不在这台训练机上、权重的 sha256 不符、类别已改变）时同样要求 `--accept-metrics`，而不是悄悄跳过比较。
@@ -336,7 +336,7 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 - **模型的类别是来源类别的子集。** 模型的每个类别必须在它依赖的每个来源的类别中，否则这些来源的图片无法为它作证，`prepare` 拒绝。来源中有、模型不用的类别在读取时忽略（不再需要逐个写进 `data.ignore_classes`）；两者都没有的标签照常报错，拼写错误不会悄悄变成新类别。手改 `model.yaml` 新增或改名类别时因此无法 `prepare`，必须经 `train update`；手工删除一个类别等同于 `retire`（§15.3）。
 - **二级模型** 的 `cascade.classes` 按名称引用父类别（§12），打包时按父模型的类别换算编号，不另设锁文件；父模型改名或删除了被引用的类别时打包失败。
 - **来源的类别从哪里来。** 导入不涉及模型，新来源的类别为空；`train update <模型> source add` 记下模型的类别，同时写入本模型的锁记录，之后只有 `train update` 改写来源的类别。
-- **迁移。** `source.json` 还没有 `classes` 的来源以旧版导入写出的 `labels.txt` 为类别，重新生成标注工具文件时记入 `source.json`、删除 `labels.txt`（§5.2）。手工加进 `data.sources`、锁文件中还没有记录的来源，`prepare` 按来源当前的类别补记并提示，相当于首次确认；没有 `models.lock.json` 的服务不检查。仓库现有的数据因此不需要任何操作。
+- **首次记录。** 手工加进 `data.sources`、锁文件中还没有记录的来源，`prepare` 按来源当前的类别补记并提示，相当于首次确认；没有 `models.lock.json` 的服务不检查。
 
 ### 15.2 撤销与复核名单
 
@@ -384,12 +384,11 @@ INT8：`prepare` 可从训练划分抽取校准图像，发布时生成校准缓
 ```text
 train update road-assets add 防撞墩           来源与模型追加类别，撤销已检查的图片
 （在已有来源中挑几十张含防撞墩的图，补框后勾选；可用 X-AnyLabeling 内置的开放词汇模型辅助寻找）
-train prepare road-assets && train run road-assets
-                                              v0：只有重新勾选的图片进入数据集
+train run road-assets                         v0：只有重新勾选的图片进入数据集
 train prelabel road-assets --source batch-01 --class 防撞墩 --run <v0>
 （复核、勾选；数据多了可以再训练一版，用更好的模型预标注剩下的来源）
 ……每个来源的名单都处理完
-train prepare road-assets && train run road-assets && train publish road-assets <run>
+train run road-assets && train publish road-assets <run>
 （修复其他模型的依赖：train update <其他模型> --confirm；dsf-deploy.py lock-models <服务>）
 ```
 
@@ -406,7 +405,7 @@ train prepare road-assets && train run road-assets && train publish road-assets 
 
 ### 15.7 实现顺序
 
-1. `sources.lock.json` 与迁移；`prepare`、`run`、`publish` 的依赖检查、差异报告与 `--confirm`；读取时忽略来源中本模型不用的类别。**已实现**
+1. `sources.lock.json`；`prepare`、`run`、`publish` 的依赖检查、差异报告与 `--confirm`；读取时忽略来源中本模型不用的类别。**已实现**
 2. `rename`、`retire`（含 `--into`）及其自动修复与冲突检查，包括二级模型的 `cascade.classes`。**已实现**；类别号的变化由打包时的级联校验发现（§12）。
 3. `add`：撤销与复核名单、`--from`、`--skip-source`；`prepare` 的复核进度；`accept` 的限制。**已实现**
 4. `prelabel --class` 与放宽的类别检查。**已实现**

@@ -190,7 +190,7 @@ class ImportTest(TrainingTestCase):
         self.assertEqual(info["origin"], str(self.raw / "cam1/20260808_102827_00000001.jpg"))
         imported = xanylabeling.read(self.source() / "20260808_102827_00000001.json")
         self.assertEqual((imported.image, imported.checked), ("20260808_102827_00000001.jpg", True))
-        self.assertFalse((self.source() / "labels.txt").exists())   # 导入不涉及模型，不写类别文件
+        self.assertEqual(list(self.source().glob("*.txt")), [])   # 导入不涉及模型，不写类别文件
         # 同一张图不能进入另一个来源（可能一边训练一边测试）
         again = self.import_(self.raw / "cam1", source="batch-02")
         self.assertEqual((again.report["images imported"], again.report["duplicates skipped"]), (0, 2))
@@ -467,29 +467,13 @@ class ClassDependencyTest(TrainingTestCase):
         sources.Importer(self.root, "batch-01").run([self.tmp / "more"])
         self.assertEqual(sources.read_record(self.source())["classes"], CLASSES)  # 导入不改来源的类别
 
-    def test_sources_without_recorded_classes_use_labels_txt(self):
-        record = sources.read_record(self.source())
-        del record["classes"]  # 实现类别依赖之前导入的来源
-        (self.source() / paths.SOURCE_LABELS).write_text("\n".join(CLASSES + ["护栏"]) + "\n", encoding="utf-8")
-        (self.source() / "attributes.json").write_text("{}", encoding="utf-8")   # 旧版按来源生成的属性文件
-        paths.write_json(self.source() / paths.SOURCE_RECORD, record)
-        self.assertEqual(sources.class_list(self.source(), record), CLASSES + ["护栏"])
-        self.prepare()
-        self.assertEqual(self.recorded()["sources"]["batch-01"], CLASSES + ["护栏"])
-        # 重新生成标注工具文件时迁移：类别记入 source.json，旧文件删除，换成按模型的一对。
-        labeling.refresh(self.repo, self.root, ["batch-01"])
-        self.assertEqual(sources.read_record(self.source())["classes"], CLASSES + ["护栏"])
-        self.assertEqual(sorted(p.name for p in self.source().glob("*.txt")), ["m.classes.txt"])
-        self.assertFalse((self.source() / "attributes.json").exists())
-        self.assertTrue((self.source() / "m.attributes.json").is_file())
-
     def test_sources_added_to_or_removed_from_the_model(self):
-        self.prepare()
+        first = self.prepare().dataset_id
         image(self.tmp / "more/x.jpg", "white")
         annotation(self.tmp / "more/x.json", NEGATIVE, checked=True)
         self.import_(self.tmp / "more", source="batch-02")
         self.set_data(sources=["batch-01", "batch-02"])
-        code, _, err = self.train("run", "m")
+        code, _, err = self.train("run", "m", "--dataset", first)   # 不经 prepare 的 run 不补记
         self.assertIn("does not record the classes of batch-02: run train prepare m first", err)
         self.assertEqual(self.prepare().notes, [f"recorded the classes of source batch-02 in "
                                                 f"{lock.path(self.repo, 'm')} (commit it with the model)"])
@@ -822,6 +806,24 @@ class RunTestCase(TrainingTestCase):
 
 
 class RunTest(RunTestCase):
+    def test_a_run_prepares_the_dataset_from_the_checked_annotations_first(self):
+        code, out, err = self.train("run", "m")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"dataset {self.dataset_id} (reused)", out)   # 标注没变：同一个数据集
+        image(self.tmp / "late/late.jpg", "white")                   # 之后又勾选了一张
+        annotation(self.tmp / "late/late.json", LABELED, checked=True)
+        self.import_(self.tmp / "late")
+        code, out, err = self.train("run", "m")
+        self.assertEqual(code, 0, err)
+        [newer] = [r for r in (self.root / "runs/m").iterdir() if self.record(r.name)["dataset"] != self.dataset_id]
+        self.assertIn(f"dataset {self.record(newer.name)['dataset']} (created)", out)
+        # 指定数据集时不准备（--option 使 run 标识与第一次不同：同一秒内同样的输入得到同一个标识）
+        code, out, err = self.train("run", "m", "--dataset", self.dataset_id, "--option", "epochs=1")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("dataset ", out.split("run ")[0])
+        self.assertEqual(sorted(self.record(r.name)["dataset"] for r in (self.root / "runs/m").iterdir()).count(
+            self.dataset_id), 2)
+
     def test_a_run_is_recorded_and_evaluated_on_the_test_split(self):
         code, out, err = self.train("run", "m", "--option", "epochs=3")
         self.assertEqual(code, 0, err)
@@ -963,7 +965,10 @@ class RunTest(RunTestCase):
     def test_the_dataset_must_match_the_classes(self):
         path = spec.path(self.repo, "m")
         path.write_text(path.read_text().replace("  - 防撞桶\n", "  - 防撞桶\n  - 新类别\n"))
-        code, _, err = self.train("run", "m")
+        code, _, err = self.train("run", "m")          # 先 prepare：来源中没有这个类别
+        self.assertIn("source batch-01 has no class 新类别", err)
+        self.assertEqual(list((self.root / "runs").glob("m/*")), [])
+        code, _, err = self.train("run", "m", "--dataset", self.dataset_id)
         self.assertIn("prepared with other classes", err)
         code, _, err = self.train("run", "m", "--dataset", "nope")
         self.assertIn("dataset 'nope' of m does not exist", err)

@@ -48,15 +48,8 @@ def read_record(directory: Path) -> dict:
 
 
 def class_list(directory: Path, record: dict) -> list[str]:
-    """来源的类别列表。记录还没有 classes 时取旧版导入写出的 labels.txt（迁移：labeling.refresh 把它记入
-    source.json 后删除）。"""
+    """来源为哪些类别标注过（source.json 的 classes）。"""
     value = record.get("classes")
-    if value is None:
-        labels = directory / paths.SOURCE_LABELS
-        if not labels.is_file():
-            raise TrainError(f"{directory}: neither {paths.SOURCE_RECORD} nor {paths.SOURCE_LABELS} gives the "
-                             "classes of the source")
-        value = [line.strip() for line in labels.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not isinstance(value, list) or not all(isinstance(c, str) and c for c in value) or \
             len(set(value)) != len(value):
         raise TrainError(f"{directory}: the classes of the source must be distinct names")
